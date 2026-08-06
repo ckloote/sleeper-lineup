@@ -116,6 +116,14 @@ CREATE TABLE IF NOT EXISTS box_scores (
     opponent        TEXT,
     played          INTEGER NOT NULL,
 
+    -- Sleeper's stat feed carries TEAM AGGREGATE rows alongside players
+    -- ("TEAM_OKC": 125 pts, 38 reb, 29 ast). They are not players, never appear
+    -- in a lineup, and carry no dd/td — but a naive double-double derivation
+    -- reads a team line as a triple-double every night. Kept because team
+    -- totals are useful context for the projection layer (pace, usage share),
+    -- flagged so nothing scores them.
+    is_team_row     INTEGER,
+
     seconds_played  REAL,
     pts INTEGER, ast INTEGER, oreb INTEGER, dreb INTEGER, reb INTEGER,
     stl INTEGER, blk INTEGER, tov INTEGER,

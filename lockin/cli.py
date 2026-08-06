@@ -12,6 +12,7 @@ import sys
 import click
 
 from lockin import reconcile as reconcile_mod
+from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config
 from lockin.ingest import nba as nba_ingest
 from lockin.ingest import sleeper as sleeper_ingest
@@ -73,6 +74,9 @@ def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) ->
             click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played)")
         click.echo(f"  box scores  {total_rows} rows, {total_played} played")
 
+        player_rows, team_rows = sleeper_ingest.refresh_row_kinds(conn)
+        click.echo(f"  row kinds   {player_rows} player, {team_rows} team-aggregate")
+
         occurred, postponed = sleeper_ingest.refresh_game_occurrence(conn)
         click.echo(f"  fixtures    {occurred} played, {postponed} postponed")
 
@@ -102,6 +106,21 @@ def reconcile(as_json: bool) -> None:
     with session(cfg.db_path) as conn:
         checks = reconcile_mod.run(conn, cfg.season)
 
+    _render(checks, "Phase 0 reconciliation", as_json)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+def verify(as_json: bool) -> None:
+    """Prove the scoring engine against the recorded season. Nonzero on failure."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        checks = verify_mod.run(conn, cfg.season)
+
+    _render(checks, "Phase 1 scoring verification", as_json)
+
+
+def _render(checks, title: str, as_json: bool) -> None:
     if as_json:
         click.echo(
             json.dumps(
@@ -118,7 +137,7 @@ def reconcile(as_json: bool) -> None:
             )
         )
     else:
-        click.echo("Phase 0 reconciliation")
+        click.echo(title)
         click.echo("=" * 60)
         for c in checks:
             click.echo(f"[{'PASS' if c.passed else 'FAIL'}] {c.name}")

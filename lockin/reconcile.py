@@ -176,6 +176,27 @@ def check_exhibitions(conn: sqlite3.Connection) -> Check:
     )
 
 
+def check_team_rows(conn: sqlite3.Connection) -> Check:
+    """Rows classified as team aggregates must actually look like teams.
+
+    `is_team_row` is set by "the id does not resolve in `players`", which is
+    self-maintaining but would also silently reclassify a real player who went
+    missing from the player table. Asserting that every such row carries the
+    TEAM_ prefix turns that failure mode into a visible one.
+    """
+    strays = conn.execute(
+        "SELECT DISTINCT sleeper_id FROM box_scores"
+        " WHERE is_team_row = 1 AND sleeper_id NOT LIKE 'TEAM_%'"
+    ).fetchall()
+    n_team = conn.execute("SELECT COUNT(*) c FROM box_scores WHERE is_team_row = 1").fetchone()["c"]
+    return Check(
+        name="team-aggregate rows are identified and excluded from scoring",
+        passed=not strays,
+        detail=f"{n_team} team-aggregate rows, {len(strays)} unrecognised",
+        offenders=[r["sleeper_id"] for r in strays[:20]],
+    )
+
+
 def check_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
     """Advisory only — no Phase 0-2 gate depends on tipoff times."""
     total = conn.execute(
@@ -200,5 +221,6 @@ def run(conn: sqlite3.Connection, season: str) -> list[Check]:
         check_game_links(conn),
         check_postponements(conn),
         check_exhibitions(conn),
+        check_team_rows(conn),
         check_tipoffs(conn, season),
     ]

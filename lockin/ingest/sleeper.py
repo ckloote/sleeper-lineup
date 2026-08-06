@@ -317,6 +317,29 @@ def ingest_week_stats(
     return n, played_n
 
 
+def refresh_row_kinds(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Mark team-aggregate rows in box_scores.
+
+    Sleeper's feed mixes team totals in with players ("TEAM_OKC": 125 pts, 38
+    reb, 29 ast). Scored naively they read as a triple-double every night.
+
+    A row is a player row iff its id resolves in `players`. That definition is
+    self-maintaining, unlike a "TEAM_" prefix check — and on the 2025-26 season
+    the two agree exactly, which `reconcile.check_team_rows` asserts so a real
+    player going missing from `players` surfaces instead of being silently
+    reclassified as a team.
+
+    Returns (player_rows, team_rows).
+    """
+    conn.execute(
+        "UPDATE box_scores SET is_team_row ="
+        " CASE WHEN sleeper_id IN (SELECT sleeper_id FROM players) THEN 0 ELSE 1 END"
+    )
+    team = conn.execute("SELECT COUNT(*) c FROM box_scores WHERE is_team_row = 1").fetchone()["c"]
+    player = conn.execute("SELECT COUNT(*) c FROM box_scores WHERE is_team_row = 0").fetchone()["c"]
+    return player, team
+
+
 def refresh_game_occurrence(conn: sqlite3.Connection) -> tuple[int, int]:
     """Mark which fixtures actually happened.
 

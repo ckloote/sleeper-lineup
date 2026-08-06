@@ -199,6 +199,39 @@ def test_the_nba_cup_final_counts_and_is_not_an_exhibition(conn):
     assert row["nba_game_id"] is not None, "Cup final should be linked to the NBA schedule"
 
 
+def test_team_aggregate_rows_are_flagged_and_absent_from_the_player_table(conn):
+    """Sleeper mixes team totals into the stat feed alongside players.
+
+    "TEAM_OKC" posts 125 pts / 38 reb / 29 ast, which a naive double-double
+    derivation reads as a triple-double every single night. They never appear
+    in a lineup, so nothing scores them — but they must be excluded from any
+    validation that compares derived bonuses against Sleeper's flags.
+    """
+    n_team = conn.execute("SELECT COUNT(*) c FROM box_scores WHERE is_team_row = 1").fetchone()["c"]
+    assert n_team > 0, "expected team-aggregate rows in the feed"
+
+    # The flag is set by "not in players"; assert that agrees with the prefix,
+    # so a real player missing from the table cannot be silently reclassified.
+    strays = conn.execute(
+        "SELECT DISTINCT sleeper_id FROM box_scores"
+        " WHERE is_team_row = 1 AND sleeper_id NOT LIKE 'TEAM_%'"
+    ).fetchall()
+    assert not strays, f"unrecognised team rows: {[r['sleeper_id'] for r in strays]}"
+
+    missed = conn.execute(
+        "SELECT DISTINCT sleeper_id FROM box_scores"
+        " WHERE is_team_row = 0 AND sleeper_id LIKE 'TEAM_%'"
+    ).fetchall()
+    assert not missed, "a TEAM_ row was classified as a player"
+
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) c FROM weekly_matchups WHERE sleeper_id LIKE 'TEAM_%'"
+        ).fetchone()["c"]
+        == 0
+    )
+
+
 def test_postponed_fixtures_are_recorded_as_not_occurred(conn):
     """A postponed fixture must not read as a DNP.
 

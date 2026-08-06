@@ -1,7 +1,7 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — committed scope is **Phases 0-2**. Phase 0 complete (see §9).
+**Status:** Approved — committed scope is **Phases 0-2**. Phases 0-1 complete (§9, §10).
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -245,9 +245,16 @@ recomputing `dd`/`td` from components on every real game in the season and asser
 reproduces Sleeper's flags. A disagreement here would silently corrupt every projection
 downstream, and it is the kind of thing that only shows up at the 10/10 boundary.
 
+**Amended after Phase 0:** the week-by-week reconciliation must exclude the All-Star Game.
+It carries real stat lines but does not score (§9), so week 17 fails if it is treated as
+a countable game. The exclusion is already recorded in the data as
+`game_links.is_exhibition`, so this is a filter on the reconciliation query, not new
+logic — but it has to be deliberate, because the symptom would be a handful of week-17
+mismatches that look like a scoring bug rather than a fixture-semantics one.
+
 *Exit:* all 25 weeks reconciled, not just week 12 — every nonzero `players_points`
-reproduced to the cent; component-derived `dd`/`td` matches Sleeper's on every game;
-per-attempt economics from §2 asserted in tests.
+reproduced to the cent, with exhibition fixtures excluded; component-derived `dd`/`td`
+matches Sleeper's on every played game; per-attempt economics from §2 asserted in tests.
 
 ### Phase 2 — Retrospective lock inference
 Match counted score against each game's computed score to recover the lock index.
@@ -501,3 +508,65 @@ exception. Now guarded on `conn.in_transaction`.
   games, which is not the same set.
 - **`lockin reconcile` exists** as the Phase 0 gate runner. The plan listed only `ingest`
   and `verify` for Phases 0-2.
+
+---
+
+## 10. Phase 1 — complete
+
+All four gates closed against the full 2025-26 season.
+
+```
+[PASS] per-attempt economics match the architecture doc
+       three: 5.5/-1.0 break-even 15.4%; two: 2.5/-1.0 28.6%; ft: 2.0/-1.0 33.3%
+[PASS] component-derived dd/td matches Sleeper       26665/26665 (1919 DD, 136 TD)
+[PASS] derived and recorded scoring agree            26665/26665
+[PASS] every nonzero counted score reproduced        2647/2647
+```
+
+The architecture doc asked for week 12 reproduced exactly; this is all 25 weeks. 76 tests
+pass in under a second.
+
+### The two-path split, and why it earns its keep
+
+`score_recorded` scores a Sleeper line as given, reading `dd`/`td` and the missed-shot
+counts straight from the payload. `score_line` takes components only and derives all of
+them. The simulator will only ever have components, so a wrong derivation would corrupt
+every projection — and would do it precisely at the 10/10 boundary, where the
+double-double cliff makes the distribution's shape matter most (architecture doc §3.3).
+
+`score_recorded` deliberately derives nothing, so comparing the two on 26,665 real games
+is a genuine test rather than a tautology. They agree on all of them, including all 136
+triple-doubles.
+
+`score_line` also refuses rather than skipping when `scoring_settings` weights a stat the
+component model cannot produce. Silently ignoring it would under-score every simulated
+game by a constant, which is the kind of error that survives a long time.
+
+### One more thing the data turned up
+
+**Sleeper's stat feed contains team aggregate rows.** `TEAM_OKC` posts 125 points, 38
+rebounds and 29 assists as though it were a player — 2,469 rows across 31 ids. Every one
+reads as a triple-double under a component-derived bonus rule, which is exactly how it
+surfaced: the first run of the derivation check failed on 20 of them.
+
+They never appear in a lineup, so nothing was ever mis-scored. But they had to be
+excluded from the validation, and they would have polluted any per-player rate model
+built off `box_scores` without a filter. Kept rather than dropped, since team totals are
+real context for the Phase 3 projection layer (pace, usage share), and flagged with
+`box_scores.is_team_row`.
+
+The flag is set by "the id does not resolve in `players`", which is self-maintaining —
+but that rule would also silently reclassify a real player who went missing from the
+player table. `reconcile.check_team_rows` asserts the two signals agree, so that failure
+mode is visible rather than silent.
+
+### `core/` purity is enforced, not documented
+
+`tests/test_core_purity.py` parses every module under `lockin/core/` and fails on any
+import of `socket`, `requests`, `sqlite3`, `time`, `datetime`, `os`, `pathlib`,
+`subprocess`, or the project's own I/O packages — plus a runtime check that calling into
+core with `socket.socket` and `sqlite3.connect` stubbed to raise still works.
+
+`random` is barred as well. Simulation must take an explicit numpy `Generator`, or a
+backtest cannot be reproduced exactly, and an irreproducible backtest of a stopping policy
+is worth very little.

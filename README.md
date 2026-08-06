@@ -17,9 +17,10 @@ is executed by hand in the app.
 
 ## Status
 
-**Phase 0 complete.** Ingest, storage and reconciliation, validated against the full
-2025-26 season. Phases 1-2 (scoring engine, retrospective lock inference) are next;
-3-6 are deferred.
+**Phases 0-1 complete.** Ingest, storage and reconciliation, plus the scoring engine —
+all validated against the full 2025-26 season. Every nonzero counted score in all 25
+weeks is reproduced from box scores to the cent. Phase 2 (retrospective lock inference)
+is next; 3-6 are deferred.
 
 ## Requirements
 
@@ -106,7 +107,30 @@ Finding one exhibition fixture is the **correct** result — it's the All-Star G
 check exists so that a new kind of non-NBA fixture surfaces for a human rather than being
 silently scored.
 
-Commands arriving with later phases: `digest`, `explain`, `backtest`, `verify`.
+### `lockin verify`
+
+Proves the scoring engine against the recorded season. Exits nonzero on any mismatch.
+
+```bash
+uv run lockin verify
+uv run lockin verify --json
+```
+
+```
+[PASS] per-attempt economics match the architecture doc
+       three: made=5.5 missed=-1.0 break-even=15.4%; two: 2.5/-1.0 28.6%; ft: 2.0/-1.0 33.3%
+[PASS] component-derived dd/td matches Sleeper       26665/26665 (1919 DD, 136 TD)
+[PASS] derived and recorded scoring agree            26665/26665
+[PASS] every nonzero counted score reproduced        2647/2647
+```
+
+The middle two checks are the ones that matter for what comes later. The scoring engine
+has two paths — score a *recorded* line where Sleeper hands you `dd`/`td` precomputed,
+and score a *component* line where they must be derived at the 10/10 boundary. The
+simulator will only ever have components, so if the derivation were wrong, every
+simulated score would be wrong in a way no downstream test would reveal.
+
+Commands arriving with later phases: `digest`, `explain`, `backtest`.
 
 ## Configuration
 
@@ -126,10 +150,14 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 45 tests, <1s
+uv run pytest              # 76 tests, <1s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
+
+`lockin/core/` is pure — no network, no database, no clock, no `random`. That is enforced
+by `tests/test_core_purity.py` rather than left as a convention, because a stopping policy
+entangled with I/O cannot be replayed, and the entire backtest depends on replaying it.
 
 Tests in `tests/test_season_invariants.py` run against the real ingested database and
 skip automatically when it is absent. They pin the data semantics below, so that a change
@@ -163,6 +191,12 @@ player unplayed. An unplayed *real* game scores 0.0 for an unlocked starter; a p
 fixture is excluded and the prior game counts. Conflating them mis-scores the end of a
 week.
 
+**The stat feed contains team aggregate rows.** `TEAM_OKC` posts 125 points, 38 rebounds
+and 29 assists as if it were a player. A naive double-double derivation reads every one
+of them as a triple-double. They never appear in a lineup so nothing scores them, but any
+validation comparing derived bonuses against Sleeper's flags has to exclude them. Kept
+rather than dropped — team totals are useful context for the projection layer.
+
 **`points` sums the six starter slots only.** `players_points` is populated for bench
 players too, and a bench player's value can freeze mid-week without a lock having
 happened. Lock inference reads `starters`/`starters_points`.
@@ -182,7 +216,8 @@ unscored.
 ```
 lockin/
   config.py        league, season, db path
-  core/            pure — no network, no database, no clock (arrives in Phase 1)
+  core/            pure — no network, no database, no clock
+    scoring.py     score_line (derives bonuses) / score_recorded (as given)
   ingest/
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
@@ -190,7 +225,8 @@ lockin/
   store/
     schema.sql     the contract between ingest and every reader
     db.py          single-writer SQLite
-  reconcile.py     the Phase 0 gates
+  reconcile.py     the Phase 0 gates — ingest completeness
+  verify.py        the Phase 1 gates — scoring against the recorded season
   cli.py
 tests/
 docs/

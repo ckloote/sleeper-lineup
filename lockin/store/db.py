@@ -31,6 +31,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 # applied explicitly. Additive only — nothing here drops or retypes.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "game_links": {"occurred": "INTEGER", "is_exhibition": "INTEGER"},
+    "box_scores": {"is_team_row": "INTEGER"},
 }
 
 
