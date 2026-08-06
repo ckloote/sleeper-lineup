@@ -1,0 +1,93 @@
+"""Schema application and additive migration."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from lockin.store.db import apply_schema, connect, session
+
+
+def test_schema_is_idempotent(tmp_path):
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    apply_schema(conn)
+    apply_schema(conn)
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert {"box_scores", "weekly_matchups", "game_links", "nba_schedule"} <= tables
+
+
+def test_session_reports_the_real_error_when_no_transaction_is_open(tmp_path):
+    """An unguarded ROLLBACK would raise OperationalError and hide this."""
+    db = tmp_path / "t.db"
+    with pytest.raises(RuntimeError, match="the real problem"):
+        with session(db) as conn:
+            conn.executescript("CREATE TABLE scratch (x INTEGER)")  # implicitly commits
+            raise RuntimeError("the real problem")
+
+
+def test_matchup_id_is_nullable(tmp_path):
+    """Weeks 23-25 have teams with no matchup; a NOT NULL here would abort ingest."""
+    db = tmp_path / "t.db"
+    with session(db) as conn:
+        conn.execute(
+            "INSERT INTO weekly_matchups"
+            " (week, roster_id, matchup_id, sleeper_id, counted_points, is_starter, observed_at)"
+            " VALUES (23, 8, NULL, '1970', 0.0, 1, 'now')"
+        )
+        conn.execute(
+            "INSERT INTO weekly_matchup_teams (week, roster_id, matchup_id, points, observed_at)"
+            " VALUES (23, 8, NULL, 0.0, 'now')"
+        )
+        assert conn.execute("SELECT COUNT(*) c FROM weekly_matchups").fetchone()["c"] == 1
+
+
+def test_added_columns_are_applied_to_a_preexisting_table(tmp_path):
+    """A database created before `occurred`/`is_exhibition` existed must gain them.
+
+    CREATE TABLE IF NOT EXISTS will not add a column to a table that already
+    exists, so without the migration an older database silently lacks the
+    columns and every query referencing them fails.
+    """
+    db = tmp_path / "t.db"
+    conn = connect(db)
+    conn.execute(
+        "CREATE TABLE game_links ("
+        " sleeper_game_id TEXT PRIMARY KEY, nba_game_id TEXT,"
+        " game_date TEXT NOT NULL, team_a TEXT NOT NULL, team_b TEXT NOT NULL)"
+    )
+    conn.close()
+
+    with session(db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(game_links)")}
+    assert {"occurred", "is_exhibition"} <= cols
+
+
+def test_session_rolls_back_on_error(tmp_path):
+    db = tmp_path / "t.db"
+    try:
+        with session(db) as conn:
+            conn.execute(
+                "INSERT INTO players (sleeper_id, full_name, positions, updated_at)"
+                " VALUES ('x', 'X', '[]', 'now')"
+            )
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    with session(db) as conn:
+        assert conn.execute("SELECT COUNT(*) c FROM players").fetchone()["c"] == 0
+
+
+def test_foreign_keys_are_enforced(tmp_path):
+    db = tmp_path / "t.db"
+    with session(db) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO game_links (sleeper_game_id, nba_game_id, game_date, team_a, team_b)"
+                " VALUES ('s1', 'nonexistent', '2026-01-05', 'CHI', 'MIA')"
+            )
+        except sqlite3.IntegrityError:
+            return
+        raise AssertionError("expected a foreign key violation")

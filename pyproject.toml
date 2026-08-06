@@ -1,0 +1,39 @@
+[project]
+name = "lockin"
+version = "0.1.0"
+description = "Decision-support engine for a Sleeper NBA fantasy team in Lock-In mode"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "click>=8.4.2",
+    "nba-api>=1.11.4",
+    "numpy>=2.5.1",
+    "pandas>=3.0.5",
+    "requests>=2.34.2",
+    "scipy>=1.18.0",
+]
+
+[project.scripts]
+lockin = "lockin.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lockin"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.1",
+]

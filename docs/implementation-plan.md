@@ -1,7 +1,7 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — committed scope is **Phases 0-2**
+**Status:** Approved — committed scope is **Phases 0-2**. Phase 0 complete (see §9).
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -417,3 +417,87 @@ slot usage later, and is worth persisting rather than discarding.
   fallback free, so it gets built regardless.
 - **§7.3 — 2026-27 league.** Config resolves the league by season rather than hardcoding.
   Nothing further needed until the commissioner rolls it over.
+
+---
+
+## 9. Phase 0 — complete
+
+All gates closed against the full 2025-26 season. 45,835 box-score rows, 1,231 NBA games,
+3,295 matchup rows, 26.6 MB.
+
+```
+[PASS] all 25 fantasy weeks ingested                     25/25
+[PASS] all 25 weeks of matchups ingested                 25/25
+[PASS] every rostered player resolves                    all resolved
+[PASS] every started player-week has box-score rows      1500/1500
+[PASS] played fixtures link to NBA schedule (>=99%)      1231/1231 (100.00%)
+[PASS] postponed fixtures agree between Sleeper and NBA  3 postponed, 0 disagreeing
+[PASS] non-NBA fixtures identified and excluded          1 exhibition
+[PASS] tipoff times present (advisory)                   1231/1231
+```
+
+`uv sync --frozen` reproduces the environment; 45 tests pass in under a second.
+
+### What Phase 0 found that the plan did not anticipate
+
+Four fixture-semantics facts, none of which are visible without looking at real data, and
+each of which would have produced confidently wrong recommendations. All are now enforced
+by tests in `tests/test_season_invariants.py`.
+
+**The All-Star Game is published but does not count.** It appears in Sleeper's stat feed
+as an ordinary fixture with real stat lines (teams `STP`/`STR`, 2026-02-15) and falls at
+the *end* of fantasy week 17 — so a naive reading makes it every All-Star's final game of
+the week. Of the 15 rostered participants, not one counted it: Anthony Edwards counted
+30.0 rather than 16.5, Jalen Johnson 56.0 rather than 9.0. LeBron and Cade Cunningham
+show genuine early locks in the same week, so this is not 15 managers all locking. Left
+unflagged, the engine would think an All-Star's week ends on a low exhibition score and
+bank far too eagerly before the break.
+
+This sharpens architecture doc §3.1, which says All-Star *weeks* are played as normal
+scored weeks. True — but the All-Star *game* is not a scoring event, and the doc does not
+draw that distinction.
+
+**The NBA Cup final does count** — the opposite conclusion, reached the same way. It is
+not a regular-season game, so `LeagueGameFinder` omits it entirely, and it was the only
+game on its date, so a schedule-driven sweep never visits that date. Karl-Anthony Towns
+and Josh Hart both locked on it in week 9, which is only possible for a real scoring
+game. Now backfilled from `ScoreboardV3`, driven off Sleeper's fixture dates rather than
+the NBA's.
+
+**Postponed is not DNP.** Sleeper retains the original fixture with every player
+unplayed, which is indistinguishable from a DNP unless checked. The difference is worth
+real points: an unplayed *real* game scores 0.0 for an unlocked starter, while a
+postponed fixture is excluded and the prior game counts. Verified both directions in week
+12 — Jamal Murray counted 0.0 after scoring 61.0 because his final game was real and he
+sat; Bam Adebayo counted his last played game because his final fixture was postponed to
+2026-01-29. Three postponements in the season.
+
+**`matchup_id` is nullable.** Rosters eliminated from the playoff bracket have no matchup
+in weeks 23-24, and week 25 is unscored entirely. A `NOT NULL` column here aborts the
+ingest at week 23, which is exactly what it did.
+
+### Two bugs the gates caught
+
+Worth recording because both were silent and both would have survived a less specific
+check.
+
+*Malformed home/away.* Three games (`0022500147`, `0022500578`, `0022500602`) carry the
+same away-perspective `MATCHUP` string on *both* of their rows. Reading the away team
+from `TEAM_ABBREVIATION` let the home team's row overwrite away with itself, producing
+`DET @ DET` — which then failed to link. Both teams are now parsed from the string, with
+a self-matchup rejected outright.
+
+*Masked exceptions.* `session()` rolled back unconditionally on error, but `executescript`
+implicitly commits, so the `ROLLBACK` raised `OperationalError` and hid the original
+exception. Now guarded on `conn.in_transaction`.
+
+### Deviations from the plan as written
+
+- **§5 said `box_scores` keys on `(game_id, sleeper_id)`.** It does, but `game_links`
+  gained `occurred` and `is_exhibition` — the two fixture-semantics flags above. Neither
+  was foreseen.
+- **Tipoff ingest is scoreboard-driven, not schedule-driven.** The plan assumed
+  `LeagueGameFinder` yields the full fixture list. It yields played *regular-season*
+  games, which is not the same set.
+- **`lockin reconcile` exists** as the Phase 0 gate runner. The plan listed only `ingest`
+  and `verify` for Phases 0-2.

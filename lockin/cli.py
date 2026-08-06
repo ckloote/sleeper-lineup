@@ -1,0 +1,138 @@
+"""Command-line surface.
+
+Phase 0-2 ships only the read-only subset the gates need. `digest`, `explain`
+and `backtest` arrive with the phases that give them something to say.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import click
+
+from lockin import reconcile as reconcile_mod
+from lockin.config import ALL_STAT_WEEKS, Config
+from lockin.ingest import nba as nba_ingest
+from lockin.ingest import sleeper as sleeper_ingest
+from lockin.store.db import session
+
+
+def _parse_weeks(spec: str | None) -> list[int]:
+    if not spec:
+        return list(ALL_STAT_WEEKS)
+    out: list[int] = []
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.extend(range(int(lo), int(hi) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+@click.group()
+def main() -> None:
+    """Sleeper NBA Lock-In lineup engine."""
+
+
+@main.command()
+@click.option("--weeks", default=None, help="Week range, e.g. '1-25' or '12,13'. Default: all.")
+@click.option("--full", is_flag=True, help="Refetch the ~2.5MB player reference payload.")
+@click.option("--skip-nba", is_flag=True, help="Skip the NBA schedule ingest.")
+@click.option("--skip-tipoffs", is_flag=True, help="Skip the per-date tipoff sweep (slow).")
+def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) -> None:
+    """Refresh league state, box scores, matchups and the NBA schedule."""
+    cfg = Config.from_env()
+    week_list = _parse_weeks(weeks)
+    client = sleeper_ingest.SleeperClient()
+
+    with session(cfg.db_path) as conn:
+        click.echo(f"league {cfg.league_id} season {cfg.season} -> {cfg.db_path}")
+
+        league = sleeper_ingest.ingest_league(conn, client, cfg.league_id)
+        roster_positions = league["roster_positions"]
+        click.echo(f"  league      slots={' '.join(roster_positions[:6])}")
+
+        n = sleeper_ingest.ingest_rosters(conn, client, cfg.league_id)
+        click.echo(f"  rosters     {n} roster-player rows")
+
+        have_players = conn.execute("SELECT COUNT(*) c FROM players").fetchone()["c"]
+        if full or not have_players:
+            n = sleeper_ingest.ingest_players(conn, client)
+            click.echo(f"  players     {n} (live snapshot)")
+        else:
+            click.echo(f"  players     {have_players} cached (--full to refresh)")
+
+        total_rows = total_played = 0
+        for week in week_list:
+            rows, played = sleeper_ingest.ingest_week_stats(conn, client, cfg.season, week)
+            sleeper_ingest.ingest_matchups(conn, client, cfg.league_id, week, roster_positions)
+            total_rows += rows
+            total_played += played
+            click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played)")
+        click.echo(f"  box scores  {total_rows} rows, {total_played} played")
+
+        occurred, postponed = sleeper_ingest.refresh_game_occurrence(conn)
+        click.echo(f"  fixtures    {occurred} played, {postponed} postponed")
+
+        if not skip_nba:
+            n = nba_ingest.ingest_schedule(conn, cfg.season)
+            click.echo(f"  schedule    {n} NBA games")
+            exhibitions = nba_ingest.mark_exhibitions(conn, cfg.season)
+            click.echo(f"  exhibitions {exhibitions} non-NBA fixture(s) excluded")
+
+            # Link once to find what is missing, sweep the scoreboard to fill
+            # tipoffs and backfill non-regular-season games, then link again.
+            nba_ingest.link_games(conn, cfg.season)
+            if not skip_tipoffs:
+                filled, non_rs = nba_ingest.ingest_scoreboard(conn, cfg.season)
+                click.echo(f"  tipoffs     {filled} filled, {non_rs} non-regular-season game(s)")
+            linked, unlinked = nba_ingest.link_games(conn, cfg.season)
+            click.echo(f"  game links  {linked} linked, {unlinked} unlinked")
+
+    click.echo("done. run `lockin reconcile` to check the Phase 0 gates.")
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+def reconcile(as_json: bool) -> None:
+    """Report on ingest completeness. Exits nonzero if a gate fails."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        checks = reconcile_mod.run(conn, cfg.season)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "name": c.name,
+                        "passed": c.passed,
+                        "detail": c.detail,
+                        "offenders": c.offenders,
+                    }
+                    for c in checks
+                ],
+                indent=2,
+            )
+        )
+    else:
+        click.echo("Phase 0 reconciliation")
+        click.echo("=" * 60)
+        for c in checks:
+            click.echo(f"[{'PASS' if c.passed else 'FAIL'}] {c.name}")
+            click.echo(f"       {c.detail}")
+            for o in c.offenders:
+                click.echo(f"         - {o}")
+        click.echo("=" * 60)
+
+    failed = [c for c in checks if not c.passed]
+    if failed:
+        click.echo(f"{len(failed)} gate(s) failed", err=True)
+        sys.exit(1)
+    click.echo("all gates passed")
+
+
+if __name__ == "__main__":
+    main()

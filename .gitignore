@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# uv-managed virtualenv (uv.lock IS committed)
+.venv/
+
+# Local data — regenerable via `lockin ingest`
+*.db
+*.db-wal
+*.db-shm
+data/
+logs/
+
+# Claude Code local settings and harness temp files
+.claude/settings.local.json
+.claude/*.tmp.*
