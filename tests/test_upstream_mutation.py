@@ -8,8 +8,13 @@ The box scores did NOT change. Only the selection of which game counts moved,
 which means the change is in lock state rather than in the underlying stats.
 
 `tests/golden/*_2026-08-05.json` are raw API responses captured on 2026-08-05.
-They are the only surviving record of the original values for any week, and the
-architecture doc's independently-written week-12 anecdotes corroborate them.
+They are the earliest surviving record for any week, and the architecture doc's
+independently-written week-12 figures corroborate them three ways.
+
+Earliest, not verified: both observations are from the offseason, four months
+after week 12 was played, so which version matches what managers actually did on
+the night is not determinable. The cause of the change is likewise unresolved —
+see implementation-plan.md §12 for the hypotheses that were ruled out.
 
 These tests run offline against the committed snapshots. They do not call the
 API, so they cannot flake, and they will keep passing after the next mutation —

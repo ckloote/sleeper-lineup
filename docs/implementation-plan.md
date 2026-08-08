@@ -713,18 +713,56 @@ zero added, zero removed, zero with different stats. So this is not a stat corre
 rippling through — the underlying games are unchanged and only the selection of which
 game counts moved.
 
-### The 2026-08-05 values are the real ones
+### The 2026-08-05 values are the earliest we have
 
-Corroborated by a source written before this project started: the architecture doc's own
-week-12 anecdotes.
+Corroborated three independent ways by a source written before this project started: the
+architecture doc's own week-12 figures.
 
 | architecture doc claim | 2026-08-05 | today |
 |---|---|---|
 | "one of five matchups finished 289.5 to 287.5" | roster 4 = 289.5, roster 5 = 287.5 ✓ | 291.5 / 287.0 ✗ |
 | "roster 7 started a player who finished 0.0 and lost by 58" | 221.5 vs 279.5, diff 58.0 ✓ | 289.0 vs 310.5, diff 21.5 ✗ |
+| "team totals were roughly 286 ± 37 across ten teams" | mean 286, sd 39 ✓ | mean 293, sd 24 ✗ |
 
-Both claims match the snapshot exactly and neither matches today. Whatever Sleeper is now
-returning, it is not what happened during the season.
+**Correction to an earlier draft of this section**, which claimed the 2026-08-05 values
+"are the real ones" and that today's are "not what happened during the season". That is
+stronger than the evidence supports. Both observations are from the **offseason**, four
+months after week 12 was played, and the architecture doc was also written post-season.
+2026-08-05 is therefore the *earliest available* record, not a verified in-season one. No
+in-season observation of this league exists, so which version matches what managers
+actually did on the night is not determinable.
+
+### Mechanism: unresolved, and three hypotheses ruled out
+
+An earlier draft asserted Sleeper "swapped which games people locked in". That describes a
+mechanism, and no evidence here supports one. What is established is the observation; the
+cause is not.
+
+Ruled out:
+
+- **Week renumbering.** Compared the 2026-08-05 week-12 payload against all 25 of today's
+  weeks. Week 12 is uniquely the match — 37/60 starter values and 10/10 identical lineups,
+  against ≤2/46 values and 0/10 lineups for every other week. Lineups genuinely vary week
+  to week, so identical lineups is strong evidence. Same week, same rosters.
+- **A mechanical fallback replacing lock semantics.** If the offseason value were simply
+  "best game" or "last played game", it would fit one rule cleanly. Restricted to the 58
+  week-12 starters with ≥2 played games, both versions match "max" ~60% and no rule above
+  that. Today's data behaves like lock decisions; they are just *different* decisions.
+- **The DNP-zeroing rule being dropped.** 64 starters still count 0.0 today despite having
+  played that week, so an unplayed final game still zeroes an unlocked starter. And the
+  changed players share no trailing-DNP pattern: 3 of 23 changed have one, versus 6 of 37
+  unchanged.
+
+What the shape suggests, without proving it: today's distribution is **compressed**. Mean
+rose from 286 to 293 while standard deviation fell from 39 to 24, and the spread narrowed
+from 125 points to 88.5 — roster 7's 221.5 disaster became 289.0. Extremes pulled toward
+the middle is what regeneration-toward-a-default looks like; it is not what a set of human
+decisions, including the bad ones, looks like.
+
+The likeliest explanation is therefore something dull — an offseason migration, re-index
+or archival job in which stored lock state was lost and regenerated — rather than a
+deliberate rewrite. That remains a guess. Absent an in-season observation or a Sleeper
+changelog, this can be narrowed but probably not settled, and it is not worth more time.
 
 ### What this costs
 

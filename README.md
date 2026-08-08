@@ -25,7 +25,9 @@ nonzero counted score in all 25 weeks is reproduced from box scores to the cent,
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
-> total. Box scores were byte-identical, so only *which game counts* moved.
+> total. Box scores were byte-identical, so only *which game counts* moved. The cause is
+> unresolved — week renumbering, a mechanical fallback, and a dropped DNP rule were all
+> tested and ruled out.
 >
 > Today's data is now treated as canonical, and the backtest measures **policy against
 > policy** rather than against the human baseline — four of the five policies in the
