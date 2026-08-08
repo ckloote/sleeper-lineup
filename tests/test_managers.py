@@ -19,6 +19,7 @@ def decision(**kw) -> Decision:
         week=20,
         roster_id=1,
         sleeper_id="p",
+        day=739000,
         score=45.0,
         chose_lock=True,
         p_win_lock=0.6,
@@ -157,3 +158,88 @@ def test_bootstrap_is_empty_safe():
     from lockin.managers import bootstrap_regret
 
     assert bootstrap_regret(ManagerReport(), 3) == (0.0, 0.0)
+
+
+# ------------------------------------------------------------- persistence
+
+
+def test_a_player_can_face_several_decisions_in_one_week():
+    """The identity of a decision includes the night it was made.
+
+    A four-game week gives a player up to three lock/pass calls. Keying the
+    stored table on (week, roster, player) alone silently collapsed them — 726
+    of the season's real decisions would have been lost, and the UNIQUE
+    constraint is what caught it.
+    """
+    import sqlite3
+
+    from lockin.managers import persist
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+
+    report = ManagerReport(
+        decisions=[
+            decision(week=5, roster_id=2, sleeper_id="x", day=739000),
+            decision(week=5, roster_id=2, sleeper_id="x", day=739002),
+            decision(week=5, roster_id=2, sleeper_id="x", day=739004),
+        ]
+    )
+    n_decisions, _ = persist(conn, report)
+    assert n_decisions == 3
+    assert conn.execute("SELECT COUNT(*) FROM manager_decisions").fetchone()[0] == 3
+
+
+def test_persist_replaces_rather_than_accumulating():
+    """These are derived; two models' answers side by side would be worse than one."""
+    import sqlite3
+
+    from lockin.managers import Scorecard, persist
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+
+    report = ManagerReport(
+        decisions=[decision(roster_id=1, day=739000)],
+        scorecards=[Scorecard(1, 1, 0.01, 1.0, 0, 0.0, 0.5, 1, 0)],
+    )
+    persist(conn, report)
+    persist(conn, report)
+    assert conn.execute("SELECT COUNT(*) FROM manager_decisions").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM manager_scorecards").fetchone()[0] == 1
+
+
+def test_stored_scorecard_carries_the_uncertainty_band():
+    """A dashboard that renders the ranking without it would imply an order
+    the data does not support."""
+    import sqlite3
+
+    from lockin.managers import Scorecard, persist
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+
+    rng = np.random.default_rng(2)
+    ds = [
+        decision(roster_id=4, day=739000 + i, chose_lock=True, p_win_lock=0.5 - x, p_win_pass=0.5)
+        for i, x in enumerate(rng.uniform(0, 0.2, 200))
+    ]
+    persist(
+        conn,
+        ManagerReport(
+            decisions=ds,
+            scorecards=[
+                Scorecard(
+                    4, len(ds), float(np.mean([d.regret for d in ds])), 0.0, 0, 0.0, 0.5, 10, 0
+                )
+            ],
+        ),
+    )
+    row = conn.execute("SELECT * FROM manager_scorecards").fetchone()
+    assert row["regret_lo"] < row["mean_regret"] < row["regret_hi"]

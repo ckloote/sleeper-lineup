@@ -282,6 +282,7 @@ def managers(as_json: bool, sims: int, names: bool) -> None:
     cfg = Config.from_env()
     with session(cfg.db_path) as conn:
         report = managers_mod.evaluate_managers(conn, cfg.season, n_sims=sims)
+        n_decisions, n_cards = managers_mod.persist(conn, report)
 
     labels: dict[int, str] = {}
     if names:
@@ -343,6 +344,8 @@ def managers(as_json: bool, sims: int, names: bool) -> None:
         f"\n\n  Reads the field Sleeper rewrote (§12): this is how the current data makes"
         f"\n  each manager look, not a certified record. Do not benchmark the engine on"
         f"\n  this scale — it is graded by its own model."
+        f"\n\n  wrote {n_decisions} rows to manager_decisions and {n_cards} to"
+        f" manager_scorecards,\n  which is what a dashboard should read."
     )
 
 

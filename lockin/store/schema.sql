@@ -262,6 +262,62 @@ CREATE TABLE IF NOT EXISTS manager_profiles (
     computed_at         TEXT NOT NULL
 );
 
+-- Manager decision quality (`lockin managers`, implementation-plan.md §16).
+--
+-- Persisted rather than computed on demand because the design rule is that
+-- SQLite is the contract and a dashboard is just a second reader. Producing
+-- these rows costs a few seconds of Monte Carlo per run, which is fine for a
+-- command and far too slow for a page load.
+--
+-- One row per lock/pass call a manager actually faced. Ambiguous inferences —
+-- several games sharing the counted value — are absent rather than guessed, so
+-- this table is a subset of lock_inferences, not a join partner for all of it.
+--
+-- Keyed on decision_day as well as the player: a player can face SEVERAL
+-- decisions in one week, one per night he plays with games still to come, so
+-- (week, roster, player) is not unique. lock_inferences has one row per
+-- player-week because it records the outcome; this records the choices.
+--
+-- p_win_lock / p_win_pass are the rollout's estimates at that moment, so they
+-- reflect the model that produced them. Recomputing after a projection change
+-- will move them; that is intended, and `computed_at` is what tells you which
+-- model a row came from.
+CREATE TABLE IF NOT EXISTS manager_decisions (
+    week            INTEGER NOT NULL,
+    roster_id       INTEGER NOT NULL,
+    sleeper_id      TEXT NOT NULL,
+    decision_day    INTEGER NOT NULL, -- proleptic Gregorian ordinal
+    score           REAL NOT NULL,   -- what was on the table to bank
+    chose_lock      INTEGER NOT NULL,
+    p_win_lock      REAL NOT NULL,
+    p_win_pass      REAL NOT NULL,
+    greedy_locks    INTEGER NOT NULL, -- what the points-only policy would do
+    computed_at     TEXT NOT NULL,
+    PRIMARY KEY (week, roster_id, sleeper_id, decision_day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_manager_decisions_roster ON manager_decisions (roster_id);
+
+-- The ranking a dashboard renders. Sorted on mean_regret ASC, never on
+-- upside_share: points capture scores a correct variance-taking decision as a
+-- blunder, and carrying it here without that caveat is how it would end up
+-- being the column somebody sorts by.
+CREATE TABLE IF NOT EXISTS manager_scorecards (
+    roster_id            INTEGER PRIMARY KEY,
+    decisions            INTEGER NOT NULL,
+    mean_regret          REAL NOT NULL,   -- win probability forfeited per decision
+    right_rate           REAL NOT NULL,
+    regret_lo            REAL NOT NULL,   -- bootstrap 90% band; the middle of the
+    regret_hi            REAL NOT NULL,   -- table is a tie, and must render as one
+    divergent            INTEGER NOT NULL,
+    divergent_right_rate REAL NOT NULL,
+    upside_share         REAL NOT NULL,   -- points capture, for contrast only
+    upside_decisions     INTEGER NOT NULL,
+    rode_to_zero         INTEGER NOT NULL,
+    computed_at          TEXT NOT NULL
+);
+
+
 -- Phase 6 output. Present so the read layer has a stable target.
 CREATE TABLE IF NOT EXISTS recommendations (
     generated_at    TEXT NOT NULL,

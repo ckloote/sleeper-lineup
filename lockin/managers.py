@@ -63,6 +63,7 @@ from lockin.core.projections import EWMAProjectionSource, ProjectionParams, Seas
 from lockin.core.winprob import evaluate_lock
 from lockin.projections import load_panel, observed_scores
 from lockin.rollout import SimulationCache, decision_days, opponent_totals
+from lockin.store.db import now_iso
 from lockin.verify import scoring_settings
 
 RESOLVED_DECISIONS = ("locked_early", "rode_to_end")
@@ -93,6 +94,10 @@ class Decision:
     week: int
     roster_id: int
     sleeper_id: str
+    day: int
+    """The night the call was made. A player can face several decisions in one
+    week — one per night he plays with games still to come — so this is part of
+    a decision's identity, not decoration."""
     score: float
     """What was on the table to bank."""
     chose_lock: bool
@@ -325,6 +330,7 @@ def evaluate_managers(
                         week=week,
                         roster_id=roster_id,
                         sleeper_id=pid,
+                        day=day,
                         score=score,
                         chose_lock=chose_lock,
                         p_win_lock=outcome.p_win_lock,
@@ -358,6 +364,70 @@ def evaluate_managers(
             )
         )
     return report
+
+
+def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
+    """Write the decisions and scorecards. Returns (decisions, scorecards).
+
+    A dashboard should read these tables, not call :func:`evaluate_managers` —
+    producing them costs several seconds of Monte Carlo, which is fine for a
+    command and hopeless for a page load. This is the design rule the whole
+    project rests on: SQLite is the contract, so a reader needs nothing from
+    ``core``.
+
+    Replaces rather than appends. Unlike ``weekly_matchups``, whose polling
+    history is irreplaceable, these are derived and fully reproducible from the
+    box scores and the current model — keeping old rows would only leave two
+    models' answers side by side with no way to tell them apart beyond
+    ``computed_at``.
+
+    """
+    stamp = now_iso()
+    conn.execute("DELETE FROM manager_decisions")
+    conn.executemany(
+        "INSERT INTO manager_decisions"
+        " (week, roster_id, sleeper_id, decision_day, score, chose_lock, p_win_lock,"
+        "  p_win_pass, greedy_locks, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                d.week,
+                d.roster_id,
+                d.sleeper_id,
+                d.day,
+                d.score,
+                int(d.chose_lock),
+                d.p_win_lock,
+                d.p_win_pass,
+                int(d.greedy_locks),
+                stamp,
+            )
+            for d in report.decisions
+        ],
+    )
+    conn.execute("DELETE FROM manager_scorecards")
+    conn.executemany(
+        "INSERT INTO manager_scorecards"
+        " (roster_id, decisions, mean_regret, right_rate, regret_lo, regret_hi,"
+        "  divergent, divergent_right_rate, upside_share, upside_decisions,"
+        "  rode_to_zero, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                s.roster_id,
+                s.decisions,
+                s.mean_regret,
+                s.right_rate,
+                *bootstrap_regret(report, s.roster_id),
+                s.divergent,
+                s.divergent_right_rate,
+                s.upside_share,
+                s.upside_decisions,
+                s.rode_to_zero,
+                stamp,
+            )
+            for s in report.scorecards
+        ],
+    )
+    return len(report.decisions), len(report.scorecards)
 
 
 def bootstrap_regret(

@@ -364,6 +364,14 @@ Three limits, which the command prints alongside its output:
   shared between deciding and being judged. Manager-versus-manager is fair;
   manager-versus-engine is not.
 
+Every run writes `manager_scorecards` and `manager_decisions`. **A dashboard should
+read those tables rather than recomputing** — producing them costs several seconds of
+Monte Carlo, and the design rule is that SQLite is the contract, so a reader needs
+nothing from `core`. `manager_decisions` holds one row per call with both win
+probabilities, so a drill-down is a `WHERE` clause. Rendering guidance, including which
+column must never be sortable, is in
+[implementation-plan.md §6](docs/implementation-plan.md) under Phase 6.
+
 Commands arriving with later phases: `digest`.
 
 ## Configuration
@@ -385,7 +393,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 284 tests, ~1.5s
+uv run pytest              # 287 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```

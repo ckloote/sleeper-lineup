@@ -332,6 +332,36 @@ binary search over hypothetical `S`.
 
 *Exit:* digest fires daily and thresholds render legibly on a phone.
 
+**Dashboard requirement — manager decision quality (§16).** The league standings
+already tell you who won. What nobody can see is who *decided* well, and the
+Phase 5 machinery answers it. Surface the `lockin managers` ranking in the
+dashboard.
+
+Read it from `manager_scorecards` and `manager_decisions`; do not call
+`evaluate_managers` from a request. Producing those rows costs several seconds
+of Monte Carlo — fine for a command, hopeless for a page load — and the design
+rule is that SQLite is the contract, so a dashboard is just a second reader.
+
+Four things the rendering must get right, each of which is a way to make the
+data lie:
+
+- **Sort on `mean_regret`, never on `upside_share`.** Points capture scores a
+  correct variance-taking decision as a blunder (§16). The column is stored for
+  contrast; a dashboard that lets someone sort by it has published a wrong
+  ranking.
+- **Render `regret_lo`/`regret_hi`.** The bands overlap from about rank 2 to
+  rank 8. A bare ordered list asserts a precision the data does not have; show
+  it as groups, or show the bars.
+- **Carry the §12 caveat on the page, not in a footnote.** This ranks how the
+  rewritten data makes each manager look, not what they did.
+- **Do not put the engine on the same axis.** Greedy is graded by the model that
+  sets its thresholds; a column showing it beating every human would be an
+  artefact.
+
+`manager_decisions` is the drill-down: one row per call, with `p_win_lock`,
+`p_win_pass` and what the points policy would have done, so "show me the 20
+high-leverage decisions roster 4 faced" is a `WHERE` clause.
+
 **Note:** Phases 0-3 still ship a CLI, but only the read-only subset the gates need —
 `ingest`, `reconcile`, `verify`, `locks`, `calibrate`, plus `project` for inspecting a
 single distribution. `digest` and `backtest` arrive with the phases that give them
