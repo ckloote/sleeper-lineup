@@ -1,8 +1,8 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — **Phases 0-3 complete** (§9, §10, §11, §13). Phase 3 was reassessed
-and taken on after Phases 0-2 landed, as §6 anticipated. Phases 4-6 remain deferred.
+**Status:** Approved — **Phases 0-4 complete** (§9, §10, §11, §13, §14). Phases 3 and 4 were
+reassessed and taken on after Phases 0-2 landed, as §6 anticipated. Phases 5-6 remain deferred.
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -295,7 +295,7 @@ frequencies, checked specifically in the right tail, since the tail is the whole
 passing is ever correct. **Met** — realised P(score > predicted q₀.₉₉) is 1.05% against a
 1.00% nominal on held-out weeks 18-25.
 
-### Phase 4 — Simulation and base policy — IN PROGRESS
+### Phase 4 — Simulation and base policy — COMPLETE, see §14
 Vectorised numpy: DNP gate → minutes → correlated components → `score_line`. Bipartite
 slot assignment via `scipy.optimize.linear_sum_assignment` at each simulated lock event.
 Backtest harness with the five policies from §12.
@@ -1122,3 +1122,162 @@ is far from the rare case worth deferring. It still does not affect a marginal c
 check, and it can stay deferred through Phase 4 — but Phase 5's win-probability model
 needs the variance of a *team* total, and at 42% overlap a teammate-independence
 assumption there is not defensible.
+
+---
+
+## 14. Phase 4 — complete
+
+Simulation and the base policy are built, and the gate closes on **held-out weeks
+18-25** — 80 roster-weeks, 480 starter-weeks, all ten rosters.
+
+```
+  policy         points   zeroed   locked      wins
+  never_lock      193.0       71        0     33/66
+  lock_first      227.8       16      464     42/66
+  greedy          272.8       36      355     61/66
+  oracle          300.0       16        -         -   perfect foresight, not attainable
+  actual          244.1        -        -         -   advisory: reads the field Sleeper rewrote
+
+[PASS] greedy threshold beats never-lock on points, out of sample
+       +79.78 points per roster-week (se 5.52, t=14.44) over 80 roster-weeks
+[PASS] greedy threshold beats lock-first on points
+       +45.03 points per roster-week (se 4.77, t=9.44)
+[PASS] greedy does not approach perfect foresight
+       never-lock 193.04 < greedy 272.82 < oracle 300.04; greedy captures 74.6% of the headroom
+[PASS] greedy zeroes no more starter slots than never-lock
+       480 starter-weeks; never_lock: 71 (14.8%); lock_first: 16 (3.3%); greedy: 36 (7.5%)
+[PASS] greedy actually chooses when to bank
+       locks 355/480 starter-weeks (74.0%); lock-first 96.7%
+```
+
+The exit criterion was "greedy threshold beats never-lock on points, out of sample". Met,
+by a wide margin, which is itself the thing that needed checking.
+
+### The gain is large, and that had to be explained rather than celebrated
+
+Architecture doc §12 says an honest backtest shows a *modest* points gain and that a large
+one should be treated as leakage. +79.78 points per roster-week is 41% over never-lock and
+greedy also beats the human baseline by 28.7. On the doc's own advice that is a result to
+distrust.
+
+Two things resolve it, and neither is "the model is good".
+
+**Never-lock is genuinely awful in this format.** It zeroes 14.8% of starter slots —
+roughly one starter in seven counts nothing — because an unlocked player's final game
+counts even when he does not play it. Most of the headroom is not clever stopping; it is
+declining to throw away a slot.
+
+**The real check is against perfect foresight, not against a feeling about size.** An
+oracle that banks each player's best game scores 300.04. Greedy captures **74.6%** of the
+gap between never-lock and that ceiling. For iid draws the *optimal* stopping rule captures
+70.7% / 74.4% / 76.9% of that gap at 2 / 3 / 4 games, which weights to ≈75.3% at the
+observed mix of 3.44 games per starter-week.
+
+So greedy lands just *below* the theoretical optimum for a policy with no foresight at all —
+exactly where a correct implementation should sit, and where a leaking one could not. That
+comparison is now the `check_no_foresight` gate rather than a note, with a 90% ceiling:
+nothing without foresight gets past it, and anything that does is reading ahead.
+
+### One walk, three policies
+
+All three replayed policies are the same function over a week under different thresholds:
+
+```
+never lock        no threshold ever clears      ride to the end
+lock first        every threshold is -inf       bank the first played game
+greedy threshold  E[value of continuing]        bank when tonight beats it
+```
+
+Writing them separately would have invited them to differ for uninteresting reasons — a
+mishandled DNP in one and not another — and the comparison would then be measuring the
+difference between three pieces of code rather than between three policies.
+
+The greedy threshold is backward induction over simulated paths:
+
+```
+V[last] = E[S_last]                the last game counts whether or not you bank it
+V[k]    = E[max(S_k, V[k+1])]      bank it, or carry on
+```
+
+`V[0]` is what tonight's score has to beat. It is a **scalar** — the policy compares a
+realised score against an unconditional expectation — which is precisely what makes this
+the base heuristic rather than the optimal policy. Conditioning the continuation on the
+state is what Phase 5's rollout adds, and it is the one improvement still on the table.
+
+### The path simulator, and why `project()` could not be used
+
+Built as specified in §13's constraint. Availability is propagated: each drawn outcome is
+fed back into the hazard's feature vector before the next game is drawn, with coefficients
+fit once at `as_of` and never refit, so nothing reaches past the cutoff. Against the
+observed dependence:
+
+```
+games/week   observed P(all DNP)   simulated   independent draws of the same marginals
+    2              0.1994            0.1673              0.1194
+    3              0.1609            0.1884              0.1249
+    4              0.1579            0.1501              0.0838
+```
+
+Not exact — 3-game weeks come out high and 2-game weeks low — but in the right
+neighbourhood and far away from what independence gives. The residual is the piece not
+propagated: minutes shocks are still drawn per game, and a minutes restriction really does
+persist across a week. Splitting the shock into persistent and per-game parts would need a
+parameter, and there are no held-out weeks left to fit one honestly.
+
+A **form factor** is also held fixed per path — one lognormal line factor across a
+player's week, so a heavy week is heavy in all his games. Because each game still sees a
+draw from the same distribution, this changes the joint without disturbing the marginal
+that Phase 3 certified. `test_a_path_game_has_the_same_marginal_as_a_direct_projection`
+pins that.
+
+### Slot assignment
+
+`assign_slots` solves the bipartite problem exactly via
+`scipy.optimize.linear_sum_assignment`, as the plan specified. Greedy assignment fails here
+for a concrete reason rather than a theoretical one: `C` accepts only C/PF, so filling
+`UTIL` with the best player left can strand the only centre. Duplicate slots keep separate
+identities (`UTIL#1`, `UTIL#2`) — a dict keyed on the bare name silently drops one of this
+league's two UTILs.
+
+It is **not** used in the backtest. The replay holds each roster's actual lineup fixed and
+varies only the stopping rule, which is what isolates the decision the engine makes.
+Letting the policy pick lineups too would confound stopping with assignment and would
+compare against lineups nobody fielded. Assignment earns its place in the live digest and
+in Phase 5.
+
+### What the numbers say about the format
+
+- **Zeroed slots are the dominant failure.** Never-lock 14.8%, greedy 7.5%, lock-first
+  3.3%. Lock-first zeroes least and still scores 45 points less than greedy, so the goal is
+  not to minimise zeros — it is to avoid them while still riding for upside.
+- **Greedy locks 74% of starter-weeks.** Between the degenerate ends, and close to the
+  human lock rates from Phase 2 (44.6%-67.6%), which is mild corroboration that the
+  threshold is in a sane place rather than a corroboration of the humans.
+- **Wins move a lot** — 61/66 against a never-lock opponent, against 33/66 for never-lock
+  itself. That is the unilateral question and it is flattering by construction; the
+  opponent is playing the worst available policy. Phase 5's gate is wins against a
+  *competent* opponent, which is the harder and more meaningful comparison.
+
+### Deviations from the plan
+
+- **No `simulate.py`.** The plan's layout put a vectorised Monte Carlo module in `core/`.
+  The path simulator belongs to the projection model — it shares the donor, minutes and
+  hazard machinery — so it is `EWMAProjectionSource.project_path`, and `core/policy.py`
+  holds the decision logic. A separate `simulate.py` would only have forwarded calls.
+- **Rollout is absent**, as planned; it is Phase 5.
+- **The five-policy table from architecture doc §12 has four rows here.** Rollout is Phase
+  5, and `Actual` is reported but never gated on, per §12's decision.
+
+### What Phase 5 inherits
+
+The gate to beat is wins, not points, and against a real opponent rather than never-lock.
+Three things are already in place: `manager_profiles` from Phase 2 gives a per-manager
+prior on how each rival stops, `ScoreDistribution.prob_above` gives the marginal a
+win-probability model needs, and `assign_slots` handles the coupling once players start
+locking into slots.
+
+The open problem is the one §13 flagged and Phase 4 did not need: **teammate correlation**.
+42% of roster-weeks start two or more players from the same NBA team. A team total is a sum
+over six correlated players, and P(win) depends on the variance of that sum, not on six
+marginals. Phase 4's gate is a mean comparison and is unaffected — means add regardless of
+correlation — but Phase 5's is not.

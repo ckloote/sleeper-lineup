@@ -27,7 +27,11 @@ C/PF-eligible players can fill it, and only C or UTIL will take them.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import math
+from collections.abc import Iterable, Mapping, Sequence
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 ALL_POSITIONS = frozenset({"PG", "SG", "SF", "PF", "C"})
 
@@ -113,3 +117,82 @@ def slot_flexibility(
     properly by simulating.
     """
     return len(eligible_slots(positions, set(slots), sleeper_id=sleeper_id))
+
+
+class NoValidLineup(ValueError):
+    """No way to fill every slot from the available players."""
+
+
+def assign_slots(
+    slots: Sequence[str],
+    candidates: Sequence[str],
+    positions: Mapping[str, Iterable[str]],
+    values: Mapping[str, float],
+    *,
+    locked: Mapping[str, str] | None = None,
+    extra_slots: Mapping[str, frozenset[str]] = OBSERVED_EXTRA_SLOTS,
+) -> dict[str, str]:
+    """Best legal assignment of players to starting slots. Returns ``{slot: player}``.
+
+    Maximising total ``values`` over a bipartite graph is an assignment problem,
+    so it is solved exactly rather than greedily. Greedy fails here for a
+    concrete reason: ``C`` accepts only C/PF, so filling ``UTIL`` with the
+    highest-valued player left can strand the one centre and cost more than the
+    swap gained. Architecture doc §3.2 calls C the structural bottleneck; this
+    is where that bites.
+
+    ``locked`` pins players already committed to a slot. Under the lock-in
+    mechanic a player must stay in his starting slot for his banked score to
+    stand (§7.6), so once he is locked his slot is no longer free — the nightly
+    assignment is a real commitment, not an option to be resolved later.
+    """
+    locked = dict(locked or {})
+
+    # Slot identity has to survive duplicates: this league starts two UTILs, and
+    # a dict keyed on the bare name would silently drop one.
+    keys = [_slot_key(slots, i) for i in range(len(slots))]
+    open_keys = [k for k in keys if k not in locked]
+    open_slots = [slots[keys.index(k)] for k in open_keys]
+
+    taken = set(locked.values())
+    free = [p for p in candidates if p not in taken]
+    if len(free) < len(open_keys):
+        raise NoValidLineup(f"{len(free)} players available for {len(open_keys)} open slots")
+
+    # linear_sum_assignment minimises, so negate. Ineligible pairs get a cost
+    # large enough that the solver only uses one if there is no legal lineup at
+    # all, which is then detected rather than returned.
+    cost = np.zeros((len(open_keys), len(free)))
+    for i, slot in enumerate(open_slots):
+        for j, player in enumerate(free):
+            if eligible(
+                slot, positions.get(player, ()), sleeper_id=player, extra_slots=extra_slots
+            ):
+                cost[i, j] = -float(values.get(player, 0.0))
+            else:
+                cost[i, j] = math.inf
+
+    finite = np.isfinite(cost)
+    if not finite.any(axis=1).all():
+        empty = [open_slots[i] for i in np.nonzero(~finite.any(axis=1))[0]]
+        raise NoValidLineup(f"no eligible player for slot(s) {empty}")
+
+    # scipy rejects inf; use a penalty strictly worse than any legal lineup.
+    penalty = float(np.abs(cost[finite]).sum() + 1.0) if finite.any() else 1.0
+    cost = np.where(finite, cost, penalty)
+
+    rows, cols = linear_sum_assignment(cost)
+    out = dict(locked)
+    for i, j in zip(rows, cols, strict=True):
+        if not finite[i, j]:
+            raise NoValidLineup(f"no legal lineup: {open_slots[i]} cannot be filled")
+        out[open_keys[i]] = free[j]
+    return out
+
+
+def _slot_key(slots: Sequence[str], index: int) -> str:
+    """Stable identity for a slot, disambiguating repeats (``UTIL`` twice)."""
+    name = slots[index]
+    if slots.count(name) == 1:
+        return name
+    return f"{name}#{slots[:index].count(name) + 1}"

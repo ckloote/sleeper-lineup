@@ -22,6 +22,7 @@ from lockin.core.projections import (
     ScoreDistribution,
     SeasonPanel,
     _coerce_line,
+    dnp_feature_matrix,
     dnp_feature_row,
     fit_logistic,
 )
@@ -275,6 +276,22 @@ def test_no_two_hazard_features_are_the_same_number():
 # ------------------------------------------------------------------- panel
 
 
+def _availability(rng, n_games, stay_out=0.75, fall_out=0.08):
+    """Absences as a two-state Markov chain, not independent coin flips.
+
+    Real absences come in spells — 76% of games after a DNP are also DNPs — and
+    a fixture built on iid flips gives the hazard no persistence to learn, so a
+    path simulator tested against it would look broken while being correct.
+    Stationary out-rate here is 0.08 / (0.08 + 0.25) ≈ 0.24, near the real 26%.
+    """
+    out = np.zeros(n_games, dtype=bool)
+    absent = False
+    for i in range(n_games):
+        absent = rng.random() < (stay_out if absent else fall_out)
+        out[i] = absent
+    return ~out
+
+
 def _synthetic_panel(n_players=12, n_games=40, seed=1, params=None):
     """A small league whose players differ in minutes, so buckets are populated."""
     rng = np.random.default_rng(seed)
@@ -282,7 +299,7 @@ def _synthetic_panel(n_players=12, n_games=40, seed=1, params=None):
     for p in range(n_players):
         level = 12.0 + 2.2 * p
         minutes = np.clip(rng.normal(level, 4.0, n_games), 0.0, 44.0)
-        played = rng.random(n_games) > 0.18
+        played = _availability(rng, n_games)
         minutes = np.where(played, minutes, 0.0)
         comps = np.zeros((n_games, len(COMPONENT_ORDER)))
         comps[:, COMPONENT_INDEX["pts"]] = np.rint(minutes * 0.6)
@@ -390,3 +407,104 @@ def test_more_minutes_projects_a_higher_distribution():
     low = src.project("p0", as_of, **dict(kwargs, rng=np.random.default_rng(3)))
     high = src.project("p11", as_of, **dict(kwargs, rng=np.random.default_rng(3)))
     assert high.quantile(0.75) > low.quantile(0.75)
+
+
+# ------------------------------------------------------------- path simulation
+
+
+def test_vectorised_hazard_features_match_the_scalar_version():
+    """The fitting path and the simulating path must be the same model.
+
+    `dnp_feature_row` builds the training matrix; `dnp_feature_matrix` drives
+    every simulated game. If they drifted, the hazard would be fit on one
+    parameterisation and applied on another, and nothing else would notice.
+    """
+    rng = np.random.default_rng(31)
+    for _ in range(150):
+        n = int(rng.integers(1, 30))
+        days = 739000 + np.cumsum(rng.integers(1, 4, n))
+        played = rng.random(n) > 0.3
+        target, wk = int(days[-1]) + 2, int(rng.integers(1, 26))
+        want = dnp_feature_row(days, played, target, wk)
+        got = dnp_feature_matrix(days, played[None, :], target, wk)[0]
+        assert np.allclose(want, got)
+
+
+def test_path_simulation_shape_and_determinism():
+    panel = _synthetic_panel()
+    src = EWMAProjectionSource(panel, SCORING)
+    as_of = int(panel.histories["p6"].day[30])
+    args = ("p6", as_of, [as_of + 1, as_of + 3, as_of + 5], [11, 11, 11])
+    a = src.project_path(*args, rng=np.random.default_rng(4), n_paths=200)
+    b = src.project_path(*args, rng=np.random.default_rng(4), n_paths=200)
+    assert a.shape == (200, 3)
+    assert np.array_equal(a, b)
+
+
+def test_path_simulation_ignores_the_future():
+    panel = _synthetic_panel()
+    as_of = int(panel.histories["p6"].day[30])
+    truncated = SeasonPanel(
+        histories={k: h.before(as_of) for k, h in panel.histories.items()}, params=panel.params
+    )
+    args = ("p6", as_of, [as_of + 1, as_of + 3], [11, 11])
+    a = EWMAProjectionSource(panel, SCORING).project_path(
+        *args, rng=np.random.default_rng(5), n_paths=150
+    )
+    b = EWMAProjectionSource(truncated, SCORING).project_path(
+        *args, rng=np.random.default_rng(5), n_paths=150
+    )
+    assert np.array_equal(a, b)
+
+
+def test_paths_make_absences_cluster_within_a_week():
+    """The whole reason this function exists (implementation-plan.md §13).
+
+    A player who misses Monday is far more likely to miss Wednesday too. Drawing
+    each game independently loses that, and with it the risk of riding a week
+    into a zero.
+    """
+    panel = _synthetic_panel(n_players=14, n_games=60, seed=9)
+    src = EWMAProjectionSource(panel, SCORING)
+    rng = np.random.default_rng(6)
+
+    # Averaged over players: a single player caught mid-absence has a high
+    # marginal rate, which compresses the ratio and makes the test flaky.
+    joint_total = independent_total = 0.0
+    for player, hist in panel.histories.items():
+        as_of = int(hist.day[45])
+        paths = src.project_path(
+            player,
+            as_of,
+            [as_of + 1, as_of + 3, as_of + 5],
+            [15, 15, 15],
+            rng=rng,
+            n_paths=2000,
+        )
+        missed = paths == 0.0
+        joint_total += float(missed.all(axis=1).mean())
+        independent_total += float(np.prod(missed.mean(axis=0)))
+
+    n = len(panel.histories)
+    joint, independent = joint_total / n, independent_total / n
+    assert joint > 1.5 * independent, f"joint {joint:.4f} vs independent {independent:.4f}"
+
+
+def test_a_path_game_has_the_same_marginal_as_a_direct_projection():
+    """Adding joint structure must not move any single game's distribution.
+
+    Phase 3's gate certifies the marginal. If the path simulator quietly shifted
+    it, the calibration evidence would no longer describe what the policy uses.
+    """
+    panel = _synthetic_panel(n_players=14, n_games=60, seed=2)
+    src = EWMAProjectionSource(panel, SCORING)
+    hist = panel.histories["p10"]
+    as_of = int(hist.day[45])
+    direct = src.project("p10", as_of, fantasy_week=15, rng=np.random.default_rng(1), n_draws=8000)
+    paths = src.project_path(
+        "p10", as_of, [as_of], [15], rng=np.random.default_rng(2), n_paths=8000
+    )[:, 0]
+    assert paths.mean() == pytest.approx(direct.mean, rel=0.08)
+    assert float((paths == 0).mean()) == pytest.approx(
+        float((direct.samples == 0).mean()), abs=0.03
+    )

@@ -51,6 +51,7 @@ is the correct direction to err.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -114,6 +115,9 @@ class ProjectionParams:
     """Half-life in *days* for recency weighting of league-pool donors."""
     min_shock_samples: int = 200
     n_draws: int = 1000
+    n_paths: int = 1000
+    """Default paths for a joint week simulation. Separate from ``n_draws``
+    because a path costs one draw per remaining game, not one in total."""
 
 
 DEFAULT_PARAMS = ProjectionParams()
@@ -268,6 +272,48 @@ def dnp_feature_row(
             float(np.log1p(min(streak, 10))),
         ]
     )
+
+
+def dnp_feature_matrix(
+    days: np.ndarray,
+    played: np.ndarray,
+    target_day: int,
+    fantasy_week: int,
+) -> np.ndarray:
+    """:func:`dnp_feature_row` over many simulated histories at once.
+
+    ``played`` is ``(n_paths, T)`` and ``days`` is the shared ``(T,)`` schedule —
+    the fixture list is deterministic, only the outcomes differ between paths.
+    Returns ``(n_paths, len(DNP_FEATURE_NAMES))``.
+
+    Kept beside the scalar version and tested against it row by row. The path
+    simulator calls this once per simulated game, so a divergence between the
+    two would mean the hazard used to *fit* and the hazard used to *simulate*
+    were different models.
+    """
+    n, t = played.shape
+    stage = fantasy_week / 25.0
+    if t == 0:
+        return np.tile([0.25, 0.25, 0.25, 0.25, 3.0, 0.0, stage, 0.0, 0.0], (n, 1))
+
+    dnp = (~played).astype(np.float64)
+    rest = min(int(target_day - days[-1]), 6)
+    load7 = float(np.count_nonzero(target_day - days <= 7))
+    # Trailing DNP run: in the reversed row, the first played game sits exactly
+    # `streak` positions in. A path where he never played has no such position.
+    streak = np.where(played.any(axis=1), np.argmax(played[:, ::-1], axis=1), t)
+
+    out = np.empty((n, len(DNP_FEATURE_NAMES)))
+    out[:, 0] = dnp @ _ewma_weights(t, 4.0)
+    out[:, 1] = dnp @ _ewma_weights(t, 12.0)
+    out[:, 2] = dnp @ _ewma_weights(t, 30.0)
+    out[:, 3] = dnp[:, -1]
+    out[:, 4] = rest
+    out[:, 5] = load7
+    out[:, 6] = stage
+    out[:, 7] = 1.0 if rest <= 1 else 0.0
+    out[:, 8] = np.log1p(np.minimum(streak, 10))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,46 +539,132 @@ class EWMAProjectionSource:
         rng: np.random.Generator,
         n_draws: int | None = None,
     ) -> ScoreDistribution:
-        p = self.params
-        n = n_draws or p.n_draws
         hist = self.panel.history(sleeper_id).before(as_of)
-        own = np.nonzero(hist.played)[0]
-        n_own = len(own)
-
-        group = int(hist.pos_group[-1]) if len(hist) else POS_FORWARD
+        n_own = int(hist.played.sum())
         p_dnp = self._project_dnp(hist, as_of, fantasy_week)
-        minutes = self._draw_minutes(hist, own, as_of, rng, n)
 
-        own_weight = min(1.0, n_own / p.full_own_games) if p.full_own_games else 1.0
+        scores = self._draw_played_scores(
+            sleeper_id, hist, as_of, rng, n_draws or self.params.n_draws
+        )
+        scores = np.where(rng.random(len(scores)) < p_dnp, 0.0, scores)
+        scores.sort()
+        return ScoreDistribution(
+            samples=scores, p_dnp=float(p_dnp), basis=self._basis(n_own), n_own_games=n_own
+        )
+
+    def _basis(self, n_own: int) -> str:
+        p = self.params
         if n_own < p.min_played_games:
-            own_weight = 0.0
-        use_own = rng.random(n) < own_weight
-        if own_weight >= 1.0:
-            basis = "own"
-        elif own_weight <= 0.0:
-            basis = "pooled"
-        else:
-            basis = "mixed"
+            return "pooled"
+        return "own" if n_own >= p.full_own_games else "mixed"
 
+    def _own_weight(self, n_own: int) -> float:
+        p = self.params
+        if n_own < p.min_played_games:
+            return 0.0
+        return min(1.0, n_own / p.full_own_games) if p.full_own_games else 1.0
+
+    def _draw_played_scores(
+        self,
+        sleeper_id: str,
+        hist: PlayerHistory,
+        as_of: int,
+        rng: np.random.Generator,
+        n: int,
+        form: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """``n`` scores for one game, **conditional on the player playing**.
+
+        Shared by the marginal projection and the week-path simulator so the two
+        cannot describe different players. ``form`` lets the caller supply the
+        lognormal line factor instead of drawing it — the path simulator holds
+        one factor fixed across a player's week, which is what makes his games
+        correlated with each other without changing any single game's marginal.
+        """
+        p = self.params
+        own = np.nonzero(hist.played)[0]
+        group = int(hist.pos_group[-1]) if len(hist) else POS_FORWARD
+
+        minutes = self._draw_minutes(hist, own, as_of, rng, n)
+        use_own = rng.random(n) < self._own_weight(len(own))
         donor_comps, donor_minutes = self._draw_donors(
             hist, own, group, as_of, minutes, use_own, rng
         )
         if donor_comps is None:
             raise InsufficientHistory(
-                f"player {sleeper_id} has {n_own} played games before day {as_of}"
+                f"player {sleeper_id} has {len(own)} played games before day {as_of}"
                 f" and the league pool is empty for group {group}"
             )
 
         scale = minutes / np.clip(donor_minutes, p.donor_min_minutes, None)
         if p.form_sd > 0:
             # Median-preserving: widen the line without shifting its centre.
-            scale = scale * np.exp(rng.normal(0.0, p.form_sd, n))
+            scale = scale * (np.exp(rng.normal(0.0, p.form_sd, n)) if form is None else form)
+        return score_matrix(_coerce_line(donor_comps * scale[:, None]), self.scoring)
 
-        lines = _coerce_line(donor_comps * scale[:, None])
-        scores = score_matrix(lines, self.scoring)
-        scores = np.where(rng.random(n) < p_dnp, 0.0, scores)
-        scores.sort()
-        return ScoreDistribution(samples=scores, p_dnp=float(p_dnp), basis=basis, n_own_games=n_own)
+    def project_path(
+        self,
+        sleeper_id: str,
+        as_of: int,
+        game_days: Sequence[int],
+        fantasy_weeks: Sequence[int],
+        *,
+        rng: np.random.Generator,
+        n_paths: int | None = None,
+    ) -> np.ndarray:
+        """Joint draws over a player's remaining games. ``(n_paths, len(game_days))``.
+
+        This is the function a week simulation must use. Drawing each game from
+        :meth:`project` and treating the results as independent is wrong by a
+        wide margin: availability is a persistent state, so independent draws
+        understate P(he misses the whole week) by up to 28x and price the
+        ride-into-a-zero disaster at roughly 2% when it happens 13.4% of the
+        time. See implementation-plan.md §13.
+
+        Two things are propagated along each path:
+
+        - **Availability.** Each drawn outcome is fed back into the hazard's
+          own feature vector before the next game is drawn, so a simulated
+          absence raises the simulated chance of the next absence exactly as a
+          real one would. The coefficients are fit once at ``as_of`` and never
+          refit, so nothing here reaches past the cutoff.
+        - **Form.** One lognormal line factor per path, held across the week. A
+          player having a heavy week has it in all his games. Because each game
+          still sees a draw from the same distribution, this changes the joint
+          without disturbing the marginal the Phase 3 gate certified.
+
+        Minutes shocks stay independent per game. A minutes restriction really
+        does persist across a week, so this understates the correlation
+        slightly — but splitting the shock into persistent and per-game parts
+        adds a parameter with no held-out weeks left to fit it honestly.
+        """
+        n = n_paths or self.params.n_paths
+        hist = self.panel.history(sleeper_id).before(as_of)
+        model = self.dnp_model(as_of)
+        fallback = float((~hist.played).mean()) if len(hist) else 0.25
+
+        form = (
+            np.exp(rng.normal(0.0, self.params.form_sd, n))
+            if self.params.form_sd > 0
+            else np.ones(n)
+        )
+
+        days = np.asarray(hist.day, dtype=np.int64)
+        played = np.repeat(hist.played[None, :], n, axis=0)
+        out = np.zeros((n, len(game_days)))
+
+        for g, (day, week) in enumerate(zip(game_days, fantasy_weeks, strict=True)):
+            if model is None:
+                p_dnp = np.full(n, fallback)
+            else:
+                p_dnp = model.predict(dnp_feature_matrix(days, played, int(day), int(week)))
+            plays = rng.random(n) >= p_dnp
+            scores = self._draw_played_scores(sleeper_id, hist, as_of, rng, n, form=form)
+            out[:, g] = np.where(plays, scores, 0.0)
+
+            days = np.append(days, int(day))
+            played = np.hstack([played, plays[:, None]])
+        return out
 
     def _project_dnp(self, hist: PlayerHistory, as_of: int, fantasy_week: int) -> float:
         model = self.dnp_model(as_of)

@@ -12,6 +12,7 @@ import sys
 
 import click
 
+from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
 from lockin import locks as locks_mod
 from lockin import projections as projections_mod
@@ -201,6 +202,54 @@ def calibrate(as_json: bool, draws: int, holdout_from: int) -> None:
         click.echo()
 
     _render(checks, "Phase 3 projection calibration", as_json)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--paths", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option(
+    "--holdout-from",
+    default=backtest_mod.DEFAULT_HOLDOUT_FROM,
+    show_default=True,
+    help="First held-out fantasy week.",
+)
+def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
+    """Replay every roster under each stopping policy. Nonzero on failure."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        checks, result = backtest_mod.run(
+            conn, cfg.season, n_paths=paths, holdout_from=holdout_from
+        )
+        held = result.holdout(holdout_from)
+
+    if not as_json:
+        click.echo(
+            f"replayed {len(result.rows)} roster-weeks;"
+            f" {len(held.rows)} held out (weeks {holdout_from}-25),"
+            f" {held.starters()} starter-weeks\n"
+        )
+        click.echo(f"  {'policy':<12} {'points':>8} {'zeroed':>8} {'locked':>8} {'wins':>9}")
+        for name in backtest_mod.REPLAYED_POLICIES:
+            pts = held.points(name).mean()
+            won, played = backtest_mod.wins_flipped(held, name)
+            click.echo(
+                f"  {name:<12} {pts:>8.1f} {held.zeroed(name):>8} {held.locked(name):>8}"
+                f" {f'{won}/{played}':>9}"
+            )
+        oracle = held.points(backtest_mod.ORACLE).mean()
+        click.echo(
+            f"  {'oracle':<12} {oracle:>8.1f} {held.zeroed(backtest_mod.ORACLE):>8}"
+            f" {'-':>8} {'-':>9}   perfect foresight, not attainable"
+        )
+        actual = [r.actual_points for r in held.rows if r.actual_points is not None]
+        if actual:
+            click.echo(
+                f"  {'actual':<12} {sum(actual) / len(actual):>8.1f} {'-':>8} {'-':>8} {'-':>9}"
+                "   advisory: reads the field Sleeper rewrote"
+            )
+        click.echo("\n  wins are head-to-head with the opponent left on never-lock.\n")
+
+    _render(checks, "Phase 4 stopping-policy backtest", as_json)
 
 
 @main.command()

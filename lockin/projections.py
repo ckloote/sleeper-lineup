@@ -34,7 +34,7 @@ from lockin.core.projections import (
     ProjectionParams,
     SeasonPanel,
 )
-from lockin.core.scoring import COMPONENT_ORDER
+from lockin.core.scoring import COMPONENT_ORDER, score_matrix
 
 # Sleeper's stat rows and StatLine happen to agree on every component name, so
 # the column list is derived rather than restated. Assert it, because a rename
@@ -77,6 +77,16 @@ def position_group(positions: list[str]) -> int:
     if marks & {"PG", "SG"}:
         return POS_GUARD
     return POS_FORWARD
+
+
+def observed_scores(panel: SeasonPanel, scoring: dict[str, float]) -> np.ndarray:
+    """What every panel row actually scored — 0.0 for a game not played.
+
+    A scheduled game the player sat out is a real 0.0 for an unlocked starter,
+    not a missing value. It is the single most consequential outcome in the
+    format, so it is represented rather than dropped.
+    """
+    return np.where(panel.played, score_matrix(panel.components, scoring), 0.0)
 
 
 def rostered_player_ids(conn: sqlite3.Connection) -> list[str]:

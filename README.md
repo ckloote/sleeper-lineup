@@ -17,13 +17,14 @@ is executed by hand in the app.
 
 ## Status
 
-**Phases 0-3 complete.** Ingest, the scoring engine, retrospective lock inference and the
-projection layer, all validated against the full 2025-26 season. Every nonzero counted
-score in all 25 weeks is reproduced from box scores to the cent, 98.2% of starter
-player-weeks resolve to a specific lock decision, and projected quantiles match realised
-frequencies on held-out weeks — including the right tail, which is the only part that
-decides whether banking a score is correct. Phases 4-6 (simulation, rollout, digest) are
-deferred.
+**Phases 0-4 complete.** Ingest, the scoring engine, retrospective lock inference, the
+projection layer and the stopping policy, all validated against the full 2025-26 season.
+Every nonzero counted score in all 25 weeks is reproduced from box scores to the cent,
+98.2% of starter player-weeks resolve to a specific lock decision, projected quantiles
+match realised frequencies on held-out weeks — including the right tail, which is the only
+part that decides whether banking a score is correct — and the greedy threshold policy
+beats never-lock by 79.8 points per roster-week out of sample. Phases 5-6 (rollout,
+digest) are deferred.
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
@@ -253,7 +254,46 @@ in.
 > **13.4%** of the time. A week simulation has to walk the hazard forward along each
 > simulated path. See [implementation-plan.md §13](docs/implementation-plan.md).
 
-Commands arriving with later phases: `digest`, `backtest`.
+### `lockin backtest`
+
+Replays every roster under each stopping policy. Exits nonzero on any gate failure.
+
+```bash
+uv run lockin backtest
+uv run lockin backtest --paths 1000 --json
+```
+
+```
+replayed 250 roster-weeks; 80 held out (weeks 18-25), 480 starter-weeks
+
+  policy         points   zeroed   locked      wins
+  never_lock      193.0       71        0     33/66
+  lock_first      227.8       16      464     42/66
+  greedy          272.8       36      355     61/66
+  oracle          300.0       16        -         -   perfect foresight, not attainable
+  actual          244.1        -        -         -   advisory: reads the field Sleeper rewrote
+```
+
+Each roster's **actual lineup is held fixed** and only the stopping rule varies. That is
+what isolates the decision the engine makes; letting the policy pick lineups too would
+confound stopping with assignment and compare against lineups nobody fielded.
+
+The three replayed policies are one walk over the week under different thresholds — never
+lock clears no threshold, lock-first clears every threshold, and greedy compares tonight's
+score against the expected value of riding on. Writing them separately would have let them
+differ for uninteresting reasons.
+
+**Why the gain is not too good to be true.** The architecture doc warns that a large
+backtest gain usually means leakage, and +79.8 is not modest. Two things explain it. Never
+lock is genuinely awful here — it zeroes one starter slot in seven, because an unlocked
+player's final game counts even when he doesn't play it. And the real check is the
+`oracle` row: perfect foresight banks each player's best game and scores 300.0, so greedy
+captures 74.6% of the headroom above never-lock. Optimal stopping on iid draws captures
+about 75%. Greedy sits just under the theoretical ceiling for a policy with no foresight,
+which is where a correct one belongs and where a leaking one could not. That comparison is
+a gate, not a comment.
+
+Commands arriving with later phases: `digest`.
 
 ## Configuration
 
@@ -274,7 +314,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 204 tests, ~1s
+uv run pytest              # 245 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -285,8 +325,9 @@ entangled with I/O cannot be replayed, and the entire backtest depends on replay
 Randomness always arrives as an explicit `numpy.random.Generator`, so the same seed gives
 the same projection twice.
 
-The gates themselves (`reconcile`, `verify`, `locks`, `calibrate`) are CLI commands rather
-than tests — they need the ingested season, and `calibrate` takes about nine seconds. The
+The gates themselves (`reconcile`, `verify`, `locks`, `calibrate`, `backtest`) are CLI
+commands rather than tests — they need the ingested season, and `calibrate` takes about
+nine seconds. The
 test suite covers the machinery underneath them, including that each gate would actually
 *fail*: a check that cannot fail is not a gate.
 
@@ -376,9 +417,10 @@ lockin/
   core/            pure — no network, no database, no clock
     scoring.py     score_line (derives bonuses) / score_recorded (as given)
                    score_matrix (the same, vectorised, for the simulator)
-    eligibility.py which players may fill which slots, plus overrides
+    eligibility.py which players may fill which slots, plus slot assignment
     locks.py       recover a lock decision from a counted score
     projections.py DNP hazard, minutes, component bootstrap; as_of enforced
+    policy.py      when to bank a score and when to ride
   ingest/
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
@@ -392,6 +434,7 @@ lockin/
   locks.py         the Phase 2 gates — inference over all ten rosters
   projections.py   builds the point-in-time panel from SQLite
   calibrate.py     the Phase 3 gates — quantiles against realised frequencies
+  backtest.py      the Phase 4 gates — policy against policy over the season
   cli.py
 tests/
 docs/

@@ -56,8 +56,7 @@ from lockin.core.projections import (
     ProjectionParams,
     SeasonPanel,
 )
-from lockin.core.scoring import score_matrix
-from lockin.projections import load_panel
+from lockin.projections import load_panel, observed_scores
 from lockin.verify import Check, scoring_settings
 
 DEFAULT_HOLDOUT_FROM = 18
@@ -162,17 +161,6 @@ class _EmpiricalCRPS:
 # ----------------------------------------------------------------- evaluation
 
 
-def _observed_scores(panel: SeasonPanel, scoring: dict[str, float]) -> np.ndarray:
-    """What every panel row actually scored — 0.0 for a game not played.
-
-    A scheduled game the player sat out is a real 0.0 for an unlocked starter,
-    not a missing value, and that is exactly the outcome the projection has to
-    get right.
-    """
-    scores = score_matrix(panel.components, scoring)
-    return np.where(panel.played, scores, 0.0)
-
-
 def evaluate(
     conn: sqlite3.Connection,
     season: str,
@@ -190,7 +178,7 @@ def evaluate(
     source = EWMAProjectionSource(panel, scoring, params)
     rng = np.random.default_rng(seed)
 
-    all_scores = _observed_scores(panel, scoring)
+    all_scores = observed_scores(panel, scoring)
     weeks, days, observed, played, pits = [], [], [], [], []
     p_dnps, crps_m, crps_o, crps_p, bases = [], [], [], [], []
     pool_cache: dict[int, _EmpiricalCRPS] = {}
