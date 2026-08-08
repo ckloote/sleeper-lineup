@@ -1,7 +1,8 @@
 """Command-line surface.
 
-Phase 0-2 ships only the read-only subset the gates need. `digest`, `explain`
-and `backtest` arrive with the phases that give them something to say.
+Read-only throughout: the Sleeper API offers no way to act on your behalf, so
+every recommendation is executed by hand in the app. `digest` and `backtest`
+arrive with the phases that give them something to say.
 """
 
 from __future__ import annotations
@@ -11,10 +12,13 @@ import sys
 
 import click
 
+from lockin import calibrate as calibrate_mod
 from lockin import locks as locks_mod
+from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config
+from lockin.core import projections as core_projections
 from lockin.ingest import nba as nba_ingest
 from lockin.ingest import sleeper as sleeper_ingest
 from lockin.store.db import session
@@ -167,6 +171,67 @@ def locks(as_json: bool, profiles: bool) -> None:
             click.echo()
 
     _render(checks, "Phase 2 lock inference", as_json)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--draws", default=1000, show_default=True, help="Monte Carlo draws per player-game.")
+@click.option(
+    "--holdout-from",
+    default=calibrate_mod.DEFAULT_HOLDOUT_FROM,
+    show_default=True,
+    help="First held-out fantasy week. Earlier weeks tuned the model.",
+)
+def calibrate(as_json: bool, draws: int, holdout_from: int) -> None:
+    """Check the projection layer's quantiles against what happened. Nonzero on failure."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        checks, sample = calibrate_mod.run(
+            conn, cfg.season, n_draws=draws, holdout_from=holdout_from
+        )
+        held = sample.holdout(holdout_from)
+
+    if not as_json:
+        click.echo(
+            f"projected {len(sample)} player-games; {len(held)} held out"
+            f" (weeks {holdout_from}-25)\n"
+        )
+        click.echo("  PIT deciles, held out (each should be 0.100)")
+        click.echo("    " + " ".join(f"{x:.3f}" for x in calibrate_mod.pit_histogram(held)))
+        click.echo()
+
+    _render(checks, "Phase 3 projection calibration", as_json)
+
+
+@main.command()
+@click.argument("player")
+@click.option(
+    "--as-of", "as_of", required=True, help="Game date, YYYY-MM-DD. History before it only."
+)
+@click.option("--week", type=int, required=True, help="Fantasy week of the game being projected.")
+@click.option("--draws", default=4000, show_default=True, help="Monte Carlo draws.")
+def project(player: str, as_of: str, week: int, draws: int) -> None:
+    """Print one player's projected score distribution for a single game."""
+    import numpy as np
+
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        panel = projections_mod.load_panel(conn, cfg.season)
+        source = core_projections.EWMAProjectionSource(panel, verify_mod.scoring_settings(conn))
+        dist = source.project(
+            player,
+            projections_mod.day_index(as_of),
+            fantasy_week=week,
+            rng=np.random.default_rng(0),
+            n_draws=draws,
+        )
+
+    click.echo(f"player {player}  {as_of}  week {week}")
+    click.echo(f"  basis        {dist.basis} ({dist.n_own_games} prior played games)")
+    click.echo(f"  P(does not play) {dist.p_dnp:.1%}")
+    click.echo(f"  mean         {dist.mean:.1f}")
+    for q in (0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99):
+        click.echo(f"  q{q:<11.2f} {float(dist.quantile(q)):.1f}")
 
 
 def _render(checks, title: str, as_json: bool) -> None:

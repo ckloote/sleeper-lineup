@@ -1,7 +1,8 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — committed scope is **Phases 0-2**, all complete (§9, §10, §11).
+**Status:** Approved — **Phases 0-3 complete** (§9, §10, §11, §13). Phase 3 was reassessed
+and taken on after Phases 0-2 landed, as §6 anticipated. Phases 4-6 remain deferred.
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -218,11 +219,15 @@ is the irreplaceable input to live lock inference and must start accumulating th
 
 Numbering follows the architecture doc. Exit criteria are gates, not suggestions.
 
-> **Committed scope: Phases 0-2.** These are the plumbing and validation the architecture
-> doc says should consume most of the pre-season, and the layer where a silent error
-> poisons everything downstream. They are also the only phases whose gates can be closed
-> today against the completed 2025-26 season. Phases 3-6 are specified below for
-> continuity but are **not** in this build — we reassess with real ingested data in hand.
+> **Original committed scope: Phases 0-2.** These are the plumbing and validation the
+> architecture doc says should consume most of the pre-season, and the layer where a
+> silent error poisons everything downstream. Phases 3-6 were specified for continuity but
+> held back pending a reassessment with real ingested data.
+>
+> **That reassessment happened and Phase 3 was taken on** (§13). Its gate also closes
+> against the completed 2025-26 season, since the projection layer reads only box scores —
+> which, unlike the counted-score field, Sleeper has not mutated (§12). Phases 4-6 remain
+> deferred.
 
 ### Phase 0 — Environment, ingest, schema
 `uv python install 3.12`, `uv venv`, deps via `uv add`, `uv.lock` committed, dev group
@@ -278,16 +283,17 @@ Phase 5 evaluation depends on every manager being profiled, not just yours.
 
 ---
 
-*Phases 3-6 below are recorded for continuity. **Not in this build.***
+*Phases 4-6 below are recorded for continuity. **Not in this build.***
 
-### Phase 3 — Projection layer (EWMA) — DEFERRED
+### Phase 3 — Projection layer (EWMA) — COMPLETE, see §13
 `ProjectionSource` protocol with an `as_of` cutoff enforced in the interface signature,
 not by convention. DNP hazard, minutes distribution, component-rate bootstrap conditioned
 on minutes bucket and role. Season-stage-specific rest calibration per §9.
 
 *Exit:* out-of-sample quantile calibration — predicted quantiles match realised
 frequencies, checked specifically in the right tail, since the tail is the whole reason
-passing is ever correct.
+passing is ever correct. **Met** — realised P(score > predicted q₀.₉₉) is 1.05% against a
+1.00% nominal on held-out weeks 18-25.
 
 ### Phase 4 — Simulation and base policy — DEFERRED
 Vectorised numpy: DNP gate → minutes → correlated components → `score_line`. Bipartite
@@ -308,9 +314,10 @@ binary search over hypothetical `S`.
 
 *Exit:* digest fires daily and thresholds render legibly on a phone.
 
-**Note:** Phases 0-2 still ship a CLI, but only the read-only subset the gates need —
-`lockin ingest` and `lockin verify`. `digest`, `explain` and `backtest` arrive with the
-phases that give them something to say.
+**Note:** Phases 0-3 still ship a CLI, but only the read-only subset the gates need —
+`ingest`, `reconcile`, `verify`, `locks`, `calibrate`, plus `project` for inspecting a
+single distribution. `digest` and `backtest` arrive with the phases that give them
+something to say.
 
 ---
 
@@ -411,7 +418,7 @@ slot usage later, and is worth persisting rather than discarding.
 
 | Decision | Resolution | Effect |
 |---|---|---|
-| **Scope** | Phases 0-2 only | Ingest, scoring engine, lock inference. Reassess with real data before committing to 3-6. |
+| **Scope** | Phases 0-2, then 3 | Ingest, scoring engine, lock inference. Phase 3 taken on after the reassessment and complete (§13); 4-6 still deferred. |
 | **Phase 5 gate** | Replay all ten rosters | 105 matchups instead of 21. Lands on Phase 2 now as a gating requirement (§7.1). |
 | **Lock mechanic** | Must stay in a slot to lock | Stricter state definition; confirms the Phase 2 inference method (§7.6). |
 | **Deployment** | Develop here, deploy to Pi later | Hold the `uv` discipline and cron form; no Pi work in this build. |
@@ -860,3 +867,178 @@ season.
 
 Box scores are not snapshotted: they were byte-identical across the mutation and run ~2MB
 per week, so they are refetchable rather than irreplaceable.
+
+---
+
+## 13. Phase 3 — complete
+
+The projection layer is built and its gate is closed. All six gates pass on **held-out
+weeks 18-25** (5,126 player-games), with weeks 1-17 used to choose the model's
+hyperparameters and never scored.
+
+```
+[PASS] right-tail quantiles match realised frequencies, out of sample
+       q0.90: 0.0964 vs 0.100 (z=-0.87); q0.95: 0.0468 vs 0.050 (z=-1.04); q0.99: 0.0105 vs 0.010 (z=+0.38)
+[PASS] central quantiles match realised frequencies, out of sample
+       q0.25: 0.7435 vs 0.750 (z=-1.08); q0.50: 0.4941 vs 0.500 (z=-0.84); q0.75: 0.2483 vs 0.250 (z=-0.27)
+[PASS] left-tail calibration (advisory)
+       q0.05: 0.9444 vs 0.950 (z=-1.84); q0.10: 0.8872 vs 0.900 (z=-3.04); 82% of sub-decile mass is DNP outcomes
+[PASS] calibration holds through the fantasy playoffs
+       n=2022; q0.90: 0.0984 (z=-0.24); q0.95: 0.0440 (z=-1.23); q0.99: 0.0089 (z=-0.50)
+[PASS] DNP hazard is calibrated and informative
+       predicted 0.2898 realised 0.2991 (z=-1.44); log loss 0.3660 vs base rate 0.6101
+[PASS] projection is sharper than the naive predictors
+       CRPS model=8.132 own-history=10.074 (+19.3%) league=11.082 (+26.6%)
+[PASS] projections use no data at or after as_of
+       36/36 projections identical with the future removed, across 3 cutoffs
+```
+
+The exit criterion was "out-of-sample quantile calibration, checked specifically in the
+right tail". The 99th percentile lands at 1.05% realised against 1.00% nominal, which is
+the number that matters most: the tail is the entire reason passing on a game is ever
+correct.
+
+### Measuring calibration on a distribution with an atom
+
+The obvious method is wrong here. This predictive distribution is a mixture — about a
+quarter of its mass sits exactly on 0.0 (the player did not play) and the rest lives on a
+half-point lattice — and the textbook probability integral transform is **not** uniform
+for a discrete distribution even under a perfect model. Using it would have reported a
+correct model as broken, and the natural response to that would have been to "fix" the
+model until the diagnostic looked right, which would have broken it for real.
+
+The gate uses the **randomised PIT**: `u = F(y⁻) + v·(F(y) − F(y⁻))` with `v ~ U(0,1)`.
+That restores exact uniformity under a correct model, atom included, and every quantile
+check falls out of it as a binomial proportion with an honest standard error.
+`tests/test_projections.py` pins this by driving the PIT with a zero-inflated
+distribution that *is* its own predictive distribution — so any departure from uniformity
+there is a bug in the diagnostic rather than in a model.
+
+An earlier attempt checked exceedance directly — count how often the realised score beat
+the predicted `q_τ`. It reported the model as badly biased at every level at once, which
+was the tell. `np.quantile` interpolates, so `q_τ` lands *between* two points of the
+half-point lattice and `P(Y > q_τ)` is then systematically wrong by construction. The
+estimator was broken, not the model.
+
+### What the model is
+
+Three stages, all reconstructible point-in-time from box scores:
+
+1. **DNP hazard** — ridge-penalised logistic regression, ten features, refit from scratch
+   at every distinct `as_of`. Log loss 0.366 against a 0.610 base rate.
+2. **Minutes** — a recency-weighted EWMA *level* (half-life 14 games) multiplied by a
+   shock drawn from the empirical distribution of (actual ÷ trailing EWMA) ratios pooled
+   across the league.
+3. **Components** — whole stat lines resampled from games in the same minutes bucket and
+   position group, scaled to the drawn minutes, then rounded back onto the integer
+   lattice and widened by a lognormal form factor (σ = 0.11).
+
+### Four things the data forced, none of which the plan anticipated
+
+**`player_status` is empty, so the planned DNP features do not exist.** The architecture
+doc's §9 feature list opens with "injury designation", and `/players/nba` publishes only
+*today's* — no history, so it is unusable for a replay under §3's point-in-time rule.
+`dnp_reason` is NULL on all 16,692 unplayed rows. The hazard is therefore built entirely
+from observed availability, rest and load. This turned out to be much less costly than it
+sounds, because availability is strongly autocorrelated: 76.4% of games following a DNP
+are also DNPs, against 9.0% following a played game.
+
+**An EWMA of availability is the wrong shape for injuries.** The first hazard used three
+EWMAs of the DNP indicator and was over-confident in its 0.10-0.20 band — precisely the
+game-time-decision cases. Adding the **consecutive-DNP streak** and **games since last
+played** cut log loss from 0.333 to 0.330 and tightened the right tail (q0.99 z from
++1.69 to +0.38). An EWMA blurs "mid-injury" and "just back", which are the two states
+that matter, and those two features separate them.
+
+**Minutes shocks are left-skewed, and a symmetric shock breaks the bottom of the
+distribution.** Multiplicative Gaussian noise on minutes left the left tail far too thin.
+The realised (minutes ÷ trailing EWMA) ratio has its 1st percentile at 0.38 and its 99th
+at 1.70 — foul trouble, blowouts and in-game knocks have no counterpart on the upside.
+Replacing the parametric shock with a bootstrap of that empirical ratio distribution
+dropped the PIT uniformity χ² from 34.7 to 21.1 and moved the median from z = +1.7 to
+z = −0.05.
+
+**A bootstrap cannot exceed its own sample maximum, and the tail is the whole point.** A
+player has around forty games of history, so resampling his own lines understates how
+good his best game can be. Unfixed, realised P(score > predicted q₀.₉₉) was **1.76%
+against a nominal 1%** — the model would have been systematically over-confident that
+tonight's good score was unbeatable, and would have banked too eagerly. A median-preserving
+lognormal factor on the whole line (σ = 0.11, chosen on weeks 1-17) fixes it without
+shifting the centre.
+
+### The late-season rest shift is real, and the model tracks it
+
+Architecture doc §9 warned that a DNP model fit on November behaviour would be badly
+miscalibrated in the fantasy playoffs, when playoff-secured NBA teams start resting
+starters. That warning was correct and the effect is large: the DNP rate among rostered
+players runs 22.7% in weeks 1-7 and **33.9% in weeks 22-25**.
+
+Because the hazard is refit at every cutoff and carries a season-stage feature, it
+follows: over the holdout it predicted 28.98% against a realised 29.91%, and the tail
+checks restricted to weeks 22-24 alone (n = 2,022) come in at z = −0.24, −1.23 and −0.50.
+This is the check the doc asked for, and it is now pinned by
+`test_late_season_dnp_rate_rises_sharply`.
+
+### Known bias: the model is slightly too optimistic about busts
+
+The bottom PIT decile holds 11.3% of the mass instead of 10% (z = −3.04), and 82% of that
+excess is DNP outcomes. The hazard is mildly under-confident in its 0.10-0.20 band. This
+does not fail the run — the Phase 3 criterion is the right tail, which is clean — but it
+is reported on every run rather than left to be rediscovered, because **the direction is
+decision-relevant**: understating bust probability overstates the value of *passing* on a
+game, so the engine's residual bias is toward riding rather than banking. Anything in
+Phase 4 or 5 that looks oddly reluctant to lock should suspect this first.
+
+Two things were tried and did not fix it. The streak features improved discrimination and
+the right tail but left the left tail unchanged (z −3.14 → −3.04). Post-hoc recalibration
+was rejected rather than attempted: fitting it honestly needs cross-validated predictions
+at every cutoff, and fitting it on in-sample predictions would produce a recalibration
+that is itself wrong — a lot of machinery for roughly one percentage point.
+
+### The leakage rule is now executable
+
+Architecture doc §9 calls the point-in-time rule non-negotiable and asks for "a hard date
+cutoff in the projection interface, not a convention". As built:
+
+- `as_of` is a **required positional argument** of `ProjectionSource.project`. An
+  optional cutoff is a cutoff that eventually gets left out.
+- The implementation truncates history itself via `PlayerHistory.before(as_of)` rather
+  than trusting the caller. Every quantity — hazard coefficients, shock library, donor
+  pool, minutes level — is refit from rows strictly before the cutoff.
+- The cutoff is by **day**, not timestamp, which is slightly conservative: an evening game
+  cannot learn from an afternoon one. That is the correct direction to err.
+- `lockin calibrate` rebuilds the panel with the future deleted and asserts the
+  projections are bit-identical. Calibration this good is also what leakage looks like,
+  so the claim needed a test rather than an argument.
+
+### Deviations from the plan
+
+- **No season-stage-specific rest *calibration*, in the sense of separate fits.** The plan
+  said "calibrate rest risk separately by season stage". Refitting at every cutoff with a
+  stage feature achieves the same end with one model, and the playoff-week check confirms
+  it. Splitting the fit would have thinned the training set exactly where it is needed.
+- **"Role" is the minutes bucket plus the position group**, not a richer role model. For a
+  player's own donors he is his own cohort, so role conditioning only bites in the pooled
+  fallback for thin histories.
+- **A pooled fallback was added, which the plan did not specify.** Players with fewer than
+  12 prior played games draw donors partly from a league cohort matched on minutes bucket
+  and position, in proportion to how much own history exists. Without it the layer simply
+  refuses on early-season and newly-acquired players, and Phase 4 would have hit that
+  immediately. `basis` on every distribution records whether it was `own`, `mixed` or
+  `pooled`.
+- **Blowout truncation is not implemented.** The plan listed it as a later refinement and
+  it stays deferred; the donor-scaling approach partly absorbs it, since a blown-out
+  starter's short line is itself in the donor pool.
+
+### What Phase 4 inherits
+
+`ScoreDistribution.prob_above(threshold)` is the quantity a lock threshold is defined by,
+and it is now measured rather than assumed. `score_matrix` scores simulated component
+lines about three orders of magnitude faster than the per-line path while being proven
+equal to it, which is what makes a rollout policy tractable.
+
+The open risk is not calibration but **correlation**: projections are drawn independently
+per player. Slot assignment and the six-slot coupling in architecture doc §3.2 involve
+several players in the same week, and teammates' minutes are not independent. That does
+not affect a marginal calibration check — it would affect the variance of a *team* total,
+which is what the win-probability model in Phase 5 needs.

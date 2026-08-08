@@ -21,12 +21,19 @@ They must agree on every real game. If they ever disagree, simulated scores are
 wrong in a way that no amount of downstream testing would reveal — and the
 disagreement would live exactly at the 10/10 boundary, which is where the
 distribution's shape matters most.
+
+``score_matrix`` is ``score_line`` over a whole array of component lines at once.
+The projection layer scores millions of simulated lines per calibration run, so
+the per-line Python path is too slow to use directly — but it stays the
+definition of correctness, and a test asserts the two agree line by line.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+
+import numpy as np
 
 # Categories that count toward double-double / triple-double detection.
 # REB is TOTAL rebounds, even though total rebounds score 0.0 in this league.
@@ -206,6 +213,74 @@ def line_from_stats(stats: Mapping[str, float]) -> StatLine:
         tech=g("tf"),
         flagrant=g("ff"),
     )
+
+
+# --- vectorised path --------------------------------------------------------
+#
+# Column order is taken from StatLine's own fields rather than written out, so a
+# component added to the dataclass cannot silently desynchronise the two paths.
+
+COMPONENT_ORDER: tuple[str, ...] = tuple(f.name for f in fields(StatLine))
+COMPONENT_INDEX: dict[str, int] = {name: i for i, name in enumerate(COMPONENT_ORDER)}
+
+# Attributes StatLine exposes as properties rather than storing, expressed as
+# the columns they are derived from.
+_DERIVED: dict[str, tuple[str, str]] = {
+    "reb": ("oreb", "dreb"),
+    "fgmi": ("fga", "fgm"),
+    "ftmi": ("fta", "ftm"),
+    "tpmi": ("tpa", "tpm"),
+}
+
+
+def _column(comps: np.ndarray, attr: str) -> np.ndarray:
+    idx = COMPONENT_INDEX.get(attr)
+    if idx is not None:
+        return comps[:, idx]
+    a, b = _DERIVED[attr]
+    lhs, rhs = comps[:, COMPONENT_INDEX[a]], comps[:, COMPONENT_INDEX[b]]
+    return lhs + rhs if attr == "reb" else lhs - rhs
+
+
+def score_matrix(
+    comps: np.ndarray, scoring: Mapping[str, float], *, td_stacks_dd: bool = True
+) -> np.ndarray:
+    """Score an ``(n, len(COMPONENT_ORDER))`` array of component lines.
+
+    Semantically identical to calling :func:`score_line` on each row — same
+    derived bonuses, same derived missed shots, same refusal to ignore a
+    weighted stat it cannot represent. It exists only because the calibration
+    run scores tens of millions of simulated lines and the per-line path is
+    around three orders of magnitude too slow for that.
+    """
+    if comps.ndim != 2 or comps.shape[1] != len(COMPONENT_ORDER):
+        raise ValueError(f"expected an (n, {len(COMPONENT_ORDER)}) array, got {comps.shape}")
+
+    doubles = np.zeros(len(comps), dtype=np.int64)
+    for cat in DOUBLE_CATEGORIES:
+        doubles += _column(comps, cat) >= DOUBLE_THRESHOLD
+    td = (doubles >= 3).astype(np.float64)
+    dd = (doubles >= 2).astype(np.float64)
+    if not td_stacks_dd:
+        dd = np.where(td > 0, 0.0, dd)
+
+    total = np.zeros(len(comps), dtype=np.float64)
+    for key, weight in scoring.items():
+        if not weight:
+            continue
+        if key == "dd":
+            total += weight * dd
+        elif key == "td":
+            total += weight * td
+        else:
+            attr = _COMPONENT_KEYS.get(key)
+            if attr is None:
+                raise UnscorableStat(
+                    f"scoring_settings weights {key!r} at {weight}, but StatLine has no"
+                    f" component for it; add it to _COMPONENT_KEYS and StatLine"
+                )
+            total += weight * _column(comps, attr)
+    return np.round(total, 2)
 
 
 # --- derived economics ------------------------------------------------------

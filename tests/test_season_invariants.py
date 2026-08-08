@@ -399,3 +399,67 @@ def test_ambiguous_cases_never_claim_a_matched_game_they_cannot_know(conn):
         "   AND matched_game_index IS NOT NULL AND locked_early = 1"
     ).fetchone()["c"]
     assert bad == 0
+
+
+# --- projection inputs --------------------------------------------------------
+
+
+def test_every_rostered_row_carries_a_point_in_time_position(conn):
+    """The projection layer reads role from `pit_positions`, never from `players`.
+
+    `/players/nba` is a live snapshot, so reconstructing a past week from it
+    imports next season's roster moves. Coverage is complete today; if ingest or
+    Sleeper ever stops embedding the player object, `position_group` would
+    silently reclassify everyone affected as a forward rather than failing.
+    """
+    missing = conn.execute(
+        """
+        SELECT COUNT(*) c
+          FROM box_scores b
+          JOIN game_links g ON g.sleeper_game_id = b.sleeper_game_id
+         WHERE COALESCE(g.is_exhibition, 0) = 0
+           AND COALESCE(g.occurred, 1) = 1
+           AND COALESCE(b.is_team_row, 0) = 0
+           AND b.sleeper_id IN (SELECT DISTINCT sleeper_id FROM weekly_matchups_latest)
+           AND (b.pit_positions IS NULL OR b.pit_positions = '[]')
+        """
+    ).fetchone()["c"]
+    assert missing == 0
+
+
+def test_the_panel_holds_every_rostered_player_and_no_team_rows(conn):
+    """What the projection layer actually sees, end to end."""
+    from lockin.projections import load_panel, rostered_player_ids
+
+    panel = load_panel(conn, cfg.season)
+    assert set(panel.histories) == set(rostered_player_ids(conn))
+    assert len(panel.day) == len(panel.components)
+    assert panel.minutes.min() >= 0.0
+    # A team-aggregate row would show up as a 100-point "player" game.
+    assert panel.components.max() < 100
+
+
+def test_late_season_dnp_rate_rises_sharply(conn):
+    """Architecture doc §9's warning, confirmed in this league's data.
+
+    Rest risk is not stationary: playoff-secured teams sit starters exactly in
+    the fantasy playoff weeks, which is when the engine's decisions are worth
+    the most. A DNP model fit on November and left alone would be badly
+    miscalibrated here, which is why the hazard is refit at every cutoff and
+    carries a season-stage feature.
+    """
+    rows = conn.execute(
+        """
+        SELECT CASE WHEN b.fantasy_week >= 22 THEN 'playoffs' ELSE 'regular' END AS stage,
+               AVG(1.0 - b.played) AS dnp_rate, COUNT(*) AS n
+          FROM box_scores b
+          JOIN game_links g ON g.sleeper_game_id = b.sleeper_game_id
+         WHERE COALESCE(g.is_exhibition, 0) = 0
+           AND COALESCE(g.occurred, 1) = 1
+           AND COALESCE(b.is_team_row, 0) = 0
+           AND b.sleeper_id IN (SELECT DISTINCT sleeper_id FROM weekly_matchups_latest)
+         GROUP BY stage
+        """
+    ).fetchall()
+    rate = {r["stage"]: r["dnp_rate"] for r in rows}
+    assert rate["playoffs"] > rate["regular"] + 0.05

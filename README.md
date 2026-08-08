@@ -13,15 +13,17 @@ The Sleeper API is read-only, so nothing here acts on your behalf. Every recomme
 is executed by hand in the app.
 
 - [`docs/sleeper-lockin-engine-architecture.md`](docs/sleeper-lockin-engine-architecture.md) — the design
-- [`docs/implementation-plan.md`](docs/implementation-plan.md) — the build plan and what was verified against the live API
+- [`docs/implementation-plan.md`](docs/implementation-plan.md) — the build plan, what was verified against the live API, and a write-up per completed phase
 
 ## Status
 
-**Phases 0-2 complete** — the committed scope. Ingest, the scoring engine, and
-retrospective lock inference, all validated against the full 2025-26 season. Every
-nonzero counted score in all 25 weeks is reproduced from box scores to the cent, and
-98.2% of starter player-weeks resolve to a specific lock decision. Phases 3-6
-(projections, simulation, rollout, digest) are deferred.
+**Phases 0-3 complete.** Ingest, the scoring engine, retrospective lock inference and the
+projection layer, all validated against the full 2025-26 season. Every nonzero counted
+score in all 25 weeks is reproduced from box scores to the cent, 98.2% of starter
+player-weeks resolve to a specific lock decision, and projected quantiles match realised
+frequencies on held-out weeks — including the right tail, which is the only part that
+decides whether banking a score is correct. Phases 4-6 (simulation, rollout, digest) are
+deferred.
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
@@ -180,7 +182,71 @@ opponent's frozen score is locked or merely unplayed.
 It runs across **all ten rosters**, not just yours — Phase 5 replays every roster to get
 105 matchups of evaluation power instead of 21.
 
-Commands arriving with later phases: `digest`, `explain`, `backtest`.
+### `lockin calibrate`
+
+Projects every eligible player-game from its own past and checks the predicted quantiles
+against what actually happened. Exits nonzero on any gate failure.
+
+```bash
+uv run lockin calibrate
+uv run lockin calibrate --draws 4000 --json
+```
+
+```
+projected 12298 player-games; 5126 held out (weeks 18-25)
+
+  PIT deciles, held out (each should be 0.100)
+    0.113 0.099 0.093 0.096 0.105 0.097 0.099 0.100 0.101 0.097
+
+[PASS] right-tail quantiles match realised frequencies, out of sample
+       q0.90: 0.0964 vs 0.100 (z=-0.87); q0.95: 0.0468 vs 0.050 (z=-1.04); q0.99: 0.0105 vs 0.010 (z=+0.38)
+[PASS] central quantiles match realised frequencies, out of sample
+[PASS] left-tail calibration (advisory)
+[PASS] calibration holds through the fantasy playoffs
+[PASS] DNP hazard is calibrated and informative
+[PASS] projection is sharper than the naive predictors
+[PASS] projections use no data at or after as_of
+```
+
+Weeks 1-17 chose the model's handful of hyperparameters; **weeks 18-25 are held out** and
+are what the gate is scored on. A stopping policy always looks excellent in-sample.
+
+The right tail is the one that matters. The engine's whole job is deciding whether
+tonight's score beats what the rest of the week might produce, and that judgement lives
+entirely in the upper quantiles — a projection with a perfect mean and a 20%
+understatement of P(score > 55) would bank far too eagerly, and no accuracy metric would
+notice.
+
+Two of these checks exist to stop the gate passing for the wrong reason. **Sharpness**:
+a distribution wide enough to cover anything calibrates trivially and decides nothing, so
+the model must also beat the player's own history and the league marginal on CRPS.
+**Leakage**: perfect calibration is also what reading the future looks like, so the gate
+rebuilds the panel with the future deleted and asserts the projections come out
+bit-identical.
+
+### `lockin project`
+
+One player, one game, from data strictly before that date.
+
+```bash
+uv run lockin project 1970 --as-of 2026-03-06 --week 20
+```
+
+```
+player 1970  2026-03-06  week 20
+  basis        own (50 prior played games)
+  P(does not play) 13.9%
+  mean         51.7
+  q0.50        50.5
+  q0.90        96.5
+  q0.99        130.5
+```
+
+`basis` says where the component draws came from — `own`, or `pooled`/`mixed` when the
+player has too little history and a league cohort matched on minutes and position fills
+in.
+
+Commands arriving with later phases: `digest`, `backtest`.
 
 ## Configuration
 
@@ -201,7 +267,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 140 tests, <1s
+uv run pytest              # 202 tests, ~1s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -209,6 +275,13 @@ uv run ruff format lockin/ tests/
 `lockin/core/` is pure — no network, no database, no clock, no `random`. That is enforced
 by `tests/test_core_purity.py` rather than left as a convention, because a stopping policy
 entangled with I/O cannot be replayed, and the entire backtest depends on replaying it.
+Randomness always arrives as an explicit `numpy.random.Generator`, so the same seed gives
+the same projection twice.
+
+The gates themselves (`reconcile`, `verify`, `locks`, `calibrate`) are CLI commands rather
+than tests — they need the ingested season, and `calibrate` takes about nine seconds. The
+test suite covers the machinery underneath them, including that each gate would actually
+*fail*: a check that cannot fail is not a gate.
 
 Tests in `tests/test_season_invariants.py` run against the real ingested database and
 skip automatically when it is absent. They pin the data semantics below, so that a change
@@ -275,6 +348,19 @@ in weeks 23-24, and week 25 is unscored entirely.
 **There are 25 fantasy weeks, not 24.** Weeks 1-21 regular season, 22-24 playoffs, 25
 unscored.
 
+**There is no injury history, so the DNP model cannot use one.** `player_status` is empty
+and `dnp_reason` is NULL on all 16,692 unplayed rows; `/players/nba` publishes only
+today's designation, which is unusable for a replay. The hazard is therefore built from
+observed availability, rest and load alone. That costs less than it sounds, because
+absence is strongly autocorrelated: **76.4% of games following a DNP are also DNPs,
+against 9.0% following a played game.**
+
+**A quarter of rostered player-games are DNPs, and the rate climbs late.** 22.7% in weeks
+1-7, **33.9% in weeks 22-25** — playoff-secured teams resting starters, exactly during the
+fantasy playoffs. Any availability model fit early and left alone is miscalibrated
+precisely when the decisions are worth the most, so the hazard is refit at every cutoff
+and carries a season-stage feature.
+
 ## Layout
 
 ```
@@ -282,8 +368,10 @@ lockin/
   config.py        league, season, db path
   core/            pure — no network, no database, no clock
     scoring.py     score_line (derives bonuses) / score_recorded (as given)
+                   score_matrix (the same, vectorised, for the simulator)
     eligibility.py which players may fill which slots, plus overrides
     locks.py       recover a lock decision from a counted score
+    projections.py DNP hazard, minutes, component bootstrap; as_of enforced
   ingest/
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
@@ -295,6 +383,8 @@ lockin/
   reconcile.py     the Phase 0 gates — ingest completeness
   verify.py        the Phase 1 gates — scoring against the recorded season
   locks.py         the Phase 2 gates — inference over all ten rosters
+  projections.py   builds the point-in-time panel from SQLite
+  calibrate.py     the Phase 3 gates — quantiles against realised frequencies
   cli.py
 tests/
 docs/
