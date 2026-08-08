@@ -1037,8 +1037,61 @@ and it is now measured rather than assumed. `score_matrix` scores simulated comp
 lines about three orders of magnitude faster than the per-line path while being proven
 equal to it, which is what makes a rollout policy tractable.
 
-The open risk is not calibration but **correlation**: projections are drawn independently
-per player. Slot assignment and the six-slot coupling in architecture doc §3.2 involve
-several players in the same week, and teammates' minutes are not independent. That does
-not affect a marginal calibration check — it would affect the variance of a *team* total,
-which is what the win-probability model in Phase 5 needs.
+**Correction to an earlier draft of this section**, which said the open risk was
+cross-player correlation and filed it under Phase 5. That understated it and put it in the
+wrong phase. The larger dependence is *within* a player's own week, and it blocks Phase 4
+rather than Phase 5.
+
+### The marginal is calibrated; the joint is not, and Phase 4 needs the joint
+
+`project()` returns the distribution of **one** player-game from **one** cutoff, and that
+is what the Phase 3 gate measures. It is correct and sufficient for what it claims. It is
+not sufficient for simulating a week, because calling it once per remaining game and
+treating the draws as independent is badly wrong:
+
+```
+             observed        under          understated
+games/week   P(all DNP)      independence   by
+    2          0.1994          0.0633          3.1x
+    3          0.1609          0.0147         11.0x
+    4          0.1579          0.0056         28.1x
+```
+
+Availability is a persistent *state*, not a per-game coin flip: an injured player misses
+the whole week. Independent draws price a four-game washout at 0.6% when it happens 15.8%
+of the time.
+
+The decision-relevant form of this is stark. Given a player who played at least one game
+earlier in the week, **P(his final game is a DNP) = 13.4%** — that is the rate at which
+riding to Sunday collects a 0.0, and it is precisely the disaster the tool exists to
+prevent (architecture doc §12's roster-7 example). Independent sampling would put it near
+2%.
+
+**Both known biases push the same way.** The left-tail DNP bias overstates the value of
+passing, and independent within-week draws overstate it again — more independent chances
+at an outlier makes the maximum of the remaining games stochastically larger, while the
+washout risk vanishes. They compound rather than cancel, and the direction is toward
+riding.
+
+Note the two consequences are not the same kind of thing:
+
+- As a *test*, this makes Phase 4's gate harder to pass — greedy will lock less than it
+  should, so the measured gap over never-lock shrinks. Passing anyway would be a strong
+  result.
+- As a *product*, it is not conservative at all. It biases the policy toward the exact
+  failure mode the engine is meant to avoid.
+
+**The fix is small and the API already allows it.** `dnp_feature_row` takes
+`(prior_days, prior_played, target_day, fantasy_week)` as arrays, so a simulated path can
+feed its own drawn outcomes back in: fit the hazard once at `as_of` (no leakage — the
+coefficients are still point-in-time), then apply it along each simulated path with the
+state updated after every drawn game. The minutes EWMA extends the same way. What Phase 4
+must not do is call `project()` n times and multiply.
+
+### Cross-player correlation is also more common than assumed
+
+**42% of roster-weeks (105/250) start two or more players from the same NBA team.** That
+is far from the rare case worth deferring. It still does not affect a marginal calibration
+check, and it can stay deferred through Phase 4 — but Phase 5's win-probability model
+needs the variance of a *team* total, and at 42% overlap a teammate-independence
+assumption there is not defensible.
