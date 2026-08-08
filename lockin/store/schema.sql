@@ -204,12 +204,28 @@ CREATE TABLE IF NOT EXISTS lock_inferences (
     week                INTEGER NOT NULL,
     roster_id           INTEGER NOT NULL,
     sleeper_id          TEXT NOT NULL,
+    status              TEXT NOT NULL,   -- see core.locks.LockStatus
     n_games             INTEGER NOT NULL,
     matched_game_index  INTEGER,
     locked_game_id      TEXT,
-    ambiguous_indices   TEXT,        -- JSON array, empty when unambiguous
+    locked_early        INTEGER,         -- 1 / 0 / NULL when undetermined
+    counted_points      REAL,
+    ambiguous_indices   TEXT,            -- JSON array, empty when unambiguous
     confidence          REAL NOT NULL,
     PRIMARY KEY (week, roster_id, sleeper_id)
+);
+
+-- Per-manager stopping tendency: "locks early and safe" vs "rides to Sunday".
+-- Built for all ten rosters, not just ours — the Phase 5 evaluation replays
+-- every roster, and the live opponent model needs a profile per manager.
+CREATE TABLE IF NOT EXISTS manager_profiles (
+    roster_id           INTEGER PRIMARY KEY,
+    decisions           INTEGER NOT NULL,
+    locked_early        INTEGER NOT NULL,
+    rode_to_end         INTEGER NOT NULL,
+    lock_rate           REAL NOT NULL,
+    mean_lock_position  REAL,
+    computed_at         TEXT NOT NULL
 );
 
 -- Phase 6 output. Present so the read layer has a stable target.

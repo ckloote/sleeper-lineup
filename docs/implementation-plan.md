@@ -1,7 +1,7 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — committed scope is **Phases 0-2**. Phases 0-1 complete (§9, §10).
+**Status:** Approved — committed scope is **Phases 0-2**, all complete (§9, §10, §11).
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -570,3 +570,197 @@ core with `socket.socket` and `sqlite3.connect` stubbed to raise still works.
 `random` is barred as well. Simulation must take an explicit numpy `Generator`, or a
 backtest cannot be reproduced exactly, and an irreproducible backtest of a stopping policy
 is worth very little.
+
+---
+
+## 11. Phase 2 — complete
+
+The committed scope is finished. All four gates closed across **all ten rosters**.
+
+```
+[PASS] slot-eligibility rule explains every observed lineup   1500/1500 (3 overrides)
+[PASS] no counted score fails to match a game                 0 unresolved
+[PASS] starter player-weeks resolved at high confidence       1473/1500 (98.20%)
+[PASS] every roster has a lock-tendency profile               10/10
+```
+
+Target was ≥95%. Breakdown of the 1,500 starter player-weeks:
+
+```
+locked_early    811     an unambiguous, deliberate lock
+rode_to_end     641     counted the final game's outcome
+ambiguous        27     several games share the counted value
+single_game      21     one game scheduled; no decision existed
+```
+
+### Manager profiles
+
+```
+roster  decisions  early  rode  lock_rate  mean_pos
+     3        148    100    48      67.6%      0.48
+     9        147     91    56      61.9%      0.54
+    10        145     87    58      60.0%      0.56
+     4        148     84    64      56.8%      0.55
+     6        145     82    63      56.6%      0.58
+     8        145     82    63      56.6%      0.57
+     7        143     76    67      53.1%      0.60
+     1        149     79    70      53.0%      0.57
+     5        146     76    70      52.1%      0.59
+     2        148     66    82      44.6%      0.68
+```
+
+A 23-point spread between the earliest banker and the latest rider, and `mean_pos` (where
+in the week the counted game sat, 0.0 first to 1.0 last) moves with it. This is the
+"locks early and safe vs. rides to Sunday" trait architecture doc §10 wants, and it is
+real signal rather than noise around a common strategy.
+
+Worth noting for the eventual opponent model: **your roster (1) is close to the middle**
+at 53.0%, and no manager is anywhere near an extreme. Nobody in this league is playing an
+obviously exploitable stopping policy.
+
+### What ambiguity actually looks like
+
+27 cases, all the same shape: a player scored the identical value in two games that week,
+so which one was locked is unrecoverable. Karl-Anthony Towns in week 9 scored 45.0 twice
+and counted 45.0 — locking is certain (riding would have counted 3.0), the game is not.
+
+These are flagged with `confidence = 0.5` and `matched_game_index = NULL`, never guessed.
+A separate and subtler case: when an *earlier* game matches the ride score, riding
+explains the outcome but so does locking early at the same value. The outcome is
+identical, so `matched_game_index` is still the final game — but `locked_early` stays
+NULL rather than defaulting to False, or the tendency profile would inherit a systematic
+bias toward "rides".
+
+### Slot eligibility, derived
+
+Sleeper does not publish the rule. From 1,500 real starter-slot assignments:
+
+| slot | allowed positions | violations |
+|---|---|---|
+| PG | PG, SG | 0 / 250 |
+| G | PG, SG | 0 / 250 |
+| F | SF, PF, C | **17** / 250 |
+| C | C, PF | 0 / 250 |
+| UTIL | any | 0 / 500 |
+
+Three slots are exactly determined. `F` is not: 17 assignments put a player listed
+`['PG','SG']` into it, from exactly three players — Amen Thompson (2574), Nickeil
+Alexander-Walker (2055), Ayo Dosunmu (2255). Sleeper's own eligibility is broader than
+the `fantasy_positions` it publishes for them.
+
+They are carried as per-player overrides rather than by widening `F`. The asymmetry
+matters: too strict silently removes legal lineups from consideration, which is
+invisible; too permissive recommends a lineup Sleeper rejects, which the user hits
+immediately. Keeping the base rule tight and enumerating the exceptions fails in the
+visible direction.
+
+A detour worth recording: the first pass tested whether each `starters[i]` matched
+`roster_positions[i]` and found 56 violations, which looked like the rule being wrong.
+The better test was whether a *valid assignment exists* for the lineup — and the decisive
+evidence that `starters` really is slot-ordered is that a pure guard never once appeared
+at C in 250 observations. If the ordering were meaningless, guards would land at C at
+roughly their population rate.
+
+### The Cup final, now load-bearing
+
+Phase 0 argued the NBA Cup championship counts because two managers appeared to lock on
+it. That was half right. Karl-Anthony Towns is one of the 27 ambiguous cases and proves
+nothing — he scored 45.0 twice that week.
+
+**Josh Hart is the real evidence.** His week-9 counted score of 30.0 matches *only* the
+Cup final; riding would have given 46.0. Remove that game from the sequence and his score
+matches nothing, so the "0 unresolved" gate would fail. The gate now carries that claim
+directly, which is stronger than an argument in a comment.
+
+### Deviation from the plan
+
+The plan said inference "runs off `starters` + `starters_points`". In practice it runs
+off `weekly_matchups` filtered to `is_starter = 1`, which is the same six players per
+roster-week — the ingest already resolved the `starters` array into per-player rows with
+`slot_index`. The substance of the correction (never infer from bench players'
+`players_points`) holds.
+
+---
+
+## 12. Sleeper mutates completed-season data — found 2026-08-07
+
+**This affects the backtest premise and needs a decision.**
+
+Between 2026-08-05 and 2026-08-07, Sleeper changed the recorded results of the completed
+2025-26 season. Not stat corrections — **which game counts** for each player changed.
+
+### Evidence
+
+Week 12, comparing a raw API snapshot taken 2026-08-05 against today:
+
+```
+  roster  1: 4/6 starters changed   points 301.5 -> 293.5
+  roster  2: 3/6 starters changed   points 276.0 -> 295.5
+  roster  3: 2/6 starters changed   points 346.5 -> 331.0
+  roster  4: 1/6 starters changed   points 289.5 -> 291.5
+  roster  5: 1/6 starters changed   points 287.5 -> 287.0
+  roster  6: 2/6 starters changed   points 237.5 -> 242.5
+  roster  7: 3/6 starters changed   points 221.5 -> 289.0
+  roster  8: 3/6 starters changed   points 279.5 -> 310.5
+  roster  9: 3/6 starters changed   points 341.5 -> 313.0
+  roster 10: 1/6 starters changed   points 275.5 <- 278.5
+
+  23 of 60 starter values changed (38%). Every team total changed.
+```
+
+The `starters` arrays are identical. The **box scores are byte-identical**: 2,069 rows,
+zero added, zero removed, zero with different stats. So this is not a stat correction
+rippling through — the underlying games are unchanged and only the selection of which
+game counts moved.
+
+### The 2026-08-05 values are the real ones
+
+Corroborated by a source written before this project started: the architecture doc's own
+week-12 anecdotes.
+
+| architecture doc claim | 2026-08-05 | today |
+|---|---|---|
+| "one of five matchups finished 289.5 to 287.5" | roster 4 = 289.5, roster 5 = 287.5 ✓ | 291.5 / 287.0 ✗ |
+| "roster 7 started a player who finished 0.0 and lost by 58" | 221.5 vs 279.5, diff 58.0 ✓ | 289.0 vs 310.5, diff 21.5 ✗ |
+
+Both claims match the snapshot exactly and neither matches today. Whatever Sleeper is now
+returning, it is not what happened during the season.
+
+### What this costs
+
+- **The Phase 2 lock inference ran against the mutated data.** Its 98.20% resolution rate
+  is genuine — the values still match real games — but the decisions it recovered are not
+  necessarily the managers' actual decisions, and the manager profiles inherit that.
+- **Only week 12 survives.** A raw snapshot happened to be sitting in a scratch directory;
+  the other 24 weeks' original values are gone. Both surviving files are now committed
+  under `tests/golden/`.
+- **The loss was self-inflicted.** Architecture doc §7 insists `weekly_matchups` be
+  append-only with `observed_at` precisely because "the polling history is irreplaceable
+  after the fact". The schema honours that. The workflow did not: re-ingesting with
+  `rm -f data/lockin.db*` destroyed the earlier observations. Rebuilding from scratch is
+  no longer a safe operation on this table.
+
+### What it does not cost
+
+Phases 0 and 1 are unaffected in substance. Box scores are stable, so the scoring engine's
+proof still holds — `lockin verify` reproduces every counted value from box scores under
+both versions, because both versions select a real game. The ingest, schema and scoring
+function need no changes.
+
+### Open question
+
+Whether the season's results are recoverable at all. Sleeper publishes no historical
+endpoint, so absent a snapshot the original values are simply gone. Options, in rough
+order of how much they salvage:
+
+1. **Treat today's data as canonical** and accept the backtest measures policy against a
+   plausible-but-counterfactual season. Cheapest; the human baseline becomes fictional.
+2. **Restrict the backtest to week 12**, the one week with verified ground truth. Honest
+   but far too small to support any conclusion.
+3. **Poll and preserve from here**, accept 2025-26 is compromised as a human baseline, and
+   treat the backtest as validating policy-vs-policy rather than policy-vs-human. The
+   never-lock / lock-first / greedy / rollout comparison only needs box scores, which are
+   stable — so most of §12's backtest survives. Only the "Actual" column is unreliable.
+
+Option 3 preserves the most: architecture doc §12 lists five policies and only **Actual**
+depends on the mutated field.

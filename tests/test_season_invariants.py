@@ -249,20 +249,28 @@ def test_postponed_fixtures_are_recorded_as_not_occurred(conn):
 
 
 def test_an_unlocked_starter_whose_final_real_game_was_a_dnp_scores_zero(conn):
-    """The architecture doc's rule, confirmed against a real instance.
+    """The architecture doc's rule: a thrown-away week looks like this.
 
-    Week 12, roster 7: a starter scored 61.0 in his only appearance, sat out the
-    team's final game of the week, was never locked, and counted 0.0.
+    Asserts the PATTERN rather than a named instance. It originally pinned week
+    12 / roster 7, which was correct on 2026-08-05 and stopped being correct when
+    Sleeper mutated the completed season (implementation-plan.md §12). The
+    mechanic is what matters, and it survives the mutation.
     """
-    row = conn.execute(
-        "SELECT * FROM weekly_matchups"
-        " WHERE week = 12 AND roster_id = 7 AND is_starter = 1 AND counted_points = 0.0"
-    ).fetchone()
-    assert row is not None, "expected the zeroed starter in week 12 roster 7"
+    zeroed = conn.execute(
+        "SELECT week, roster_id, sleeper_id FROM weekly_matchups"
+        " WHERE is_starter = 1 AND counted_points = 0.0"
+        " GROUP BY week, roster_id, sleeper_id"
+    ).fetchall()
+    assert zeroed, "expected at least one zeroed starter slot in the season"
 
-    games = games_for(conn, row["sleeper_id"], 12)
-    assert games[-1]["played"] == 0, "his final scheduled game should be a DNP"
-    assert any(g["played"] for g in games), "he should have played earlier in the week"
+    thrown_away = 0
+    for row in zeroed:
+        games = games_for(conn, row["sleeper_id"], row["week"])
+        if games and not games[-1]["played"] and any(g["played"] for g in games):
+            thrown_away += 1
+    assert thrown_away > 0, (
+        "no starter counted 0.0 after playing earlier in the week and sitting the finale"
+    )
 
 
 # --- coverage ---------------------------------------------------------------
@@ -303,3 +311,86 @@ def test_starters_points_sum_to_the_team_total(conn):
         if abs(s - t["points"]) > 0.001:
             mismatches.append((t["week"], t["roster_id"], t["points"], s))
     assert not mismatches, f"starter sums differ from team points: {mismatches[:5]}"
+
+
+# --- lock inference (Phase 2) -----------------------------------------------
+#
+# Populated by `lockin locks`. Skipped until it has been run.
+
+
+def _have_inferences(conn) -> bool:
+    return conn.execute("SELECT COUNT(*) c FROM lock_inferences").fetchone()["c"] > 0
+
+
+def test_every_starter_player_week_has_an_inference(conn):
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    starters = conn.execute(
+        "SELECT COUNT(*) c FROM (SELECT week, roster_id, sleeper_id FROM weekly_matchups"
+        " WHERE is_starter = 1 GROUP BY week, roster_id, sleeper_id)"
+    ).fetchone()["c"]
+    inferred = conn.execute("SELECT COUNT(*) c FROM lock_inferences").fetchone()["c"]
+    assert inferred == starters
+
+
+def test_no_counted_score_is_unresolved(conn):
+    """A counted value matching no game means the scoring or the game set is wrong."""
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    n = conn.execute(
+        "SELECT COUNT(*) c FROM lock_inferences WHERE status = 'unresolved'"
+    ).fetchone()["c"]
+    assert n == 0
+
+
+def test_resolution_rate_clears_the_gate(conn):
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    total = conn.execute("SELECT COUNT(*) c FROM lock_inferences").fetchone()["c"]
+    resolved = conn.execute(
+        "SELECT COUNT(*) c FROM lock_inferences WHERE confidence >= 1.0 AND status != 'unresolved'"
+    ).fetchone()["c"]
+    assert resolved / total >= 0.95
+
+
+def test_the_cup_final_is_required_to_resolve_a_real_lock(conn):
+    """Josh Hart's week-9 counted score matches ONLY the NBA Cup final.
+
+    This is the load-bearing evidence that the Cup final scores: drop it from
+    the game sequence and his 30.0 matches nothing, so `no counted score is
+    unresolved` would fail. Karl-Anthony Towns does NOT prove it — he scored
+    45.0 twice that week and is correctly flagged ambiguous.
+    """
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    cup = conn.execute(
+        "SELECT sleeper_game_id FROM game_links WHERE nba_game_id LIKE '006%'"
+    ).fetchone()
+    assert cup is not None, "NBA Cup final missing from the schedule"
+    n = conn.execute(
+        "SELECT COUNT(*) c FROM lock_inferences WHERE locked_game_id = ?",
+        (cup["sleeper_game_id"],),
+    ).fetchone()["c"]
+    assert n >= 1, "no lock resolves to the Cup final; it may have been excluded"
+
+
+def test_managers_differ_in_lock_tendency(conn):
+    """If every roster profiled identically the signal would be worthless."""
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    rates = [r["lock_rate"] for r in conn.execute("SELECT lock_rate FROM manager_profiles")]
+    assert len(rates) == 10
+    assert max(rates) - min(rates) > 0.10, f"lock rates are too uniform: {rates}"
+
+
+def test_ambiguous_cases_never_claim_a_matched_game_they_cannot_know(conn):
+    """Where several games share the counted value and riding does not explain
+    it, matched_game_index must be NULL rather than a guess."""
+    if not _have_inferences(conn):
+        pytest.skip("run `lockin locks`")
+    bad = conn.execute(
+        "SELECT COUNT(*) c FROM lock_inferences"
+        " WHERE status = 'ambiguous' AND confidence < 1.0"
+        "   AND matched_game_index IS NOT NULL AND locked_early = 1"
+    ).fetchone()["c"]
+    assert bad == 0

@@ -17,10 +17,21 @@ is executed by hand in the app.
 
 ## Status
 
-**Phases 0-1 complete.** Ingest, storage and reconciliation, plus the scoring engine —
-all validated against the full 2025-26 season. Every nonzero counted score in all 25
-weeks is reproduced from box scores to the cent. Phase 2 (retrospective lock inference)
-is next; 3-6 are deferred.
+**Phases 0-2 complete** — the committed scope. Ingest, the scoring engine, and
+retrospective lock inference, all validated against the full 2025-26 season. Every
+nonzero counted score in all 25 weeks is reproduced from box scores to the cent, and
+98.2% of starter player-weeks resolve to a specific lock decision. Phases 3-6
+(projections, simulation, rollout, digest) are deferred.
+
+> ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
+> finished 2025-26 season changed under us: 38% of week-12 starter values and every team
+> total. Box scores were byte-identical, so only *which game counts* moved. The original
+> values for week 12 survive in `tests/golden/`; the other 24 weeks are gone. This does
+> not affect Phases 0-1 — box scores are stable — but it does compromise the human
+> baseline the backtest was meant to beat. See
+> [implementation-plan.md §12](docs/implementation-plan.md) before relying on the
+> 2025-26 lock decisions, and **do not rebuild the database by deleting it**:
+> `weekly_matchups` is append-only for exactly this reason.
 
 ## Requirements
 
@@ -130,6 +141,36 @@ and score a *component* line where they must be derived at the 10/10 boundary. T
 simulator will only ever have components, so if the derivation were wrong, every
 simulated score would be wrong in a way no downstream test would reveal.
 
+### `lockin locks`
+
+Recovers every manager's lock decisions for the whole season and profiles their stopping
+tendency. Writes `lock_inferences` and `manager_profiles`.
+
+```bash
+uv run lockin locks --profiles
+```
+
+```
+inferred 1500 starter player-weeks, 1473 resolved
+
+  locked_early           811
+  rode_to_end            641
+  ambiguous               27
+  single_game             21
+
+manager lock tendency (higher lock_rate = banks earlier)
+  roster  decisions  early   rode  lock_rate  mean_pos
+       3        148    100     48      67.6%      0.48
+       2        148     66     82      44.6%      0.68
+```
+
+The spread is the point: roster 3 banks early, roster 2 rides to Sunday. That is a
+per-manager trait the live opponent model uses to sharpen its belief about whether an
+opponent's frozen score is locked or merely unplayed.
+
+It runs across **all ten rosters**, not just yours — Phase 5 replays every roster to get
+105 matchups of evaluation power instead of 21.
+
 Commands arriving with later phases: `digest`, `explain`, `backtest`.
 
 ## Configuration
@@ -150,7 +191,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 76 tests, <1s
+uv run pytest              # 140 tests, <1s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -201,6 +242,14 @@ rather than dropped — team totals are useful context for the projection layer.
 players too, and a bench player's value can freeze mid-week without a lock having
 happened. Lock inference reads `starters`/`starters_points`.
 
+**Slot eligibility is not published, and `fantasy_positions` is not quite it.** Derived
+from 1,500 real assignments: `PG` and `G` take guards, `C` takes `C`/`PF`, `F` takes
+`SF`/`PF`/`C`, `UTIL` takes anyone. Three slots came back exactly determined — zero
+violations in 250 observations each. `F` did not: three players listed `['PG','SG']`
+started there anyway, so Sleeper's real eligibility is broader than what it publishes for
+them. Those are carried as per-player overrides rather than by loosening `F` for every
+guard, because being too permissive recommends lineups Sleeper rejects.
+
 **`/players/nba` is a live snapshot with no history.** Today's positions and team are not
 January's. Anything reconstructing a past week reads `box_scores.pit_positions` and
 `pit_team`, captured per game.
@@ -218,6 +267,8 @@ lockin/
   config.py        league, season, db path
   core/            pure — no network, no database, no clock
     scoring.py     score_line (derives bonuses) / score_recorded (as given)
+    eligibility.py which players may fill which slots, plus overrides
+    locks.py       recover a lock decision from a counted score
   ingest/
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
@@ -227,6 +278,7 @@ lockin/
     db.py          single-writer SQLite
   reconcile.py     the Phase 0 gates — ingest completeness
   verify.py        the Phase 1 gates — scoring against the recorded season
+  locks.py         the Phase 2 gates — inference over all ten rosters
   cli.py
 tests/
 docs/

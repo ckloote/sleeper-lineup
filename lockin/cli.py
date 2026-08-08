@@ -11,6 +11,7 @@ import sys
 
 import click
 
+from lockin import locks as locks_mod
 from lockin import reconcile as reconcile_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config
@@ -118,6 +119,40 @@ def verify(as_json: bool) -> None:
         checks = verify_mod.run(conn, cfg.season)
 
     _render(checks, "Phase 1 scoring verification", as_json)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--profiles", is_flag=True, help="Print each manager's lock tendency.")
+def locks(as_json: bool, profiles: bool) -> None:
+    """Recover every manager's lock decisions from the recorded season."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        rows, resolved = locks_mod.run_inference(conn, cfg.season)
+        built = locks_mod.build_profiles(conn)
+        checks = locks_mod.run(conn, cfg.season)
+        breakdown = locks_mod.status_breakdown(conn)
+
+    if not as_json:
+        click.echo(f"inferred {rows} starter player-weeks, {resolved} resolved\n")
+        for status, n in breakdown:
+            click.echo(f"  {status:<20} {n:>5}")
+        click.echo()
+        if profiles:
+            click.echo("manager lock tendency (higher lock_rate = banks earlier)")
+            click.echo(
+                f"  {'roster':>6}  {'decisions':>9}  {'early':>5}  {'rode':>5}"
+                f"  {'lock_rate':>9}  {'mean_pos':>8}"
+            )
+            for p in sorted(built, key=lambda x: -x.lock_rate):
+                pos = f"{p.mean_lock_position:.2f}" if p.mean_lock_position is not None else "  -"
+                click.echo(
+                    f"  {p.roster_id:>6}  {p.decisions:>9}  {p.locked_early:>5}"
+                    f"  {p.rode_to_end:>5}  {p.lock_rate:>9.1%}  {pos:>8}"
+                )
+            click.echo()
+
+    _render(checks, "Phase 2 lock inference", as_json)
 
 
 def _render(checks, title: str, as_json: bool) -> None:

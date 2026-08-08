@@ -32,6 +32,14 @@ def connect(db_path: Path) -> sqlite3.Connection:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "game_links": {"occurred": "INTEGER", "is_exhibition": "INTEGER"},
     "box_scores": {"is_team_row": "INTEGER"},
+    # Added columns are nullable even where schema.sql declares NOT NULL:
+    # SQLite cannot ALTER TABLE ADD a NOT NULL column without a default. A
+    # freshly created database gets the stricter definition.
+    "lock_inferences": {
+        "status": "TEXT",
+        "locked_early": "INTEGER",
+        "counted_points": "REAL",
+    },
 }
 
 
