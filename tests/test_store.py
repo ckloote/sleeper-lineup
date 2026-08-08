@@ -91,3 +91,57 @@ def test_foreign_keys_are_enforced(tmp_path):
         except sqlite3.IntegrityError:
             return
         raise AssertionError("expected a foreign key violation")
+
+
+def test_latest_view_does_not_double_count_repeated_observations(tmp_path):
+    """weekly_matchups is append-only, so two ingests mean two rows per
+    player-week. A reader that sums the base table returns twice the team's
+    score — which is exactly what happened after the second full ingest.
+    """
+    db = tmp_path / "t.db"
+    with session(db) as conn:
+        for stamp, pts in (
+            ("2026-08-05T00:00:00+00:00", 50.0),
+            ("2026-08-07T00:00:00+00:00", 61.0),
+        ):
+            conn.execute(
+                "INSERT INTO weekly_matchups"
+                " (week, roster_id, matchup_id, sleeper_id, counted_points,"
+                "  is_starter, observed_at)"
+                " VALUES (12, 7, 4, '1747', ?, 1, ?)",
+                (pts, stamp),
+            )
+
+        base = conn.execute(
+            "SELECT COUNT(*) c, SUM(counted_points) s FROM weekly_matchups"
+        ).fetchone()
+        assert (base["c"], base["s"]) == (2, 111.0), "history must be retained"
+
+        latest = conn.execute(
+            "SELECT COUNT(*) c, SUM(counted_points) s FROM weekly_matchups_latest"
+        ).fetchone()
+        assert (latest["c"], latest["s"]) == (1, 61.0), "readers must see only the newest"
+
+
+def test_latest_view_keeps_rosters_and_weeks_separate(tmp_path):
+    db = tmp_path / "t.db"
+    with session(db) as conn:
+        rows = [
+            (12, 7, "a", 10.0, "2026-08-05T00:00:00+00:00"),
+            (12, 7, "a", 20.0, "2026-08-07T00:00:00+00:00"),
+            (12, 8, "a", 30.0, "2026-08-05T00:00:00+00:00"),
+            (13, 7, "a", 40.0, "2026-08-05T00:00:00+00:00"),
+        ]
+        for wk, rid, pid, pts, stamp in rows:
+            conn.execute(
+                "INSERT INTO weekly_matchups"
+                " (week, roster_id, matchup_id, sleeper_id, counted_points,"
+                "  is_starter, observed_at)"
+                " VALUES (?, ?, 1, ?, ?, 1, ?)",
+                (wk, rid, pid, pts, stamp),
+            )
+        got = {
+            (r["week"], r["roster_id"]): r["counted_points"]
+            for r in conn.execute("SELECT * FROM weekly_matchups_latest")
+        }
+        assert got == {(12, 7): 20.0, (12, 8): 30.0, (13, 7): 40.0}

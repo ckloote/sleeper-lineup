@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from lockin.store import snapshots
 
 EXPECTED_WEEKS = set(range(1, 26))
 GAME_LINK_THRESHOLD = 0.99
@@ -41,7 +44,7 @@ def check_weeks_present(conn: sqlite3.Connection, season: str) -> Check:
 
 
 def check_matchups_present(conn: sqlite3.Connection) -> Check:
-    weeks = {r["week"] for r in conn.execute("SELECT DISTINCT week FROM weekly_matchups")}
+    weeks = {r["week"] for r in conn.execute("SELECT DISTINCT week FROM weekly_matchups_latest")}
     missing = sorted(EXPECTED_WEEKS - weeks)
     return Check(
         name="all 25 weeks of matchups ingested",
@@ -65,7 +68,7 @@ def check_starter_coverage(conn: sqlite3.Connection, season: str) -> Check:
                  WHERE b.sleeper_id = m.sleeper_id
                    AND b.fantasy_week = m.week
                    AND b.season = ?) AS n_games
-          FROM weekly_matchups m
+          FROM weekly_matchups_latest m
           LEFT JOIN players p ON p.sleeper_id = m.sleeper_id
          WHERE m.is_starter = 1
          GROUP BY m.week, m.roster_id, m.sleeper_id
@@ -144,7 +147,7 @@ def check_player_coverage(conn: sqlite3.Connection) -> Check:
     rows = conn.execute(
         """
         SELECT DISTINCT m.sleeper_id
-          FROM weekly_matchups m
+          FROM weekly_matchups_latest m
           LEFT JOIN players p ON p.sleeper_id = m.sleeper_id
          WHERE p.sleeper_id IS NULL
         """
@@ -197,6 +200,55 @@ def check_team_rows(conn: sqlite3.Connection) -> Check:
     )
 
 
+def check_snapshot_drift(season: str, snapshot_root: Path) -> Check:
+    """Has Sleeper rewritten any week since we first observed it?
+
+    Advisory: today's data is canonical by decision (implementation-plan.md
+    §12), so drift does not fail the run. What matters is that it is never
+    silent — a mutation that nobody notices is one that quietly invalidates the
+    backtest's human baseline.
+
+    Compares the EARLIEST snapshot of each week against the latest, so the
+    reported figure is total drift since first observation, not since last run.
+    """
+    weeks_with_history = 0
+    drifted: list[str] = []
+    total_changed = 0
+
+    for week in sorted(EXPECTED_WEEKS):
+        paths = snapshots.list_snapshots(snapshot_root, snapshots.MATCHUPS, season, week)
+        if len(paths) < 2:
+            continue
+        weeks_with_history += 1
+        first = snapshots.load_snapshot(paths[0])
+        last = snapshots.load_snapshot(paths[-1])
+        changes = snapshots.diff_counted(first, last)
+        if changes:
+            total_changed += len(changes)
+            drifted.append(
+                f"week {week}: {len(changes)} starter values changed since"
+                f" {paths[0].stem} (e.g. roster {changes[0][0]} player {changes[0][1]}"
+                f" {changes[0][2]} -> {changes[0][3]})"
+            )
+
+    covered = sum(
+        1
+        for week in EXPECTED_WEEKS
+        if snapshots.list_snapshots(snapshot_root, snapshots.MATCHUPS, season, week)
+    )
+    detail = f"{covered}/{len(EXPECTED_WEEKS)} weeks snapshotted"
+    if weeks_with_history:
+        detail += f", {weeks_with_history} with >1 observation, {total_changed} values drifted"
+    else:
+        detail += ", no week yet observed twice"
+    return Check(
+        name="upstream drift since first observation (advisory)",
+        passed=True,
+        detail=detail,
+        offenders=drifted[:20],
+    )
+
+
 def check_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
     """Advisory only — no Phase 0-2 gate depends on tipoff times."""
     total = conn.execute(
@@ -212,8 +264,9 @@ def check_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
     )
 
 
-def run(conn: sqlite3.Connection, season: str) -> list[Check]:
-    return [
+def run(conn: sqlite3.Connection, season: str, snapshot_root: Path | None = None) -> list[Check]:
+    extra = [check_snapshot_drift(season, snapshot_root)] if snapshot_root else []
+    return extra + [
         check_weeks_present(conn, season),
         check_matchups_present(conn),
         check_player_coverage(conn),

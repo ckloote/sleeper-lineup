@@ -195,6 +195,40 @@ CREATE TABLE IF NOT EXISTS weekly_matchup_teams (
 );
 
 
+-- Latest observation per player-week / team-week.
+--
+-- weekly_matchups is append-only, so after two ingests every player-week has
+-- two rows. Any reader that forgets this double-counts — `SUM(counted_points)`
+-- silently returns twice the team's score. Read through these views, never the
+-- base tables, unless you specifically want the polling history.
+--
+-- ISO-8601 `observed_at` sorts lexicographically, so MAX() is the latest.
+CREATE VIEW IF NOT EXISTS weekly_matchups_latest AS
+SELECT m.*
+  FROM weekly_matchups m
+  JOIN (
+        SELECT week, roster_id, sleeper_id, MAX(observed_at) AS mx
+          FROM weekly_matchups
+         GROUP BY week, roster_id, sleeper_id
+       ) t
+    ON t.week = m.week
+   AND t.roster_id = m.roster_id
+   AND t.sleeper_id = m.sleeper_id
+   AND t.mx = m.observed_at;
+
+CREATE VIEW IF NOT EXISTS weekly_matchup_teams_latest AS
+SELECT t.*
+  FROM weekly_matchup_teams t
+  JOIN (
+        SELECT week, roster_id, MAX(observed_at) AS mx
+          FROM weekly_matchup_teams
+         GROUP BY week, roster_id
+       ) x
+    ON x.week = t.week
+   AND x.roster_id = t.roster_id
+   AND x.mx = t.observed_at;
+
+
 -- -------------------------------------------------------------------- derived
 
 -- Phase 2 output. matched_game_index is which game of the week the counted

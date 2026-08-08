@@ -67,7 +67,7 @@ def run_inference(conn: sqlite3.Connection, season: str) -> tuple[int, int]:
     starters = conn.execute(
         """
         SELECT week, roster_id, sleeper_id, counted_points
-          FROM weekly_matchups
+          FROM weekly_matchups_latest
          WHERE is_starter = 1
          GROUP BY week, roster_id, sleeper_id
          ORDER BY week, roster_id
@@ -195,9 +195,9 @@ def check_no_unresolved(conn: sqlite3.Connection) -> Check:
 
 def check_all_rosters_profiled(conn: sqlite3.Connection) -> Check:
     """Phase 5 replays every roster, so every roster needs a profile."""
-    rosters = conn.execute("SELECT COUNT(DISTINCT roster_id) c FROM weekly_matchups").fetchone()[
-        "c"
-    ]
+    rosters = conn.execute(
+        "SELECT COUNT(DISTINCT roster_id) c FROM weekly_matchups_latest"
+    ).fetchone()["c"]
     profiled = conn.execute("SELECT COUNT(*) c FROM manager_profiles").fetchone()["c"]
     thin = [
         f"roster {r['roster_id']} has only {r['decisions']} decisions"
@@ -235,7 +235,7 @@ def check_eligibility_rule(conn: sqlite3.Connection, season: str) -> Check:
     checked = 0
     offenders: list[str] = []
     for m in conn.execute(
-        "SELECT week, roster_id, sleeper_id, slot FROM weekly_matchups"
+        "SELECT week, roster_id, sleeper_id, slot FROM weekly_matchups_latest"
         " WHERE is_starter = 1 AND slot IS NOT NULL"
         " GROUP BY week, roster_id, sleeper_id"
     ):

@@ -25,13 +25,13 @@ nonzero counted score in all 25 weeks is reproduced from box scores to the cent,
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
-> total. Box scores were byte-identical, so only *which game counts* moved. The original
-> values for week 12 survive in `tests/golden/`; the other 24 weeks are gone. This does
-> not affect Phases 0-1 — box scores are stable — but it does compromise the human
-> baseline the backtest was meant to beat. See
-> [implementation-plan.md §12](docs/implementation-plan.md) before relying on the
-> 2025-26 lock decisions, and **do not rebuild the database by deleting it**:
-> `weekly_matchups` is append-only for exactly this reason.
+> total. Box scores were byte-identical, so only *which game counts* moved.
+>
+> Today's data is now treated as canonical, and the backtest measures **policy against
+> policy** rather than against the human baseline — four of the five policies in the
+> architecture doc read only box scores, which are stable. Every ingest now preserves raw
+> payloads to `snapshots/`, and `lockin reconcile` reports drift since first observation.
+> See [implementation-plan.md §12](docs/implementation-plan.md).
 
 ## Requirements
 
@@ -91,8 +91,15 @@ uv run lockin ingest --skip-nba          # Sleeper only
 ```
 
 A full run takes a few minutes, most of it the tipoff sweep. Re-runs are cheaper: the
-sweep only visits dates still missing something. The database is disposable — delete it
-and re-ingest at any time.
+sweep only visits dates still missing something.
+
+Each run also preserves the raw matchups payload under
+`snapshots/matchups/{season}/wk{NN}/`, deduplicated by content — a file appears only when
+Sleeper's answer actually changes, so the directory listing is the mutation history.
+
+**The database is disposable; `snapshots/` is not.** You can delete `data/` and re-ingest
+at any time. Deleting `snapshots/` destroys the only record of what the season looked like
+before Sleeper rewrote it, and there is no historical endpoint to recover it from.
 
 ### `lockin reconcile`
 
@@ -179,7 +186,8 @@ Environment variables, all optional:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LOCKIN_DB` | `data/lockin.db` | SQLite path |
+| `LOCKIN_DB` | `data/lockin.db` | SQLite path; disposable |
+| `LOCKIN_SNAPSHOTS` | `snapshots` | Raw payload archive; **not** disposable |
 | `LOCKIN_LEAGUE_ID` | `1283214955830575104` | The 2025-26 league |
 | `LOCKIN_SEASON` | `2025` | Sleeper labels 2025-26 as `2025` |
 | `LOCKIN_USER_ID` | `1283460931447164928` | |
@@ -242,6 +250,11 @@ rather than dropped — team totals are useful context for the projection layer.
 players too, and a bench player's value can freeze mid-week without a lock having
 happened. Lock inference reads `starters`/`starters_points`.
 
+**`weekly_matchups` is append-only, so read it through `weekly_matchups_latest`.** After
+two ingests every player-week has two rows, and summing the base table returns twice the
+team's score. The history is deliberate — it is what lets live opponent lock state be
+inferred — but no reader wants it by default.
+
 **Slot eligibility is not published, and `fantasy_positions` is not quite it.** Derived
 from 1,500 real assignments: `PG` and `G` take guards, `C` takes `C`/`PF`, `F` takes
 `SF`/`PF`/`C`, `UTIL` takes anyone. Three slots came back exactly determined — zero
@@ -276,6 +289,7 @@ lockin/
   store/
     schema.sql     the contract between ingest and every reader
     db.py          single-writer SQLite
+    snapshots.py   raw payload archive, outside the database
   reconcile.py     the Phase 0 gates — ingest completeness
   verify.py        the Phase 1 gates — scoring against the recorded season
   locks.py         the Phase 2 gates — inference over all ten rosters

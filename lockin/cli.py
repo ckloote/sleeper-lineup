@@ -66,14 +66,28 @@ def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) ->
         else:
             click.echo(f"  players     {have_players} cached (--full to refresh)")
 
-        total_rows = total_played = 0
+        total_rows = total_played = snapshots_written = 0
         for week in week_list:
             rows, played = sleeper_ingest.ingest_week_stats(conn, client, cfg.season, week)
-            sleeper_ingest.ingest_matchups(conn, client, cfg.league_id, week, roster_positions)
+            _, snap = sleeper_ingest.ingest_matchups(
+                conn,
+                client,
+                cfg.league_id,
+                week,
+                roster_positions,
+                snapshot_root=cfg.snapshot_root,
+                season=cfg.season,
+            )
             total_rows += rows
             total_played += played
-            click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played)")
+            snapshots_written += 1 if snap else 0
+            marker = "  *snapshot changed*" if snap else ""
+            click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played){marker}")
         click.echo(f"  box scores  {total_rows} rows, {total_played} played")
+        click.echo(
+            f"  snapshots   {snapshots_written} new/changed of {len(week_list)} weeks"
+            f" -> {cfg.snapshot_root}"
+        )
 
         player_rows, team_rows = sleeper_ingest.refresh_row_kinds(conn)
         click.echo(f"  row kinds   {player_rows} player, {team_rows} team-aggregate")
@@ -105,7 +119,7 @@ def reconcile(as_json: bool) -> None:
     """Report on ingest completeness. Exits nonzero if a gate fails."""
     cfg = Config.from_env()
     with session(cfg.db_path) as conn:
-        checks = reconcile_mod.run(conn, cfg.season)
+        checks = reconcile_mod.run(conn, cfg.season, cfg.snapshot_root)
 
     _render(checks, "Phase 0 reconciliation", as_json)
 

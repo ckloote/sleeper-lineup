@@ -34,13 +34,22 @@ class Config:
     season: str
     user_id: str
     db_path: Path
+    snapshot_root: Path
+    """Raw matchup payloads, kept OUTSIDE the database.
+
+    Sleeper rewrites completed seasons and publishes no history, so an
+    unobserved change is unrecoverable. The database is disposable and gets
+    rebuilt; snapshots must not be. See lockin/store/snapshots.py.
+    """
 
     @classmethod
     def from_env(cls) -> Config:
         db = os.environ.get("LOCKIN_DB", "data/lockin.db")
+        snaps = os.environ.get("LOCKIN_SNAPSHOTS", "snapshots")
         return cls(
             league_id=os.environ.get("LOCKIN_LEAGUE_ID", DEFAULT_LEAGUE_ID),
             season=os.environ.get("LOCKIN_SEASON", DEFAULT_SEASON),
             user_id=os.environ.get("LOCKIN_USER_ID", DEFAULT_USER_ID),
             db_path=Path(db).expanduser(),
+            snapshot_root=Path(snaps).expanduser(),
         )

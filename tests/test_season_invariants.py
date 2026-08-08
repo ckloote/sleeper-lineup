@@ -15,6 +15,7 @@ import sqlite3
 import pytest
 
 from lockin.config import Config
+from lockin.store.db import apply_schema
 
 cfg = Config.from_env()
 pytestmark = pytest.mark.skipif(
@@ -26,6 +27,9 @@ pytestmark = pytest.mark.skipif(
 def conn():
     c = sqlite3.connect(cfg.db_path)
     c.row_factory = sqlite3.Row
+    # Apply the schema so a database created before a view or column existed
+    # still satisfies these tests. Everything here is CREATE ... IF NOT EXISTS.
+    apply_schema(c)
     yield c
     c.close()
 
@@ -124,7 +128,7 @@ def test_triple_doubles_stack_with_the_double_double_bonus(conn, scoring):
     matched = 0
     for g in tds:
         counted = conn.execute(
-            "SELECT counted_points FROM weekly_matchups"
+            "SELECT counted_points FROM weekly_matchups_latest"
             " WHERE week = ? AND sleeper_id = ? AND counted_points IS NOT NULL LIMIT 1",
             (g["fantasy_week"], g["sleeper_id"]),
         ).fetchone()
@@ -165,7 +169,8 @@ def test_all_star_participants_did_not_count_their_all_star_line(conn, scoring):
     checked = 0
     for pid in participants:
         m = conn.execute(
-            "SELECT counted_points FROM weekly_matchups WHERE week = 17 AND sleeper_id = ?", (pid,)
+            "SELECT counted_points FROM weekly_matchups_latest WHERE week = 17 AND sleeper_id = ?",
+            (pid,),
         ).fetchone()
         if not m or m["counted_points"] is None:
             continue
@@ -226,7 +231,7 @@ def test_team_aggregate_rows_are_flagged_and_absent_from_the_player_table(conn):
 
     assert (
         conn.execute(
-            "SELECT COUNT(*) c FROM weekly_matchups WHERE sleeper_id LIKE 'TEAM_%'"
+            "SELECT COUNT(*) c FROM weekly_matchups_latest WHERE sleeper_id LIKE 'TEAM_%'"
         ).fetchone()["c"]
         == 0
     )
@@ -257,7 +262,7 @@ def test_an_unlocked_starter_whose_final_real_game_was_a_dnp_scores_zero(conn):
     mechanic is what matters, and it survives the mutation.
     """
     zeroed = conn.execute(
-        "SELECT week, roster_id, sleeper_id FROM weekly_matchups"
+        "SELECT week, roster_id, sleeper_id FROM weekly_matchups_latest"
         " WHERE is_starter = 1 AND counted_points = 0.0"
         " GROUP BY week, roster_id, sleeper_id"
     ).fetchall()
@@ -301,10 +306,10 @@ def test_starters_points_sum_to_the_team_total(conn):
     """
     mismatches = []
     for t in conn.execute(
-        "SELECT week, roster_id, points FROM weekly_matchup_teams WHERE points IS NOT NULL"
+        "SELECT week, roster_id, points FROM weekly_matchup_teams_latest WHERE points IS NOT NULL"
     ):
         s = conn.execute(
-            "SELECT COALESCE(SUM(counted_points), 0) s FROM weekly_matchups"
+            "SELECT COALESCE(SUM(counted_points), 0) s FROM weekly_matchups_latest"
             " WHERE week = ? AND roster_id = ? AND is_starter = 1",
             (t["week"], t["roster_id"]),
         ).fetchone()["s"]
@@ -326,7 +331,7 @@ def test_every_starter_player_week_has_an_inference(conn):
     if not _have_inferences(conn):
         pytest.skip("run `lockin locks`")
     starters = conn.execute(
-        "SELECT COUNT(*) c FROM (SELECT week, roster_id, sleeper_id FROM weekly_matchups"
+        "SELECT COUNT(*) c FROM (SELECT week, roster_id, sleeper_id FROM weekly_matchups_latest"
         " WHERE is_starter = 1 GROUP BY week, roster_id, sleeper_id)"
     ).fetchone()["c"]
     inferred = conn.execute("SELECT COUNT(*) c FROM lock_inferences").fetchone()["c"]

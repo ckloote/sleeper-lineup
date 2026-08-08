@@ -142,7 +142,7 @@ def check_weeks_reconcile(conn: sqlite3.Connection, season: str) -> Check:
     counted = conn.execute(
         """
         SELECT week, roster_id, sleeper_id, counted_points
-          FROM weekly_matchups
+          FROM weekly_matchups_latest
          WHERE counted_points IS NOT NULL AND counted_points != 0
          GROUP BY week, roster_id, sleeper_id
         """

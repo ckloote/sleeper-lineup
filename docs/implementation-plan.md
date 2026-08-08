@@ -764,3 +764,61 @@ order of how much they salvage:
 
 Option 3 preserves the most: architecture doc §12 lists five policies and only **Actual**
 depends on the mutated field.
+
+### Decision (2026-08-07): today's data is canonical
+
+Option 3 adopted. The backtest measures **policy against policy**, not policy against the
+human baseline.
+
+This costs less than it sounds. Architecture doc §12 lists five policies, and only
+**Actual** reads the mutated field:
+
+| policy | depends on | survives |
+|---|---|---|
+| Actual | `players_points` (mutated) | ✗ unreliable |
+| Never lock | box scores + schedule | ✓ |
+| Lock first | box scores + schedule | ✓ |
+| Greedy threshold | box scores + schedule | ✓ |
+| Rollout | box scores + schedule | ✓ |
+
+Box scores are byte-identical across the observed mutation, so four of five policies
+replay exactly as intended. What is lost is "did we beat the humans"; what remains is
+"does rollout beat greedy beats never-lock", which is the comparison the Phase 5 gate
+actually turns on.
+
+The `Actual` column stays in the report, labelled as reconstructed-from-possibly-mutated
+data rather than quietly dropped. Week 12 keeps a verified baseline via
+`tests/golden/`, so at least one week can be checked honestly.
+
+Two consequences for the human-baseline-dependent parts:
+
+- **Manager profiles are now "how this manager's decisions look in the current data",**
+  not a certified behavioural record. They remain useful as an opponent prior — the
+  spread across rosters is large and consistent — but they should not be presented to
+  the user as fact about what a rival did.
+- **Phase 5's all-roster evaluation is unaffected**, because it compares policies replayed
+  over the same rosters and schedules rather than against recorded human choices.
+
+### Mitigation: snapshots, outside the database
+
+`lockin/store/snapshots.py`. Every ingest preserves the raw matchups payload under
+`snapshots/matchups/{season}/wk{NN}/{stamp}.json`, deduplicated by content — a snapshot is
+written only when the payload differs from the previous one.
+
+Three properties, each chosen against a specific way this went wrong:
+
+- **Outside the database.** `rm data/lockin.db` is what destroyed 24 weeks. Snapshots are
+  files under version control, so rebuilding the database cannot touch them.
+- **Deduplicated.** A stable season costs 25 small files rather than one per ingest, so
+  in-season daily polling does not churn. The directory listing *is* the mutation history.
+- **Earliest is preserved, never overwritten.** Drift is always measured against first
+  observation, not against the last run, so a slow sequence of small changes cannot
+  accumulate unnoticed.
+
+`lockin reconcile` grew an advisory drift check that reports how many starter values have
+changed since first observation. Advisory rather than failing, since today's data is
+canonical by decision — but never silent, which is the failure mode that cost us the
+season.
+
+Box scores are not snapshotted: they were byte-identical across the mutation and run ~2MB
+per week, so they are refetchable rather than irreplaceable.

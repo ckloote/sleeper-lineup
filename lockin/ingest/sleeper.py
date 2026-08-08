@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -21,7 +23,14 @@ from lockin.ingest.validate import (
     validate_matchups,
     validate_stat_rows,
 )
+from lockin.store import snapshots
 from lockin.store.db import log_ingest, now_iso
+
+
+def snapshot_stamp() -> str:
+    """Filesystem-safe, lexicographically sortable UTC stamp."""
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
 
 V1 = "https://api.sleeper.app/v1"
 BASE = "https://api.sleeper.app"
@@ -142,10 +151,32 @@ def ingest_matchups(
     league_id: str,
     week: int,
     roster_positions: list[str],
-) -> int:
-    """Append a matchup observation. Never upserts — see schema.sql."""
+    *,
+    snapshot_root: Path | None = None,
+    season: str | None = None,
+) -> tuple[int, Path | None]:
+    """Append a matchup observation. Never upserts — see schema.sql.
+
+    Also preserves the raw payload to `snapshot_root` when it differs from the
+    last one seen. That file, not the database row, is what survives a rebuild —
+    and Sleeper rewrites completed seasons, so it is the only defence against
+    silently losing what actually happened.
+    """
     started, observed = now_iso(), now_iso()
-    rows = validate_matchups(client.matchups(league_id, week), week)
+    payload = client.matchups(league_id, week)
+    rows = validate_matchups(payload, week)
+
+    written = None
+    if snapshot_root is not None and season is not None:
+        written = snapshots.save(
+            snapshot_root,
+            snapshots.MATCHUPS,
+            season,
+            week,
+            payload,
+            stamp=snapshot_stamp(),
+        )
+
     n = 0
     for team in rows:
         conn.execute(
@@ -191,7 +222,7 @@ def ingest_matchups(
             )
             n += 1
     log_ingest(conn, "sleeper", f"matchups:week={week}", n, started)
-    return n
+    return n, written
 
 
 # Stat keys we promote to columns. Anything else stays in raw_stats.
