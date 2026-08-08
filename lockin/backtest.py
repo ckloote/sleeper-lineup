@@ -130,7 +130,7 @@ class BacktestResult:
         return sum(r.starters for r in self.rows)
 
 
-def _player_games(panel: SeasonPanel, scores: np.ndarray, sleeper_id: str, week: int) -> list[Game]:
+def player_games(panel: SeasonPanel, scores: np.ndarray, sleeper_id: str, week: int) -> list[Game]:
     """A player's countable games in one fantasy week, in date order.
 
     Exhibitions and postponed fixtures are already excluded from the panel, so
@@ -281,7 +281,7 @@ def run_backtest(
     def games_for(sleeper_id: str, week: int) -> list[Game]:
         key = (sleeper_id, week)
         if key not in games_cache:
-            games_cache[key] = _player_games(panel, scores, sleeper_id, week)
+            games_cache[key] = player_games(panel, scores, sleeper_id, week)
         return games_cache[key]
 
     threshold_cache: dict[tuple[str, int], dict[int, float]] = {}

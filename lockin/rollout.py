@@ -111,7 +111,7 @@ class WeekResult:
     """Lock/pass calls actually faced — the denominator for a lock rate."""
 
 
-def _decision_days(lineup: dict[str, list[Game]]) -> list[int]:
+def decision_days(lineup: dict[str, list[Game]]) -> list[int]:
     return sorted({g.day for games in lineup.values() for g in games if g.played})
 
 
@@ -160,7 +160,7 @@ def replay_week(
     locked: dict[str, float] = {}
     decisions = 0
 
-    for day in _decision_days(lineup):
+    for day in decision_days(lineup):
         # Highest score first: the strongest lock candidate is judged against a
         # state nothing else has disturbed yet. Any fixed order is defensible —
         # rollout is a heuristic — but an arbitrary one would be harder to read.

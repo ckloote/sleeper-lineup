@@ -1446,3 +1446,82 @@ backtested: today's injury designations, the polling loop that makes `weekly_mat
 accumulate the freeze history live lock inference needs, and the opponent belief that
 history feeds. The `starter_dnp_scale` correction is the seam where the real injury feed
 should replace the proxy.
+
+
+---
+
+## 16. Manager decision quality — an analysis, not a phase
+
+`lockin managers` ranks the ten managers on how well they decided, with roster talent
+divided out. It is not part of any phase gate; it exists because the machinery Phase 5
+built for the engine turns out to answer a question about the humans.
+
+### Two metrics, and why the obvious one is wrong
+
+The first version scored **points capture** — of the upside a decision could have won,
+how much did they take:
+
+```
+share = (counted − riding to the end) / (their best game − riding to the end)
+```
+
+Single-game weeks, and weeks where riding was already optimal, contribute nothing to
+either half and drop out on their own, so this measures only decisions that could be got
+wrong. That much is sound. What is not sound is the objective:
+
+> A manager 40 points down on Sunday should **decline** to bank a safe 45 and ride a
+> boom-or-bust game instead, because banking it still loses. That is the right call, and
+> points capture scores it as a blunder.
+
+So the ranking is sorted on **win-probability regret** instead — for each real decision,
+V(lock) and V(pass) from the Phase 5 rollout given the actual state, and the manager is
+charged the win probability they forfeited. Points capture is still reported for contrast
+and never sorted on.
+
+### The correction is not cosmetic
+
+```
+decisions evaluated: 2293
+  points-optimal and win-optimal AGREE : 2043 (89.1%)
+  they DISAGREE (high leverage)        :  250 (10.9%)
+
+  win-optimal says PASS where points says lock : 190   (mean best P(win) 22.3%)
+  win-optimal says LOCK where points says pass :  60   (mean best P(win) 62.6%)
+```
+
+190 of 250 are exactly the case above. Switching metrics moves four managers by two or
+more places and changes who is first.
+
+**A nuance that cuts the other way:** mean regret is *lower* on divergent decisions
+(0.755%) than on concordant ones (1.329%). Divergence arises precisely when a matchup is
+already lopsided, so the marginal win probability between banking and riding is small.
+High-leverage decisions are real, and individually cheaper than ordinary ones.
+
+### What the season says
+
+The spread is wide and the ends are cleanly separated; the middle is not. Bootstrapped 90%
+bands overlap from roughly rank 2 through rank 8, so the table should be read as three
+groups rather than an ordering. The most interesting single result is roster 10, who ties
+for first on points capture and is *last* in the league on divergent decisions (31.8%) —
+excellent at the points game, blind to the matchup.
+
+### Three limits, printed with every run
+
+1. **It reads the field Sleeper rewrote** (§12). This ranks how the current data makes
+   each manager's decisions look, not a certified record.
+2. **Model error is charged to the manager.** A call scored wrong may reflect injury news
+   the projection cannot see — the blind spot worth 26 points per team total in §15.
+3. **The engine must not be benchmarked on this scale.** Greedy's thresholds come from the
+   same projection model that computes the win probabilities grading it, so its errors are
+   shared between deciding and being judged. It scores 0.172% regret against the best
+   human's 0.511%, and that gap is an artefact of the shared model rather than a finding.
+   Manager-versus-manager is fair because all ten are graded by a model none of them share.
+
+### A bug this surfaced
+
+Week 25 is in the stats feed with a full set of starters, but the league never scored it —
+`last_scored_leg: 24`, and 37 of its 60 starter values are 0.0. Counting those as decisions
+read every one as a catastrophic blunder and cost about eight points of apparent points
+capture per manager. `last_scored_week()` now reads the league's own setting rather than
+hardcoding a number, since a season that ended early would move it. The regret ranking was
+never affected: week 25 has no `matchup_id`, so no decisions were evaluated there.

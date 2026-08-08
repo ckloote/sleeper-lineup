@@ -16,6 +16,7 @@ import numpy as np
 from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
 from lockin import locks as locks_mod
+from lockin import managers as managers_mod
 from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
 from lockin import verify as verify_mod
@@ -270,6 +271,79 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
         )
 
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--sims", default=300, show_default=True, help="Simulations per decision.")
+@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+def managers(as_json: bool, sims: int, names: bool) -> None:
+    """Rank the managers on decision quality, holding roster talent constant."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        report = managers_mod.evaluate_managers(conn, cfg.season, n_sims=sims)
+
+    labels: dict[int, str] = {}
+    if names:
+        client = sleeper_ingest.SleeperClient()
+        users = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/users")
+        rosters = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
+        owner_to_roster = {r["owner_id"]: r["roster_id"] for r in rosters}
+        for u in users:
+            if u["user_id"] in owner_to_roster:
+                labels[owner_to_roster[u["user_id"]]] = u.get("display_name", "")
+
+    ranked = report.ranked()
+    if as_json:
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "rank": i,
+                        "roster_id": s.roster_id,
+                        "manager": labels.get(s.roster_id),
+                        "mean_regret": s.mean_regret,
+                        "right_rate": s.right_rate,
+                        "decisions": s.decisions,
+                        "divergent": s.divergent,
+                        "divergent_right_rate": s.divergent_right_rate,
+                        "upside_share": s.upside_share,
+                        "rode_to_zero": s.rode_to_zero,
+                    }
+                    for i, s in enumerate(ranked, 1)
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    agree, differ = report.regret_by_agreement()
+    click.echo(
+        f"{len(report.decisions)} decisions across {len(ranked)} managers."
+        f" Ranked by win probability thrown away — lower is better.\n"
+    )
+    click.echo(
+        f"  {'#':>2} {'roster':>6} {'manager':<16} {'regret':>8} {'right':>7}"
+        f" {'90% band':>18} {'n':>5} {'hi-lev':>8} {'pts cap':>8} {'zeros':>6}"
+    )
+    for i, s in enumerate(ranked, 1):
+        lo, hi = managers_mod.bootstrap_regret(report, s.roster_id)
+        click.echo(
+            f"  {i:>2} {s.roster_id:>6} {labels.get(s.roster_id, ''):<16}"
+            f" {s.mean_regret:>7.3%} {s.right_rate:>6.1%}"
+            f" {f'[{lo:.3%}, {hi:.3%}]':>18} {s.decisions:>5}"
+            f" {s.divergent_right_rate:>7.0%} {s.upside_share:>7.1%} {s.rode_to_zero:>6}"
+        )
+    click.echo(
+        f"\n  points and win probability disagree on {report.divergence_rate():.1%}"
+        f" of decisions; mean regret {differ:.3%} there against {agree:.3%} elsewhere."
+        f"\n  'hi-lev' is the right-side rate on just those decisions."
+        f"\n  'pts cap' is the older points-capture metric, shown for contrast only —"
+        f" it scores correct\n  variance-taking as a blunder, which is why it is not the ranking."
+        f"\n\n  Reads the field Sleeper rewrote (§12): this is how the current data makes"
+        f"\n  each manager look, not a certified record. Do not benchmark the engine on"
+        f"\n  this scale — it is graded by its own model."
+    )
 
 
 @main.command()

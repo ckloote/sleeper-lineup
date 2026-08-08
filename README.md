@@ -316,6 +316,54 @@ The win comparison pools **all ten rosters** — one roster's held-out block is 
 matchups, which cannot resolve an effect this size. The held-out block is still reported,
 and reported honestly: 4 discordant pairs, too few to conclude anything from on its own.
 
+### `lockin managers`
+
+Ranks the ten managers on **decision quality**, holding roster talent constant.
+Read-only analysis, not a gate.
+
+```bash
+uv run lockin managers --names
+```
+
+```
+   # roster manager            regret   right           90% band     n   hi-lev  pts cap  zeros
+   1      3 yinzknow          0.511%  85.7%   [0.315%, 0.727%]   224     71%   85.0%      0
+   2      4 ckloote           0.883%  86.9%   [0.387%, 1.553%]   213     80%   89.0%      0
+   3     10 jordany32         0.904%  84.0%   [0.555%, 1.276%]   244     32%   89.0%      0
+   ...
+  10      9 coopermycupp      2.332%  69.7%   [1.634%, 3.124%]   218     67%   39.4%      9
+
+  points and win probability disagree on 10.9% of decisions;
+  mean regret 0.755% there against 1.329% elsewhere.
+```
+
+The ranking is **win probability thrown away per decision**, not points. That
+distinction is the whole point of the command. A manager 40 down on Sunday should
+*decline* to bank a safe 45 and ride a boom-or-bust game instead, because banking
+it still loses — and a points metric scores that correct call as a blunder.
+
+Over the real season the two objectives disagree on **10.9%** of decisions, and
+190 of those 250 are exactly that case: pass where points says bank, at a mean win
+probability of 22%. Correcting for it moves four managers two or more places. The
+older points-capture metric is still shown (`pts cap`) so the two can be compared,
+but it is never sorted on.
+
+One nuance the other way: mean regret is *lower* on divergent decisions (0.755%)
+than concordant ones (1.329%). Divergence arises when a matchup is already
+lopsided, so the marginal win probability at stake is small. High-leverage
+decisions are real but individually cheaper than ordinary ones.
+
+Three limits, which the command prints alongside its output:
+
+- **It reads the field Sleeper rewrote** (§12) — this is how the current data makes
+  each manager *look*, not a certified record of what they did.
+- **Model error is charged to the manager.** A call scored wrong may reflect injury
+  news the projection cannot see.
+- **Do not benchmark the engine on this scale.** Greedy's thresholds come from the
+  same model that computes the win probabilities grading it, so its errors are
+  shared between deciding and being judged. Manager-versus-manager is fair;
+  manager-versus-engine is not.
+
 Commands arriving with later phases: `digest`.
 
 ## Configuration
@@ -337,7 +385,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 270 tests, ~1.5s
+uv run pytest              # 284 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -459,6 +507,7 @@ lockin/
   projections.py   builds the point-in-time panel from SQLite
   calibrate.py     the Phase 3 gates — quantiles against realised frequencies
   rollout.py       walks a week under the rollout policy, with an opponent
+  managers.py      ranks the managers on decision quality, not results
   backtest.py      the Phase 4-5 gates — policy against policy over the season
   cli.py
 tests/
