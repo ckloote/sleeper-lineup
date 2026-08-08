@@ -73,7 +73,6 @@ DNP_FEATURE_NAMES = (
     "season_stage",
     "back_to_back",
     "log_dnp_streak",
-    "log_games_since_played",
 )
 
 
@@ -193,7 +192,7 @@ def fit_logistic(
     """Newton-IRLS with an L2 penalty on the slopes.
 
     Hand-rolled rather than pulled from a fitting library because the model has
-    ten features and is refit a few hundred times per calibration run; the
+    nine features and is refit a few hundred times per calibration run; the
     dependency would buy nothing and cost reproducibility.
     """
     Xd = np.hstack([np.ones((len(X), 1)), X])
@@ -239,20 +238,22 @@ def dnp_feature_row(
     stage = fantasy_week / 25.0
     if len(prior_days) == 0:
         # No history: a neutral prior. The intercept and stage still apply.
-        return np.array([0.25, 0.25, 0.25, 0.25, 3.0, 0.0, stage, 0.0, 0.0, 0.0])
+        return np.array([0.25, 0.25, 0.25, 0.25, 3.0, 0.0, stage, 0.0, 0.0])
 
     dnp = (~prior_played).astype(np.float64)
     rest = min(int(target_day - prior_days[-1]), 6)
     load7 = float(np.count_nonzero(target_day - prior_days <= 7))
 
-    # An EWMA of availability blurs the two states that matter most: mid-injury
-    # and just-back. The streak and the games since the last absence separate
-    # them, and they are what carries the hazard's discrimination.
-    streak = int(np.argmin(dnp[::-1])) if dnp[-1] else 0
-    if streak == 0 and dnp[-1]:
-        streak = len(dnp)
+    # The trailing DNP streak. An EWMA of availability blurs the two states that
+    # matter most — mid-injury and just-back — and this is what separates them.
+    #
+    # An earlier version carried a tenth feature, "games since last played",
+    # which is the *same number* as this one by construction: identical on all
+    # 15,847 rows. Re-expressing it in days made it genuinely distinct
+    # (correlation 0.94) and still bought nothing — log loss 0.3299 against
+    # 0.3297 without it — so it is gone rather than kept for appearances.
     played_positions = np.nonzero(prior_played)[0]
-    since = len(dnp) - 1 - played_positions[-1] if len(played_positions) else len(dnp)
+    streak = len(dnp) - 1 - int(played_positions[-1]) if len(played_positions) else len(dnp)
 
     return np.array(
         [
@@ -265,7 +266,6 @@ def dnp_feature_row(
             stage,
             1.0 if rest <= 1 else 0.0,
             float(np.log1p(min(streak, 10))),
-            float(np.log1p(min(since, 10))),
         ]
     )
 

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from lockin.core.projections import (
+    DNP_FEATURE_NAMES,
     POS_FORWARD,
     POS_GUARD,
     EWMAProjectionSource,
@@ -206,42 +207,69 @@ def test_fit_logistic_penalty_shrinks_slopes_but_not_the_intercept():
 # -------------------------------------------------------------- DNP features
 
 
+STREAK = DNP_FEATURE_NAMES.index("log_dnp_streak")
+B2B = DNP_FEATURE_NAMES.index("back_to_back")
+
+
 def test_dnp_features_read_the_injury_streak():
     days = np.array([10, 12, 14, 16])
     played = np.array([True, False, False, False])
-    row = dnp_feature_row(days, played, 18, 12)
-    streak, since = row[8], row[9]
-    assert streak == pytest.approx(np.log1p(3))
-    assert since == pytest.approx(np.log1p(3))
+    assert dnp_feature_row(days, played, 18, 12)[STREAK] == pytest.approx(np.log1p(3))
 
 
 def test_dnp_features_reset_after_a_return():
     days = np.array([10, 12, 14, 16])
     played = np.array([False, False, False, True])
-    row = dnp_feature_row(days, played, 18, 12)
-    assert row[8] == pytest.approx(0.0)
-    assert row[9] == pytest.approx(0.0)
+    assert dnp_feature_row(days, played, 18, 12)[STREAK] == pytest.approx(0.0)
 
 
 def test_dnp_features_handle_an_entirely_absent_player():
     days = np.array([10, 12, 14])
     played = np.array([False, False, False])
-    row = dnp_feature_row(days, played, 16, 12)
-    assert row[8] == pytest.approx(np.log1p(3))
-    assert row[9] == pytest.approx(np.log1p(3))
+    assert dnp_feature_row(days, played, 16, 12)[STREAK] == pytest.approx(np.log1p(3))
 
 
 def test_dnp_features_flag_a_back_to_back():
     days = np.array([10, 12])
     played = np.array([True, True])
-    assert dnp_feature_row(days, played, 13, 5)[7] == 1.0
-    assert dnp_feature_row(days, played, 15, 5)[7] == 0.0
+    assert dnp_feature_row(days, played, 13, 5)[B2B] == 1.0
+    assert dnp_feature_row(days, played, 15, 5)[B2B] == 0.0
 
 
 def test_dnp_features_survive_an_empty_history():
     row = dnp_feature_row(np.array([]), np.array([], dtype=bool), 10, 5)
-    assert len(row) == 10
+    assert len(row) == len(DNP_FEATURE_NAMES)
     assert np.isfinite(row).all()
+
+
+def test_dnp_feature_names_match_what_the_row_produces():
+    """The names are documentation, and documentation that can drift will."""
+    row = dnp_feature_row(np.array([10, 12]), np.array([True, False]), 14, 8)
+    assert len(row) == len(DNP_FEATURE_NAMES)
+
+
+def test_no_two_hazard_features_are_the_same_number():
+    """A regression test for a real one.
+
+    `log_games_since_played` was byte-identical to `log_dnp_streak` on all
+    15,847 rows — the trailing DNP streak and the count of games since the last
+    appearance are the same quantity by construction. The model carried nine
+    features under ten names, and the ridge penalty split one coefficient
+    between two columns rather than anything failing loudly.
+    """
+    rng = np.random.default_rng(17)
+    rows = []
+    for _ in range(300):
+        n = int(rng.integers(1, 25))
+        days = 739000 + np.cumsum(rng.integers(1, 4, n))
+        played = rng.random(n) > 0.3
+        rows.append(dnp_feature_row(days, played, int(days[-1]) + 2, int(rng.integers(1, 26))))
+    F = np.array(rows)
+    for i in range(F.shape[1]):
+        for j in range(i + 1, F.shape[1]):
+            assert not np.array_equal(F[:, i], F[:, j]), (
+                f"{DNP_FEATURE_NAMES[i]} and {DNP_FEATURE_NAMES[j]} are the same feature"
+            )
 
 
 # ------------------------------------------------------------------- panel

@@ -246,6 +246,13 @@ player 1970  2026-03-06  week 20
 player has too little history and a league cohort matched on minutes and position fills
 in.
 
+> ⚠️ **This is a marginal — one player, one game.** Do not simulate a week by calling it
+> once per remaining game and multiplying. Availability is a persistent state, so
+> independent draws understate P(a player misses his whole week) by up to **28×**, and
+> price the "rode to Sunday and collected a 0.0" disaster at ~2% when it really happens
+> **13.4%** of the time. A week simulation has to walk the hazard forward along each
+> simulated path. See [implementation-plan.md §13](docs/implementation-plan.md).
+
 Commands arriving with later phases: `digest`, `backtest`.
 
 ## Configuration
@@ -267,7 +274,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 202 tests, ~1s
+uv run pytest              # 204 tests, ~1s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```

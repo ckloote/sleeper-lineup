@@ -295,12 +295,29 @@ frequencies, checked specifically in the right tail, since the tail is the whole
 passing is ever correct. **Met** — realised P(score > predicted q₀.₉₉) is 1.05% against a
 1.00% nominal on held-out weeks 18-25.
 
-### Phase 4 — Simulation and base policy — DEFERRED
+### Phase 4 — Simulation and base policy — IN PROGRESS
 Vectorised numpy: DNP gate → minutes → correlated components → `score_line`. Bipartite
 slot assignment via `scipy.optimize.linear_sum_assignment` at each simulated lock event.
 Backtest harness with the five policies from §12.
 
 *Exit:* greedy threshold beats never-lock on points, out of sample.
+
+> ⚠️ **Hard constraint carried over from Phase 3 — read §13 before starting.**
+> `ProjectionSource.project()` returns a **marginal**: one player-game, from one cutoff.
+> That is what the Phase 3 gate certifies and it is correct. It is *not* what a week
+> simulation needs.
+>
+> Calling it once per remaining game and treating the draws as independent understates
+> P(the player misses the entire week) by **3.1× / 11.0× / 28.1×** for 2 / 3 / 4-game
+> weeks, and prices the "rode to Sunday and collected a 0.0" disaster at ~2% when it
+> happens **13.4%** of the time. Availability is a persistent state, not a per-game coin
+> flip.
+>
+> Phase 4 must simulate **paths**: fit the hazard once at `as_of` (coefficients stay
+> point-in-time, so no leakage), then walk it forward along each path with the drawn
+> outcome fed back into the state. `dnp_feature_row` already takes
+> `(prior_days, prior_played, target_day, fantasy_week)` as arrays, so this needs a
+> vectorised feature builder, not a redesign.
 
 ### Phase 5 — Rollout and opponent model — DEFERRED
 Rollout policy improvement over the base policy; opponent belief state; threshold by
@@ -924,7 +941,7 @@ estimator was broken, not the model.
 
 Three stages, all reconstructible point-in-time from box scores:
 
-1. **DNP hazard** — ridge-penalised logistic regression, ten features, refit from scratch
+1. **DNP hazard** — ridge-penalised logistic regression, nine features, refit from scratch
    at every distinct `as_of`. Log loss 0.366 against a 0.610 base rate.
 2. **Minutes** — a recency-weighted EWMA *level* (half-life 14 games) multiplied by a
    shock drawn from the empirical distribution of (actual ÷ trailing EWMA) ratios pooled
@@ -945,10 +962,20 @@ are also DNPs, against 9.0% following a played game.
 
 **An EWMA of availability is the wrong shape for injuries.** The first hazard used three
 EWMAs of the DNP indicator and was over-confident in its 0.10-0.20 band — precisely the
-game-time-decision cases. Adding the **consecutive-DNP streak** and **games since last
-played** cut log loss from 0.333 to 0.330 and tightened the right tail (q0.99 z from
-+1.69 to +0.38). An EWMA blurs "mid-injury" and "just back", which are the two states
-that matter, and those two features separate them.
+game-time-decision cases. Adding the **consecutive-DNP streak** cut log loss from 0.333 to
+0.330 and tightened the right tail (q0.99 z from +1.69 to +0.38). An EWMA blurs
+"mid-injury" and "just back", which are the two states that matter, and the streak
+separates them.
+
+> **Correction (found while designing the Phase 4 path simulator).** That change originally
+> added *two* features, the streak and "games since last played". They are the same number
+> by construction — byte-identical on all 15,847 rows — so the model carried nine features
+> under ten names and the ridge penalty quietly split one coefficient between two columns.
+> Nothing failed loudly, which is the point. Re-expressing the second in calendar days made
+> it genuinely distinct (correlation 0.94) and still bought nothing: log loss 0.3299 against
+> 0.3297 without it. It is dropped rather than kept for appearances. The gate is unchanged
+> to three decimal places. `test_no_two_hazard_features_are_the_same_number` now checks the
+> whole feature matrix pairwise, because this class of bug is invisible to every other test.
 
 **Minutes shocks are left-skewed, and a symmetric shock breaks the bottom of the
 distribution.** Multiplicative Gaussian noise on minutes left the left tail far too thin.
