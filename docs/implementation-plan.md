@@ -1527,6 +1527,54 @@ more places and changes who is first.
 already lopsided, so the marginal win probability between banking and riding is small.
 High-leverage decisions are real, and individually cheaper than ordinary ones.
 
+### Circumstance, and how much of the ranking it explains
+
+Raw win-probability regret is not a clean skill measure, and the reason is structural.
+With a binary choice the regret on a decision is either zero or exactly the gap between
+the two options, so
+
+```
+mean regret = P(wrong) × E[stake | wrong]
+               ^skill      ^circumstance
+```
+
+and the second term is not the manager's doing. Lopsided matchups carry small stakes: a
+mean of **3.0%** at P(win) under 20%, against **10.4%** in a live one. A manager who spends
+the season being blown out collects low regret for free.
+
+So the ranking sorts on **squandered share** — regret as a fraction of the win probability
+that was actually at stake — which divides circumstance out.
+
+Three measurements bound how much this ever mattered:
+
+**Stakes are not what a stronger roster buys.** Across the ten managers, stakes per
+decision correlate **+0.34** with win rate, not negatively. The effect is symmetric in
+*competitiveness*, not in strength — hopeless situations are the low-stakes ones, so the
+confound favours the league's worst teams more than its best.
+
+**The metric partly self-corrects, because expensive decisions are easy.** P(wrong) falls
+monotonically as the stakes rise:
+
+```
+   stakes band          n   P(wrong)
+   [0.00%, 1.67%]     469     32.6%
+   [1.67%, 4.00%]     472     30.1%
+   [4.00%, 7.17%]     466     20.2%
+   [7.17%, 12.50%]    467     14.6%
+   [12.50%, 85.0%]    468     12.6%
+```
+
+The calls that would be costly to botch tend to have an obvious right answer, so the
+regret metric is not as exposed to circumstance as the decomposition suggests. Raw regret
+correlates **+0.81** with P(wrong) and only **−0.33** with stakes.
+
+**Matching on difficulty reproduces the ranking.** `--competitive` keeps only decisions
+taken with the matchup live (P(win) 30-70%), discarding about half the season and putting
+every manager on comparable footing. Spearman against the full table is **+0.94**. Exactly
+one manager moves at the top — roster 3, who went 20-1 and was favoured in 59.7% of his
+decisions, drops from first to second. That is precisely the case the confound predicts,
+and it is the only one.
+
 ### What the season says
 
 The spread is wide and the ends are cleanly separated; the middle is not. Bootstrapped 90%

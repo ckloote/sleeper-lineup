@@ -277,11 +277,18 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
 @click.option("--sims", default=300, show_default=True, help="Simulations per decision.")
 @click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
-def managers(as_json: bool, sims: int, names: bool) -> None:
+@click.option(
+    "--competitive",
+    is_flag=True,
+    help="Only decisions with the matchup live (P(win) 30-70%), matching everyone on difficulty.",
+)
+def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
     """Rank the managers on decision quality, holding roster talent constant."""
     cfg = Config.from_env()
     with session(cfg.db_path) as conn:
-        report = managers_mod.evaluate_managers(conn, cfg.season, n_sims=sims)
+        report = managers_mod.evaluate_managers(
+            conn, cfg.season, n_sims=sims, competitive_only=competitive
+        )
         n_decisions, n_cards = managers_mod.persist(conn, report)
 
     labels: dict[int, str] = {}
@@ -303,6 +310,8 @@ def managers(as_json: bool, sims: int, names: bool) -> None:
                         "rank": i,
                         "roster_id": s.roster_id,
                         "manager": labels.get(s.roster_id),
+                        "squandered_share": s.squandered_share,
+                        "mean_stake": s.mean_stake,
                         "mean_regret": s.mean_regret,
                         "right_rate": s.right_rate,
                         "decisions": s.decisions,
@@ -319,24 +328,29 @@ def managers(as_json: bool, sims: int, names: bool) -> None:
         return
 
     agree, differ = report.regret_by_agreement()
+    scope = "competitive decisions only" if competitive else "all decisions"
     click.echo(
-        f"{len(report.decisions)} decisions across {len(ranked)} managers."
-        f" Ranked by win probability thrown away — lower is better.\n"
+        f"{len(report.decisions)} decisions across {len(ranked)} managers ({scope})."
+        f"\nRanked by the share of at-stake win probability thrown away — lower is better.\n"
     )
     click.echo(
-        f"  {'#':>2} {'roster':>6} {'manager':<16} {'regret':>8} {'right':>7}"
-        f" {'90% band':>18} {'n':>5} {'hi-lev':>8} {'pts cap':>8} {'zeros':>6}"
+        f"  {'#':>2} {'roster':>6} {'manager':<16} {'squander':>9} {'wrong':>7} {'stake':>7}"
+        f" {'regret':>8} {'n':>5} {'hi-lev':>7} {'pts cap':>8} {'zeros':>6}"
     )
     for i, s in enumerate(ranked, 1):
-        lo, hi = managers_mod.bootstrap_regret(report, s.roster_id)
         click.echo(
             f"  {i:>2} {s.roster_id:>6} {labels.get(s.roster_id, ''):<16}"
-            f" {s.mean_regret:>7.3%} {s.right_rate:>6.1%}"
-            f" {f'[{lo:.3%}, {hi:.3%}]':>18} {s.decisions:>5}"
-            f" {s.divergent_right_rate:>7.0%} {s.upside_share:>7.1%} {s.rode_to_zero:>6}"
+            f" {s.squandered_share:>8.1%} {1 - s.right_rate:>6.1%} {s.mean_stake:>6.2%}"
+            f" {s.mean_regret:>7.3%} {s.decisions:>5}"
+            f" {s.divergent_right_rate:>6.0%} {s.upside_share:>7.1%} {s.rode_to_zero:>6}"
         )
     click.echo(
-        f"\n  points and win probability disagree on {report.divergence_rate():.1%}"
+        f"\n  'squander' is regret as a share of what was at stake, which divides out"
+        f" circumstance:\n  raw regret is P(wrong) x E[stake], and a hopeless matchup carries"
+        f" a mean stake of 3.0%\n  against 10.4% in a live one. 'stake' is that circumstance,"
+        f" shown so it can be judged.\n  Run with --competitive to match everyone on difficulty"
+        f" (Spearman +0.94 with this)."
+        f"\n\n  points and win probability disagree on {report.divergence_rate():.1%}"
         f" of decisions; mean regret {differ:.3%} there against {agree:.3%} elsewhere."
         f"\n  'hi-lev' is the right-side rate on just those decisions."
         f"\n  'pts cap' is the older points-capture metric, shown for contrast only —"

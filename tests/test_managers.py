@@ -113,8 +113,8 @@ def test_ranking_is_by_regret_ascending():
     from lockin.managers import Scorecard
 
     report.scorecards = [
-        Scorecard(1, 1, 0.8, 0.0, 0, 0.0, 0.5, 1, 0),
-        Scorecard(2, 1, 0.0, 1.0, 0, 0.0, 0.5, 1, 0),
+        Scorecard(1, 1, 0.9, 0.05, 0.8, 0.0, 0, 0.0, 0.5, 1, 0),
+        Scorecard(2, 1, 0.0, 0.05, 0.0, 1.0, 0, 0.0, 0.5, 1, 0),
     ]
     assert [s.roster_id for s in report.ranked()] == [2, 1]
 
@@ -205,7 +205,7 @@ def test_persist_replaces_rather_than_accumulating():
 
     report = ManagerReport(
         decisions=[decision(roster_id=1, day=739000)],
-        scorecards=[Scorecard(1, 1, 0.01, 1.0, 0, 0.0, 0.5, 1, 0)],
+        scorecards=[Scorecard(1, 1, 0.2, 0.05, 0.01, 1.0, 0, 0.0, 0.5, 1, 0)],
     )
     persist(conn, report)
     persist(conn, report)
@@ -236,10 +236,83 @@ def test_stored_scorecard_carries_the_uncertainty_band():
             decisions=ds,
             scorecards=[
                 Scorecard(
-                    4, len(ds), float(np.mean([d.regret for d in ds])), 0.0, 0, 0.0, 0.5, 10, 0
+                    roster_id=4,
+                    decisions=len(ds),
+                    squandered_share=0.2,
+                    mean_stake=0.05,
+                    mean_regret=float(np.mean([d.regret for d in ds])),
+                    right_rate=0.0,
+                    divergent=0,
+                    divergent_right_rate=0.0,
+                    upside_share=0.5,
+                    upside_decisions=10,
+                    rode_to_zero=0,
                 )
             ],
         ),
     )
     row = conn.execute("SELECT * FROM manager_scorecards").fetchone()
     assert row["regret_lo"] < row["mean_regret"] < row["regret_hi"]
+
+
+# ----------------------------------------------------- circumstance vs skill
+
+
+def test_stake_is_the_gap_between_the_two_options():
+    """With two choices, regret is either zero or exactly the stake."""
+    d = decision(chose_lock=True, p_win_lock=0.30, p_win_pass=0.55)
+    assert d.stake == pytest.approx(0.25)
+    assert d.regret == pytest.approx(d.stake)
+    assert decision(chose_lock=False, p_win_lock=0.30, p_win_pass=0.55).regret == 0.0
+
+
+def test_a_blown_out_manager_does_not_look_skilled_on_the_share():
+    """The confound the share exists to remove.
+
+    Two managers, both wrong exactly half the time. One spends the season in
+    hopeless matchups where nothing is at stake, so raw regret flatters him.
+    Normalising by the stakes scores them identically, which is correct — they
+    decided equally badly.
+    """
+    blown_out = [
+        decision(
+            roster_id=1, day=739000 + i, chose_lock=(i % 2 == 0), p_win_lock=0.03, p_win_pass=0.05
+        )
+        for i in range(100)
+    ]
+    competitive = [
+        decision(
+            roster_id=2, day=739000 + i, chose_lock=(i % 2 == 0), p_win_lock=0.40, p_win_pass=0.60
+        )
+        for i in range(100)
+    ]
+
+    def mean(ds):
+        return float(np.mean([d.regret for d in ds]))
+
+    def share(ds):
+        return sum(d.regret for d in ds) / sum(d.stake for d in ds)
+
+    assert mean(blown_out) < mean(competitive) / 5, "raw regret rewards being blown out"
+    assert share(blown_out) == pytest.approx(share(competitive)), "the share does not"
+
+
+def test_competitive_flags_only_live_matchups():
+    assert decision(p_win_lock=0.50, p_win_pass=0.45).competitive
+    assert not decision(p_win_lock=0.05, p_win_pass=0.03).competitive
+    assert not decision(p_win_lock=0.95, p_win_pass=0.97).competitive
+
+
+def test_ranking_sorts_on_the_share_not_raw_regret():
+    """A manager with low raw regret purely from low stakes must not rank first."""
+    from lockin.managers import Scorecard
+
+    report = ManagerReport(
+        scorecards=[
+            # tiny regret, but threw away most of what little was at stake
+            Scorecard(1, 100, 0.40, 0.005, 0.002, 0.5, 0, 0.0, 0.5, 10, 0),
+            # larger regret, but on much bigger stakes
+            Scorecard(2, 100, 0.10, 0.100, 0.010, 0.8, 0, 0.0, 0.5, 10, 0),
+        ]
+    )
+    assert [s.roster_id for s in report.ranked()] == [2, 1]

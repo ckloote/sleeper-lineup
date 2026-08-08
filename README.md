@@ -326,18 +326,26 @@ uv run lockin managers --names
 ```
 
 ```
-   # roster manager            regret   right           90% band     n   hi-lev  pts cap  zeros
-   1      3 yinzknow          0.511%  85.7%   [0.315%, 0.727%]   224     71%   85.0%      0
-   2      4 ckloote           0.883%  86.9%   [0.387%, 1.553%]   213     80%   89.0%      0
-   3     10 jordany32         0.904%  84.0%   [0.555%, 1.276%]   244     32%   89.0%      0
+   # roster manager           squander   wrong   stake   regret     n  hi-lev  pts cap  zeros
+   1      3 yinzknow             6.8%  14.3%  7.54%  0.511%   224    71%   85.0%      0
+   2      4 ckloote              9.2%  13.1%  9.57%  0.883%   213    80%   89.0%      0
+   3     10 jordany32           10.0%  16.0%  9.00%  0.904%   244    32%   89.0%      0
    ...
-  10      9 coopermycupp      2.332%  69.7%   [1.634%, 3.124%]   218     67%   39.4%      9
+  10      9 coopermycupp        31.1%  30.3%  7.50%  2.332%   218    67%   39.4%      9
 
   points and win probability disagree on 10.9% of decisions;
   mean regret 0.755% there against 1.329% elsewhere.
 ```
 
-The ranking is **win probability thrown away per decision**, not points. That
+The ranking is the **share of at-stake win probability thrown away**, not points and not
+raw regret. With a binary choice, regret on a decision is either zero or exactly the gap
+between the options, so `mean regret = P(wrong) × E[stake]` — and the second term is
+circumstance, not skill. Lopsided matchups carry a mean stake of 3.0% against 10.4% in a
+live one, so being blown out repeatedly earns low regret for free. Dividing by the stakes
+removes that; `--competitive` restricts to live matchups as a stronger check, and
+reproduces the ranking at Spearman +0.94.
+
+Underneath that, the unit is **win probability, not points**. That
 distinction is the whole point of the command. A manager 40 down on Sunday should
 *decline* to bank a safe 45 and ride a boom-or-bust game instead, because banking
 it still loses — and a points metric scores that correct call as a blunder.
@@ -393,7 +401,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 287 tests, ~1.5s
+uv run pytest              # 291 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```

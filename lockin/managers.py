@@ -14,9 +14,26 @@ Weeks with one game, or where riding was already optimal, contribute nothing to
 either half and drop out on their own, so this measures only decisions that
 could be got wrong.
 
-**Win-probability regret** — was each decision the right side of the *bet*? This
-is the better metric and it is the one the ranking is sorted on, because points
-capture systematically punishes correct play:
+**Squandered share** — of all the win probability that was ever at stake across
+a manager's decisions, what fraction did they throw away? This is what the
+ranking sorts on. It is win-probability regret, normalised for circumstance:
+
+    squandered = Σ regret / Σ |V(lock) − V(pass)|
+
+Raw mean regret is not a clean skill measure. With a binary choice the regret on
+a decision is either zero or exactly the gap between the two options, so
+
+    mean regret = P(wrong) × E[stake | wrong]
+                   ^skill      ^circumstance
+
+and the second term is not the manager's doing. A hopeless matchup carries a
+mean stake of **3.0%** against **10.4%** in a competitive one, so a manager who
+spends the season being blown out collects low regret for free. Dividing by the
+stakes removes that.
+
+Win-probability regret, before that normalisation, is still the right *unit* —
+and it is a far better objective than points, because points capture
+systematically punishes correct play:
 
 > A manager 40 points down on Sunday should *decline* to bank a safe 45 and ride
 > a boom-or-bust game instead, because banking it still loses. That is the
@@ -32,6 +49,14 @@ One nuance that cuts the other way: mean regret on divergent decisions (0.755%)
 is *lower* than on concordant ones (1.329%). Divergence arises precisely when a
 matchup is already lopsided, so the marginal win probability at stake is small.
 High-leverage decisions are real but individually cheaper than ordinary ones.
+
+**The metric partly self-corrects, which is why the normalisation changes so
+little.** Decisions worth more are *easier*: P(wrong) falls from 32.6% in the
+lowest stakes quintile to 12.6% in the highest. The calls that would be
+expensive to botch tend to have an obvious right answer. Matching every manager
+on difficulty — restricting to competitive states, P(win) between 30% and 70% —
+reproduces the ranking at Spearman **+0.94**, and moves only one manager at the
+top: the one who went 20-1 and was favoured in 59.7% of his decisions.
 
 Three limits, all of which belong in any write-up of the output:
 
@@ -124,6 +149,20 @@ class Decision:
         return self.regret < 1e-12
 
     @property
+    def stake(self) -> float:
+        """How much win probability rode on this call.
+
+        With two options the regret is either zero or exactly this, so it is the
+        natural denominator for a skill measure.
+        """
+        return abs(self.p_win_lock - self.p_win_pass)
+
+    @property
+    def competitive(self) -> bool:
+        """Was the matchup still live? Used to match managers on difficulty."""
+        return 0.3 <= self.best <= 0.7
+
+    @property
     def divergent(self) -> bool:
         """Do the points and win-probability objectives disagree here?"""
         return self.greedy_locks != (self.p_win_lock > self.p_win_pass)
@@ -133,6 +172,12 @@ class Decision:
 class Scorecard:
     roster_id: int
     decisions: int
+    squandered_share: float
+    """Regret as a fraction of the win probability that was at stake. The
+    ranking sorts on this: it is mean regret with circumstance divided out."""
+    mean_stake: float
+    """Mean |V(lock) − V(pass)| — how much was riding on their decisions. Not a
+    skill measure; it is the circumstance the share normalises away."""
     mean_regret: float
     right_rate: float
     divergent: int
@@ -149,8 +194,8 @@ class ManagerReport:
     scorecards: list[Scorecard] = field(default_factory=list)
 
     def ranked(self) -> list[Scorecard]:
-        """Best decision-making first: least win probability thrown away."""
-        return sorted(self.scorecards, key=lambda s: s.mean_regret)
+        """Best decision-making first: least of what was at stake thrown away."""
+        return sorted(self.scorecards, key=lambda s: s.squandered_share)
 
     def divergence_rate(self) -> float:
         return (
@@ -188,9 +233,16 @@ def evaluate_managers(
     params: ProjectionParams | None = None,
     n_sims: int = 300,
     seed: int = 20260808,
+    competitive_only: bool = False,
     panel: SeasonPanel | None = None,
 ) -> ManagerReport:
-    """Walk every roster-week and score the decisions its manager actually made."""
+    """Walk every roster-week and score the decisions its manager actually made.
+
+    ``competitive_only`` keeps just the decisions taken with the matchup still
+    live (P(win) between 30% and 70%), matching every manager on difficulty. It
+    is the robustness check on the circumstance confound rather than the default
+    view, since it discards about half the season.
+    """
     scoring = scoring_settings(conn)
     panel = panel or load_panel(conn, season, params=params)
     source = EWMAProjectionSource(panel, scoring, params)
@@ -344,16 +396,22 @@ def evaluate_managers(
                 if chose_lock:
                     locked[pid] = score
 
+    if competitive_only:
+        report.decisions = [d for d in report.decisions if d.competitive]
+
     by_roster: dict[int, list[Decision]] = defaultdict(list)
     for d in report.decisions:
         by_roster[d.roster_id].append(d)
     for roster_id, ds in by_roster.items():
         div = [d for d in ds if d.divergent]
         captured, available, n_up = upside[roster_id]
+        stakes = float(sum(d.stake for d in ds))
         report.scorecards.append(
             Scorecard(
                 roster_id=roster_id,
                 decisions=len(ds),
+                squandered_share=(sum(d.regret for d in ds) / stakes) if stakes else 0.0,
+                mean_stake=float(np.mean([d.stake for d in ds])),
                 mean_regret=float(np.mean([d.regret for d in ds])),
                 right_rate=float(np.mean([d.right for d in ds])),
                 divergent=len(div),
@@ -407,13 +465,16 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
     conn.execute("DELETE FROM manager_scorecards")
     conn.executemany(
         "INSERT INTO manager_scorecards"
-        " (roster_id, decisions, mean_regret, right_rate, regret_lo, regret_hi,"
-        "  divergent, divergent_right_rate, upside_share, upside_decisions,"
-        "  rode_to_zero, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " (roster_id, decisions, squandered_share, mean_stake, mean_regret, right_rate,"
+        "  regret_lo, regret_hi, divergent, divergent_right_rate, upside_share,"
+        "  upside_decisions, rode_to_zero, computed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 s.roster_id,
                 s.decisions,
+                s.squandered_share,
+                s.mean_stake,
                 s.mean_regret,
                 s.right_rate,
                 *bootstrap_regret(report, s.roster_id),

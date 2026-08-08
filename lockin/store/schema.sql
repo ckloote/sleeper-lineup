@@ -298,13 +298,20 @@ CREATE TABLE IF NOT EXISTS manager_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_manager_decisions_roster ON manager_decisions (roster_id);
 
--- The ranking a dashboard renders. Sorted on mean_regret ASC, never on
+-- The ranking a dashboard renders. Sorted on squandered_share ASC, never on
 -- upside_share: points capture scores a correct variance-taking decision as a
 -- blunder, and carrying it here without that caveat is how it would end up
 -- being the column somebody sorts by.
+--
+-- squandered_share rather than mean_regret because raw regret is
+-- P(wrong) x E[stake | wrong], and the second term is circumstance: a hopeless
+-- matchup carries a mean stake of 3.0% against 10.4% in a competitive one, so
+-- being blown out repeatedly earns low regret for free.
 CREATE TABLE IF NOT EXISTS manager_scorecards (
     roster_id            INTEGER PRIMARY KEY,
     decisions            INTEGER NOT NULL,
+    squandered_share     REAL NOT NULL,   -- regret / win probability at stake
+    mean_stake           REAL NOT NULL,   -- circumstance, not skill
     mean_regret          REAL NOT NULL,   -- win probability forfeited per decision
     right_rate           REAL NOT NULL,
     regret_lo            REAL NOT NULL,   -- bootstrap 90% band; the middle of the

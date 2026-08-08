@@ -40,6 +40,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "locked_early": "INTEGER",
         "counted_points": "REAL",
     },
+    "manager_scorecards": {"squandered_share": "REAL", "mean_stake": "REAL"},
 }
 
 
