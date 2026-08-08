@@ -11,6 +11,7 @@ import json
 import sys
 
 import click
+import numpy as np
 
 from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
@@ -228,19 +229,30 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
             f" {len(held.rows)} held out (weeks {holdout_from}-25),"
             f" {held.starters()} starter-weeks\n"
         )
-        click.echo(f"  {'policy':<12} {'points':>8} {'zeroed':>8} {'locked':>8} {'wins':>9}")
-        for name in backtest_mod.REPLAYED_POLICIES:
-            pts = held.points(name).mean()
-            won, played = backtest_mod.wins_flipped(held, name)
-            click.echo(
-                f"  {name:<12} {pts:>8.1f} {held.zeroed(name):>8} {held.locked(name):>8}"
-                f" {f'{won}/{played}':>9}"
-            )
-        oracle = held.points(backtest_mod.ORACLE).mean()
+        # Every mean is taken over the roster-weeks where ROLLOUT also ran, so
+        # the column is comparable down its length. Rollout needs an opponent
+        # and so is absent from weeks 23-24's eliminated teams and from unscored
+        # week 25; averaging each policy over its own rows would compare
+        # different sets of weeks and flatter whichever set was easier.
+        comparable = [r for r in held.rows if backtest_mod.ROLLOUT in r.points]
+        n_common = len(comparable)
         click.echo(
-            f"  {'oracle':<12} {oracle:>8.1f} {held.zeroed(backtest_mod.ORACLE):>8}"
-            f" {'-':>8} {'-':>9}   perfect foresight, not attainable"
+            f"  means over the {n_common} of {len(held.rows)} held-out roster-weeks"
+            f" where every policy ran"
         )
+        click.echo(f"  {'policy':<12} {'points':>8} {'zeroed':>8} {'locked':>8} {'wins':>9}")
+        for name in (*backtest_mod.REPLAYED_POLICIES, backtest_mod.ORACLE):
+            pts = float(np.mean([r.points[name] for r in comparable])) if comparable else 0.0
+            zeroed = sum(r.zeroed.get(name, 0) for r in comparable)
+            if name == backtest_mod.ORACLE:
+                click.echo(
+                    f"  {name:<12} {pts:>8.1f} {zeroed:>8} {'-':>8} {'-':>9}"
+                    "   perfect foresight, not attainable"
+                )
+                continue
+            locked = sum(r.locked.get(name, 0) for r in comparable)
+            won, played = backtest_mod.wins_flipped(held, name)
+            click.echo(f"  {name:<12} {pts:>8.1f} {zeroed:>8} {locked:>8} {f'{won}/{played}':>9}")
         actual = [r.actual_points for r in held.rows if r.actual_points is not None]
         if actual:
             click.echo(

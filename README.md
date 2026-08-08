@@ -268,12 +268,13 @@ uv run lockin backtest --paths 1000 --json
 ```
 replayed 250 roster-weeks; 80 held out (weeks 18-25), 480 starter-weeks
 
+  means over the 66 of 80 held-out roster-weeks where every policy ran
   policy         points   zeroed   locked      wins
-  never_lock      193.0       71        0     33/66
-  lock_first      227.8       16      464     42/66
-  greedy          273.3       38      350     61/66
+  never_lock      213.6       30        0     33/66
+  lock_first      233.5        9      387     42/66
+  greedy          289.5       13      303     61/66
   rollout         284.1       15      264     59/66
-  oracle          300.0       16        -         -   perfect foresight, not attainable
+  oracle          310.0        9        -         -   perfect foresight, not attainable
   actual          244.1        -        -         -   advisory: reads the field Sleeper rewrote
 
   rollout vs greedy, both against a greedy opponent, all ten rosters:
@@ -299,8 +300,12 @@ about 75%. Greedy sits just under the theoretical ceiling for a policy with no f
 which is where a correct one belongs and where a leaking one could not. That comparison is
 a gate, not a comment.
 
-**Rollout gives up points and gains wins.** It scores 1.7 fewer points per roster-week
-than greedy and wins nine more matchups. That is the objective working: the engine
+**Rollout gives up points and gains wins.** Paired over the same roster-weeks it scores
+1.7 fewer points than greedy across the season (5.4 fewer on the held-out block) and wins
+nine more matchups. Every mean in the table above is taken over the roster-weeks where
+*all* policies ran — rollout needs an opponent, so it is absent from weeks 23-24's
+eliminated teams and from unscored week 25, and averaging each policy over its own rows
+would compare different sets of weeks. That is the objective working: the engine
 maximises P(win), not points, and the two diverge exactly where it matters — trailing
 badly, the right play is to take variance and pass on a safe score; leading comfortably,
 it is to bank everything. A rollout that matched greedy on points would be evidence it was
