@@ -1141,6 +1141,11 @@ assumption there is not defensible.
 Simulation and the base policy are built, and the gate closes on **held-out weeks
 18-25** — 80 roster-weeks, 480 starter-weeks, all ten rosters.
 
+> The table below averages each policy over **all 80** held-out roster-weeks, which was
+> well defined while every policy ran everywhere. Phase 5's rollout does not — it needs an
+> opponent — so §15 and the CLI report over the common subset instead. The gate numbers are
+> paired and are unaffected either way.
+
 ```
   policy         points   zeroed   locked      wins
   never_lock      193.0       71        0     33/66
@@ -1302,12 +1307,13 @@ restated §7.1 criterion — **all ten rosters, paired**, because the doc's lite
 weeks" is not measurable at this effect size.
 
 ```
+  means over the 66 of 80 held-out roster-weeks where every policy ran
   policy         points   zeroed   locked      wins
-  never_lock      193.0       71        0     33/66
-  lock_first      227.8       16      464     42/66
-  greedy          273.3       38      350     61/66
+  never_lock      213.6       30        0     33/66
+  lock_first      233.5        9      387     42/66
+  greedy          289.5       13      303     61/66
   rollout         284.1       15      264     59/66
-  oracle          300.0       16        -         -   perfect foresight, not attainable
+  oracle          310.0        9        -         -   perfect foresight, not attainable
 
   rollout vs greedy, both against a greedy opponent, all ten rosters:
     236 team-weeks — rollout 127 wins, greedy 118; flipped +14/-5, McNemar z=+2.06
@@ -1320,7 +1326,8 @@ weeks" is not measurable at this effect size.
        -1.74 points per roster-week against greedy (se 1.22, t=-1.43)
 ```
 
-**Rollout gives up 1.74 points per roster-week and gains nine wins.** That is the
+**Rollout gives up 1.74 points per roster-week — 5.4 on the held-out block — and gains
+nine wins.** That is the
 objective working, not failing. Architecture doc §4 asks for P(win), not points, and the
 two diverge exactly where it matters: trailing badly the correct play is to take variance
 and pass on a safe score, leading comfortably it is to bank everything. A rollout that
