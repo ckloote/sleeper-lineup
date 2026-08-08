@@ -17,14 +17,15 @@ is executed by hand in the app.
 
 ## Status
 
-**Phases 0-4 complete.** Ingest, the scoring engine, retrospective lock inference, the
-projection layer and the stopping policy, all validated against the full 2025-26 season.
-Every nonzero counted score in all 25 weeks is reproduced from box scores to the cent,
-98.2% of starter player-weeks resolve to a specific lock decision, projected quantiles
-match realised frequencies on held-out weeks — including the right tail, which is the only
-part that decides whether banking a score is correct — and the greedy threshold policy
-beats never-lock by 79.8 points per roster-week out of sample. Phases 5-6 (rollout,
-digest) are deferred.
+**Phases 0-5 complete.** Ingest, the scoring engine, retrospective lock inference, the
+projection layer, the stopping policy and the rollout engine, all validated against the
+full 2025-26 season. Every nonzero counted score in all 25 weeks is reproduced from box
+scores to the cent, 98.2% of starter player-weeks resolve to a specific lock decision,
+projected quantiles match realised frequencies on held-out weeks — including the right
+tail, which is the only part that decides whether banking a score is correct — the greedy
+threshold beats never-lock by 79.8 points per roster-week out of sample, and the rollout
+engine converts that into **9 extra wins over 236 team-weeks** while deliberately giving
+up points. Phase 6 (daily digest, deployment) remains.
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
@@ -269,9 +270,13 @@ replayed 250 roster-weeks; 80 held out (weeks 18-25), 480 starter-weeks
   policy         points   zeroed   locked      wins
   never_lock      193.0       71        0     33/66
   lock_first      227.8       16      464     42/66
-  greedy          272.8       36      355     61/66
+  greedy          273.3       38      350     61/66
+  rollout         284.1       15      264     59/66
   oracle          300.0       16        -         -   perfect foresight, not attainable
   actual          244.1        -        -         -   advisory: reads the field Sleeper rewrote
+
+  rollout vs greedy, both against a greedy opponent, all ten rosters:
+    236 team-weeks — rollout 127 wins, greedy 118; flipped +14/-5, McNemar z=+2.06
 ```
 
 Each roster's **actual lineup is held fixed** and only the stopping rule varies. That is
@@ -292,6 +297,18 @@ captures 74.6% of the headroom above never-lock. Optimal stopping on iid draws c
 about 75%. Greedy sits just under the theoretical ceiling for a policy with no foresight,
 which is where a correct one belongs and where a leaking one could not. That comparison is
 a gate, not a comment.
+
+**Rollout gives up points and gains wins.** It scores 1.7 fewer points per roster-week
+than greedy and wins nine more matchups. That is the objective working: the engine
+maximises P(win), not points, and the two diverge exactly where it matters — trailing
+badly, the right play is to take variance and pass on a safe score; leading comfortably,
+it is to bank everything. A rollout that matched greedy on points would be evidence it was
+ignoring the opponent. It also zeroes 15 starter slots against greedy's 38, because a
+zeroed slot loses a week outright rather than shaving a margin.
+
+The win comparison pools **all ten rosters** — one roster's held-out block is five or six
+matchups, which cannot resolve an effect this size. The held-out block is still reported,
+and reported honestly: 4 discordant pairs, too few to conclude anything from on its own.
 
 Commands arriving with later phases: `digest`.
 
@@ -314,7 +331,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 245 tests, ~1.5s
+uv run pytest              # 270 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -421,6 +438,7 @@ lockin/
     locks.py       recover a lock decision from a counted score
     projections.py DNP hazard, minutes, component bootstrap; as_of enforced
     policy.py      when to bank a score and when to ride
+    winprob.py     P(win), the rollout decision, and the standing threshold
   ingest/
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
@@ -434,7 +452,8 @@ lockin/
   locks.py         the Phase 2 gates — inference over all ten rosters
   projections.py   builds the point-in-time panel from SQLite
   calibrate.py     the Phase 3 gates — quantiles against realised frequencies
-  backtest.py      the Phase 4 gates — policy against policy over the season
+  rollout.py       walks a week under the rollout policy, with an opponent
+  backtest.py      the Phase 4-5 gates — policy against policy over the season
   cli.py
 tests/
 docs/

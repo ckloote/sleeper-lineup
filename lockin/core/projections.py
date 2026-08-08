@@ -611,8 +611,20 @@ class EWMAProjectionSource:
         *,
         rng: np.random.Generator,
         n_paths: int | None = None,
+        dnp_scale: float = 1.0,
     ) -> np.ndarray:
         """Joint draws over a player's remaining games. ``(n_paths, len(game_days))``.
+
+        ``dnp_scale`` multiplies the hazard. It exists for one specific, measured
+        reason: **a lineup slot is evidence of availability.** Over held-out
+        weeks the hazard predicts a 17.2% DNP rate for players their manager
+        actually started, against a realised 8.5% — managers read the injury
+        report before setting a lineup and the model cannot, because
+        ``player_status`` is empty and ``/players/nba`` publishes only today's
+        designation. Left uncorrected this understates every team total by
+        around 26 points and makes banking look far safer than it is. The caller
+        supplies a factor fit on **prior weeks only**; see
+        ``lockin.backtest.starter_dnp_scale``.
 
         This is the function a week simulation must use. Drawing each game from
         :meth:`project` and treating the results as independent is wrong by a
@@ -658,6 +670,8 @@ class EWMAProjectionSource:
                 p_dnp = np.full(n, fallback)
             else:
                 p_dnp = model.predict(dnp_feature_matrix(days, played, int(day), int(week)))
+            if dnp_scale != 1.0:
+                p_dnp = np.clip(p_dnp * dnp_scale, 0.0, 1.0)
             plays = rng.random(n) >= p_dnp
             scores = self._draw_played_scores(sleeper_id, hist, as_of, rng, n, form=form)
             out[:, g] = np.where(plays, scores, 0.0)

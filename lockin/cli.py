@@ -247,9 +247,17 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
                 f"  {'actual':<12} {sum(actual) / len(actual):>8.1f} {'-':>8} {'-':>8} {'-':>9}"
                 "   advisory: reads the field Sleeper rewrote"
             )
-        click.echo("\n  wins are head-to-head with the opponent left on never-lock.\n")
+        click.echo("\n  wins are head-to-head with the opponent left on never-lock.")
 
-    _render(checks, "Phase 4 stopping-policy backtest", as_json)
+        pairs = backtest_mod.head_to_head(result, backtest_mod.ROLLOUT, backtest_mod.GREEDY)
+        b, c, z = backtest_mod.mcnemar(pairs)
+        click.echo(
+            f"\n  rollout vs greedy, both against a greedy opponent, all ten rosters:"
+            f"\n    {len(pairs)} team-weeks — rollout {int(pairs[:, 0].sum())} wins,"
+            f" greedy {int(pairs[:, 1].sum())}; flipped +{b}/-{c}, McNemar z={z:+.2f}\n"
+        )
+
+    _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
 
 
 @main.command()

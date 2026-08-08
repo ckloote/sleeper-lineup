@@ -1,8 +1,9 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — **Phases 0-4 complete** (§9, §10, §11, §13, §14). Phases 3 and 4 were
-reassessed and taken on after Phases 0-2 landed, as §6 anticipated. Phases 5-6 remain deferred.
+**Status:** Approved — **Phases 0-5 complete** (§9, §10, §11, §13, §14, §15). Phases 3-5 were
+reassessed and taken on after Phases 0-2 landed, as §6 anticipated. Phase 6 (digest, deployment)
+remains, and is mostly live-only work that cannot be backtested.
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
@@ -283,7 +284,7 @@ Phase 5 evaluation depends on every manager being profiled, not just yours.
 
 ---
 
-*Phases 4-6 below are recorded for continuity. **Not in this build.***
+*Phase 6 below is recorded for continuity. **Not in this build.***
 
 ### Phase 3 — Projection layer (EWMA) — COMPLETE, see §13
 `ProjectionSource` protocol with an `as_of` cutoff enforced in the interface signature,
@@ -319,7 +320,7 @@ Backtest harness with the five policies from §12.
 > `(prior_days, prior_played, target_day, fantasy_week)` as arrays, so this needs a
 > vectorised feature builder, not a redesign.
 
-### Phase 5 — Rollout and opponent model — DEFERRED
+### Phase 5 — Rollout and opponent model — COMPLETE, see §15
 Rollout policy improvement over the base policy; opponent belief state; threshold by
 binary search over hypothetical `S`.
 
@@ -1281,3 +1282,150 @@ The open problem is the one §13 flagged and Phase 4 did not need: **teammate co
 over six correlated players, and P(win) depends on the variance of that sum, not on six
 marginals. Phase 4's gate is a mean comparison and is unaffected — means add regardless of
 correlation — but Phase 5's is not.
+
+---
+
+## 15. Phase 5 — complete
+
+Rollout, the opponent model and the threshold output are built. The gate closes on the
+restated §7.1 criterion — **all ten rosters, paired**, because the doc's literal "held-out
+weeks" is not measurable at this effect size.
+
+```
+  policy         points   zeroed   locked      wins
+  never_lock      193.0       71        0     33/66
+  lock_first      227.8       16      464     42/66
+  greedy          273.3       38      350     61/66
+  rollout         284.1       15      264     59/66
+  oracle          300.0       16        -         -   perfect foresight, not attainable
+
+  rollout vs greedy, both against a greedy opponent, all ten rosters:
+    236 team-weeks — rollout 127 wins, greedy 118; flipped +14/-5, McNemar z=+2.06
+
+[PASS] rollout beats greedy on wins, all ten rosters, paired
+[PASS] rollout does not lose on wins in held-out weeks 18+
+       66 team-weeks: rollout 35, greedy 33; flipped +3/-1, z=+1.00
+       — only 4 discordant pairs, too few to resolve significance (§7.1)
+[PASS] rollout trades points for win probability, as the objective intends
+       -1.74 points per roster-week against greedy (se 1.22, t=-1.43)
+```
+
+**Rollout gives up 1.74 points per roster-week and gains nine wins.** That is the
+objective working, not failing. Architecture doc §4 asks for P(win), not points, and the
+two diverge exactly where it matters: trailing badly the correct play is to take variance
+and pass on a safe score, leading comfortably it is to bank everything. A rollout that
+matched greedy on points would be evidence it was ignoring the opponent.
+
+It also zeroes far fewer starter slots — **15 against greedy's 38** — which is the same
+mechanism seen from the other side. A win-probability objective hates a zero more than a
+points objective does, because a zeroed slot loses a week outright rather than shaving a
+margin.
+
+### §7.1 was right, and it was still not quite enough
+
+The adopted fix — replay all ten rosters — turns 21 matchups into 105 and is what makes
+the pooled test resolve at all (z = +2.06 over 236 team-weeks). But the *held-out block on
+its own* yields 66 team-weeks and only **4 discordant pairs**, which cannot resolve
+anything. That is exactly the failure §7.1 predicted, one level up.
+
+So the gate is stated honestly rather than stretched: the pooled comparison is the
+criterion, the holdout is checked for **direction only**, and the number of discordant
+pairs is printed so nobody reads `z=+1.00` as evidence of anything. Weeks 1-17 informed
+the projection layer's hyperparameters, but both policies consume the same projections, so
+the *comparison* is not obviously advantaged by that.
+
+### The finding that made the first build fail: a lineup slot is evidence
+
+The first working rollout scored **worse** than the policy it was meant to improve on —
+−7.3 points and a losing win record. Rollout policy improvement is supposed to be no worse
+than its base policy in expectation, so this was a model error, not a tuning problem.
+
+It was, and the cause is worth recording because it is not a bug:
+
+```
+                   simulated P(DNP)   realised   bias
+started players          0.172          0.085   +0.087
+benched players          0.363          0.391   -0.028
+```
+
+**The hazard predicts twice the absence rate that started players actually have.** Managers
+read the injury report before setting a lineup; the model cannot, because `player_status`
+is empty for the whole season and `/players/nba` publishes only today's designation (§13).
+The lineup decision therefore *encodes* information the projection lacks, and conditioning
+on it is not optional — it is worth about 4.97 points per started player-game, or **26
+points on a six-man team total**.
+
+The consequence was precisely the observed failure. An underestimated opponent makes the
+matchup look winnable, which makes banking a safe score look sufficient, so the engine
+banked too eagerly and gave up the upside it needed.
+
+The correction is `starter_dnp_scale`: the realised-over-predicted DNP ratio among started
+player-games in **strictly earlier weeks**, applied as a multiplier on the hazard. It is
+point-in-time by construction, has nothing to tune, and estimates a directly observable
+quantity. It is best understood as a stand-in for the injury feed the live engine will
+actually have — which makes it a backtest artefact that should *shrink* in production, not
+a permanent fudge.
+
+Diagnosing this took four measurements and is the most valuable thing in the phase. The
+first three were wrong turns worth recording: the projection is unbiased at week start
+(−0.02 on the per-game marginal), unbiased conditional on an early DNP (+0.012 on the
+hazard), and unbiased conditional on "greedy has not fired yet" (+1.33 on the stopping
+value). Only splitting by *started vs benched* found it.
+
+### Teammate correlation: measured, and it does not matter
+
+§14 left this as Phase 5's open problem — 42% of roster-weeks start two or more players
+from the same NBA team, and P(win) depends on the variance of a team total rather than on
+six marginals. Measured, it is a non-issue:
+
+```
+teammate pairs in the same game            34,198
+corr of standardised scores                 -0.012   (both played: +0.004)
+corr of availability                        +0.073
+```
+
+Usage and pace effects cancel almost exactly. Decomposing the variance of real team totals
+confirms it end to end: total Var(z) = 1.23 splits into a **within-week** component of
+**0.86** — where a teammate correlation would show up, and where independence is if
+anything mildly conservative — and a **between-week** component of 0.47, which is the
+light-slate effect and is modelled explicitly, since the simulator is given each player's
+actual remaining fixtures.
+
+**Independence across players is therefore kept, with evidence rather than as an
+assumption.** This is the rare case where a flagged risk turns out to cost nothing.
+
+### Threshold output: closed form, not a search
+
+§11 asks for a binary search over hypothetical *S* to find where `V(lock|S) = V(pass|S)`.
+No search is needed. Writing `D = opponent − banked − others`, the value of locking at *S*
+is `P(S > D)` — the CDF of `D` at *S*, increasing in *S* — while the value of passing does
+not depend on *S* at all. The crossing is exactly the `p_pass`-quantile of `D`: one sort,
+exact rather than converged to a tolerance. `test_threshold_matches_a_brute_force_scan`
+checks it against the search the doc proposed.
+
+Per §7.2 forward thresholds assume **no action on the intervening nights**. A threshold
+that quietly assumed you had followed yesterday's advice is wrong exactly when you needed
+it.
+
+### Deviations from the plan
+
+- **Decisions are taken once a day**, at the end of the day, rather than per game. That is
+  the product — the tool is read once a day — and a policy assuming intra-day check-ins
+  would measure something nobody will do.
+- **The opponent is a policy, not a belief state.** §10's live inference reads a frozen
+  `players_points` to detect a lock one game later, sharpened by the manager profile.
+  Retrospectively there is nothing to infer from, and §12 makes that field unreliable
+  anyway, so the opponent is simulated under the base policy with already-played games
+  *resolved* rather than sampled. `manager_profiles` is therefore built and validated but
+  not yet consumed; wiring it in is Phase 6 work on live data.
+- **`assign_slots` is still not used in the replay.** Lineups stay fixed so the comparison
+  isolates stopping. It is exercised by tests and waits for the digest.
+
+### What Phase 6 inherits
+
+`standing_thresholds` and `decision_for` are the digest's two calls, and both are already
+in the shape §11's daily digest needs. What is missing is live-only and cannot be
+backtested: today's injury designations, the polling loop that makes `weekly_matchups`
+accumulate the freeze history live lock inference needs, and the opponent belief that
+history feeds. The `starter_dnp_scale` correction is the seam where the real injury feed
+should replace the proxy.

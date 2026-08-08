@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from lockin import backtest
+from lockin import backtest as bt_mod
 from lockin.backtest import GREEDY, LOCK_FIRST, NEVER_LOCK, ORACLE, BacktestResult, RosterWeek
 
 
@@ -204,3 +205,98 @@ def test_run_requires_something_in_the_holdout():
     result = make_result([{"week": 3, "points": dict(BASE)}])
     with pytest.raises(RuntimeError):
         backtest.run(None, "2025", holdout_from=18, result=result)
+
+
+# ------------------------------------------------------------ Phase 5 gates
+
+ROLLOUT = bt_mod.ROLLOUT
+BASE5 = {NEVER_LOCK: 190.0, LOCK_FIRST: 225.0, GREEDY: 270.0, ROLLOUT: 268.0, ORACLE: 300.0}
+
+
+def matchup_rows(results: list[tuple[float, float, float]], week=20) -> BacktestResult:
+    """One matchup per entry; `results` is (my rollout, my greedy, opponent greedy).
+
+    The opponent row deliberately carries no rollout score. `head_to_head`
+    evaluates both sides of a matchup as "me", so giving the opponent one would
+    silently add a second observation per matchup and halve the apparent effect.
+    """
+    rows = []
+    for i, (roll, greedy, opp) in enumerate(results):
+        rows.append(
+            {
+                "week": week,
+                "roster_id": 2 * i + 1,
+                "matchup_id": i + 1,
+                "points": {ROLLOUT: roll, GREEDY: greedy, NEVER_LOCK: 100.0, ORACLE: 400.0},
+            }
+        )
+        rows.append(
+            {
+                "week": week,
+                "roster_id": 2 * i + 2,
+                "matchup_id": i + 1,
+                "points": {GREEDY: opp, NEVER_LOCK: 100.0, ORACLE: 400.0},
+            }
+        )
+    return make_result(rows)
+
+
+def test_head_to_head_pairs_each_policy_against_the_same_opponent():
+    result = matchup_rows([(300.0, 200.0, 250.0)])
+    pairs = backtest.head_to_head(result, ROLLOUT, GREEDY)
+    # Team 1: rollout 300 > 250 (win), greedy 200 < 250 (loss).
+    assert pairs[0].tolist() == [True, False]
+
+
+def test_mcnemar_uses_only_the_discordant_pairs():
+    """Team-weeks where both policies agree carry no information either way."""
+    pairs = np.array([[True, False]] * 9 + [[False, True]] * 1 + [[True, True]] * 50)
+    b, c, z = backtest.mcnemar(pairs)
+    assert (b, c) == (9, 1)
+    assert z == pytest.approx(8 / np.sqrt(10))
+
+
+def test_mcnemar_is_empty_safe():
+    assert backtest.mcnemar(np.zeros((0, 2), dtype=bool)) == (0, 0, 0.0)
+
+
+def test_phase5_gate_fails_when_rollout_loses_on_wins():
+    result = matchup_rows([(200.0, 300.0, 250.0)] * 10)
+    check = backtest.check_rollout_beats_greedy_on_wins(result)
+    assert not check.passed
+    assert "rollout wins 0" in check.offenders[0]
+
+
+def test_phase5_gate_fails_on_a_lead_too_small_to_resolve():
+    """A one-week edge is not evidence. The paired test has to say so."""
+    result = matchup_rows([(300.0, 200.0, 250.0)] + [(300.0, 300.0, 250.0)] * 9)
+    check = backtest.check_rollout_beats_greedy_on_wins(result)
+    assert not check.passed
+    assert "inconclusive" in check.offenders[0]
+
+
+def test_phase5_gate_passes_on_a_resolved_lead():
+    result = matchup_rows([(300.0, 200.0, 250.0)] * 12 + [(200.0, 300.0, 250.0)] * 2)
+    assert backtest.check_rollout_beats_greedy_on_wins(result).passed
+
+
+def test_holdout_check_is_directional_and_says_so():
+    """§7.1 predicted the holdout would be underpowered; the gate admits it."""
+    result = matchup_rows([(300.0, 200.0, 250.0), (300.0, 300.0, 250.0)], week=20)
+    check = backtest.check_rollout_holdout_direction(result, 18)
+    assert check.passed
+    assert "too few to resolve significance" in check.detail
+
+
+def test_holdout_check_fails_if_rollout_actually_loses_there():
+    result = matchup_rows([(200.0, 300.0, 250.0)] * 5, week=20)
+    assert not backtest.check_rollout_holdout_direction(result, 18).passed
+
+
+def test_points_sacrifice_is_allowed_but_bounded():
+    """Giving up a little is the objective; giving up a lot is a broken opponent model."""
+    assert backtest.check_rollout_trades_points_for_wins(spread(BASE5)).passed
+    heavy = dict(BASE5, **{ROLLOUT: 230.0})
+    check = backtest.check_rollout_trades_points_for_wins(spread(heavy))
+    assert not check.passed
+    assert "mispriced opponent" in check.offenders[0]
