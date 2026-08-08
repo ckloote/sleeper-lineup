@@ -20,7 +20,7 @@ is executed by hand in the app.
 **Phases 0-5 complete.** Ingest, the scoring engine, retrospective lock inference, the
 projection layer, the stopping policy and the rollout engine, all validated against the
 full 2025-26 season. Every nonzero counted score in all 25 weeks is reproduced from box
-scores to the cent, 98.2% of starter player-weeks resolve to a specific lock decision,
+scores to the cent, 98.4% of starter player-weeks resolve to a specific lock decision,
 projected quantiles match realised frequencies on held-out weeks — including the right
 tail, which is the only part that decides whether banking a score is correct — the greedy
 threshold beats never-lock by 79.8 points per roster-week out of sample, and the rollout
@@ -164,20 +164,21 @@ uv run lockin locks --profiles
 ```
 
 ```
-inferred 1500 starter player-weeks, 1473 resolved
+inferred 1500 starter player-weeks, 1476 resolved
 
-  locked_early           811
-  rode_to_end            641
-  ambiguous               27
+  locked_early           858
+  rode_to_end            597
+  ambiguous               24
   single_game             21
 
 manager lock tendency (higher lock_rate = banks earlier)
   roster  decisions  early   rode  lock_rate  mean_pos
-       3        148    100     48      67.6%      0.48
-       2        148     66     82      44.6%      0.68
+       6        144    110     34      76.4%      0.38
+       4        148    103     45      69.6%      0.43
+       9        146     42    104      28.8%      0.77
 ```
 
-The spread is the point: roster 3 banks early, roster 2 rides to Sunday. That is a
+The spread is the point: roster 6 banks early, roster 9 rides to Sunday. That is a
 per-manager trait the live opponent model uses to sharpen its belief about whether an
 opponent's frozen score is locked or merely unplayed.
 

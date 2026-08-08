@@ -605,16 +605,16 @@ The committed scope is finished. All four gates closed across **all ten rosters*
 ```
 [PASS] slot-eligibility rule explains every observed lineup   1500/1500 (3 overrides)
 [PASS] no counted score fails to match a game                 0 unresolved
-[PASS] starter player-weeks resolved at high confidence       1473/1500 (98.20%)
+[PASS] starter player-weeks resolved at high confidence       1476/1500 (98.40%)
 [PASS] every roster has a lock-tendency profile               10/10
 ```
 
 Target was ≥95%. Breakdown of the 1,500 starter player-weeks:
 
 ```
-locked_early    811     an unambiguous, deliberate lock
-rode_to_end     641     counted the final game's outcome
-ambiguous        27     several games share the counted value
+locked_early    858     an unambiguous, deliberate lock
+rode_to_end     597     counted the final game's outcome
+ambiguous        24     several games share the counted value
 single_game      21     one game scheduled; no decision existed
 ```
 
@@ -622,26 +622,36 @@ single_game      21     one game scheduled; no decision existed
 
 ```
 roster  decisions  early  rode  lock_rate  mean_pos
-     3        148    100    48      67.6%      0.48
-     9        147     91    56      61.9%      0.54
-    10        145     87    58      60.0%      0.56
-     4        148     84    64      56.8%      0.55
-     6        145     82    63      56.6%      0.58
-     8        145     82    63      56.6%      0.57
-     7        143     76    67      53.1%      0.60
-     1        149     79    70      53.0%      0.57
-     5        146     76    70      52.1%      0.59
-     2        148     66    82      44.6%      0.68
+     6        144    110    34      76.4%      0.38
+     3        147    107    40      72.8%      0.45
+     4        148    103    45      69.6%      0.43
+    10        145     98    47      67.6%      0.51
+     7        142     95    47      66.9%      0.49
+     1        149     87    62      58.4%      0.51
+     2        149     81    68      54.4%      0.60
+     5        147     75    72      51.0%      0.62
+     8        145     67    78      46.2%      0.66
+     9        146     42   104      28.8%      0.77
 ```
 
-A 23-point spread between the earliest banker and the latest rider, and `mean_pos` (where
+A 48-point spread between the earliest banker and the latest rider, and `mean_pos` (where
 in the week the counted game sat, 0.0 first to 1.0 last) moves with it. This is the
 "locks early and safe vs. rides to Sunday" trait architecture doc §10 wants, and it is
 real signal rather than noise around a common strategy.
 
-Worth noting for the eventual opponent model: **your roster (1) is close to the middle**
-at 53.0%, and no manager is anywhere near an extreme. Nobody in this league is playing an
-obviously exploitable stopping policy.
+> **Corrections (2026-08-08).** Two errors in the original version of this section.
+>
+> **The table above was stale.** These figures were computed before the 2026-08-07
+> re-ingest and describe the *pre-mutation* data. §12 warned the profiles would move and
+> nobody updated them here. The numbers shown now are what `lockin locks` reproduces
+> today; the resolution rate also rose from 98.20% to 98.40%. Inference is deterministic —
+> re-running gives identical output — so this was staleness, not instability.
+>
+> **The user's roster is 4, not 1.** `LOCKIN_USER_ID` maps to `roster_id = 4`, which locks
+> at **69.6%** — the third most eager of ten, not "close to the middle". The original claim
+> was wrong on both the identity and the characterisation. The broader point survives: the
+> spread is wide but nobody sits at an extreme, so no manager here is playing an obviously
+> exploitable stopping policy.
 
 ### What ambiguity actually looks like
 
@@ -791,7 +801,7 @@ changelog, this can be narrowed but probably not settled, and it is not worth mo
 
 ### What this costs
 
-- **The Phase 2 lock inference ran against the mutated data.** Its 98.20% resolution rate
+- **The Phase 2 lock inference ran against the mutated data.** Its 98.40% resolution rate
   is genuine — the values still match real games — but the decisions it recovered are not
   necessarily the managers' actual decisions, and the manager profiles inherit that.
 - **Only week 12 survives.** A raw snapshot happened to be sitting in a scratch directory;
