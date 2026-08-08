@@ -372,7 +372,16 @@ Three limits, which the command prints alongside its output:
   shared between deciding and being judged. Manager-versus-manager is fair;
   manager-versus-engine is not.
 
-Every run writes `manager_scorecards` and `manager_decisions`. **A dashboard should
+It also ranks the **teams** — a different question, and the interesting one is the
+contrast. `ceiling` is the best legal six from the whole roster with every lock perfect;
+`oracle` is the same over only the six actually started, so the gap is the price of lineup
+selection, which is a decision rather than roster quality. Nine rosters give up 18-28
+points a week there; one gives up 53.3, ranks 3rd on roster and 8th on the plain oracle,
+and is also last on decision quality. Schedule density spans only 3.25-3.40 games a week
+here, so it is reported but changes little; health and form are unavoidably included,
+since every number is built from what players actually did.
+
+Every run writes `manager_scorecards`, `manager_decisions` and `roster_strength`. **A dashboard should
 read those tables rather than recomputing** — producing them costs several seconds of
 Monte Carlo, and the design rule is that SQLite is the contract, so a reader needs
 nothing from `core`. `manager_decisions` holds one row per call with both win
@@ -401,7 +410,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 291 tests, ~1.5s
+uv run pytest              # 293 tests, ~1.5s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```

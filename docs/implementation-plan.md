@@ -1583,6 +1583,44 @@ groups rather than an ordering. The most interesting single result is roster 10,
 for first on points capture and is *last* in the league on divergent decisions (31.8%) —
 excellent at the points game, blind to the matchup.
 
+### Teams on paper, which is a different question
+
+`lockin managers` also ranks the *teams*, because "was this side well run or merely good"
+needs both halves. The obvious measure is the oracle already in the backtest — what a team
+would have scored with every lock perfect — and it is close to right. Its three confounds
+are worth stating, because only one of them turned out to matter:
+
+**Schedule density: not a problem in this league.** Games per starter-week spans 3.25 to
+3.40 across the ten rosters — a 4.6% range — and correlates −0.36 with the oracle. Over 24
+weeks the schedule evens out. `talent_per_game` values the same lineup per game rather than
+per week and is reported anyway, so a short or lopsided season would show it.
+
+**Health and form: unavoidable.** Every number here is built from what players actually
+did, so a team whose stars stayed fit looks better. A genuinely ex-ante measure would have
+to come from the projection layer, and that is a different (noisier) thing.
+
+**Lineup selection: the real confound, and it hides a story.** The plain oracle is taken
+over the six the manager *chose*, so starting the wrong players depresses it — which is a
+decision, not the roster. `ceiling` therefore picks the best legal six from the whole
+roster via `assign_slots`, and the gap is reported separately:
+
+```
+   # roster manager           ceiling   oracle  lineup cost  talent/gm
+   1      3 yinzknow            383.5    363.4         20.0      293.2
+   2     10 jordany32           357.1    336.7         20.4      272.7
+   3      9 coopermycupp        353.3    299.9         53.3      261.1
+   ...
+  10      1 smorgan83           310.9    283.2         27.7      239.1
+```
+
+Nine of the ten rosters give up 18-28 points a week to their lineups. **Roster 9 gives up
+53.3** — and on the plain oracle he ranks 8th while his roster is the 3rd best in the
+league. He is also last on decision quality (31.1% squandered). Two independent failures of
+management on a genuinely good team, and a plain oracle would have shown only a mediocre
+one.
+
+That is the argument for separating the two: the confound is not noise, it is the finding.
+
 ### Three limits, printed with every run
 
 1. **It reads the field Sleeper rewrote** (§12). This ranks how the current data makes

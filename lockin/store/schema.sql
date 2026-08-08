@@ -325,6 +325,25 @@ CREATE TABLE IF NOT EXISTS manager_scorecards (
 );
 
 
+-- How good each TEAM was, as distinct from how well it was managed
+-- (implementation-plan.md §16). A dashboard wants both, side by side: the
+-- interesting question is which teams were well run and which merely good.
+--
+-- ceiling is the best legal lineup from the whole roster with every lock
+-- perfect. realised_ceiling restricts that to the six actually started, so the
+-- difference is the price of lineup selection — a decision, not roster quality,
+-- and it belongs beside the manager metrics rather than here.
+CREATE TABLE IF NOT EXISTS roster_strength (
+    roster_id        INTEGER PRIMARY KEY,
+    ceiling          REAL NOT NULL,   -- best legal six, perfect locks
+    realised_ceiling REAL NOT NULL,   -- the six actually started, perfect locks
+    lineup_gap       REAL NOT NULL,   -- ceiling - realised_ceiling
+    talent_per_game  REAL NOT NULL,   -- schedule-neutral
+    games_per_week   REAL NOT NULL,
+    computed_at      TEXT NOT NULL
+);
+
+
 -- Phase 6 output. Present so the read layer has a stable target.
 CREATE TABLE IF NOT EXISTS recommendations (
     generated_at    TEXT NOT NULL,

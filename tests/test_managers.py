@@ -316,3 +316,57 @@ def test_ranking_sorts_on_the_share_not_raw_regret():
         ]
     )
     assert [s.roster_id for s in report.ranked()] == [2, 1]
+
+
+# ------------------------------------------------------- roster strength
+
+
+def test_lineup_gap_is_the_price_of_starting_the_wrong_six():
+    """The confound that makes a plain oracle a poor roster measure.
+
+    Two identical rosters. One manager starts his best players, the other does
+    not. Their ceilings must match — the rosters are the same — and the whole
+    difference must land in lineup_gap, where it is labelled as a decision.
+    """
+    from lockin.managers import RosterStrength
+
+    good = RosterStrength(
+        1,
+        ceiling=380.0,
+        realised_ceiling=360.0,
+        lineup_gap=20.0,
+        talent_per_game=280.0,
+        games_per_week=3.3,
+    )
+    bad = RosterStrength(
+        2,
+        ceiling=380.0,
+        realised_ceiling=300.0,
+        lineup_gap=80.0,
+        talent_per_game=280.0,
+        games_per_week=3.3,
+    )
+    assert good.ceiling == bad.ceiling
+    assert bad.lineup_gap > good.lineup_gap
+    assert bad.realised_ceiling < good.realised_ceiling
+
+
+def test_roster_strength_persists_and_reads_back():
+    import sqlite3
+
+    from lockin.managers import RosterStrength, persist_rosters
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+
+    rows = [
+        RosterStrength(1, 380.0, 360.0, 20.0, 280.0, 3.3),
+        RosterStrength(2, 350.0, 300.0, 50.0, 260.0, 3.4),
+    ]
+    assert persist_rosters(conn, rows) == 2
+    persist_rosters(conn, rows)  # replaces rather than accumulating
+    got = conn.execute("SELECT * FROM roster_strength ORDER BY ceiling DESC").fetchall()
+    assert [r["roster_id"] for r in got] == [1, 2]
+    assert got[1]["lineup_gap"] == pytest.approx(50.0)

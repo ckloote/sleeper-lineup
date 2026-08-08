@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from lockin.backtest import greedy_thresholds, player_games, starter_dnp_scale
+from lockin.core.eligibility import NoValidLineup, assign_slots
 from lockin.core.policy import Game
 from lockin.core.projections import EWMAProjectionSource, ProjectionParams, SeasonPanel
 from lockin.core.winprob import evaluate_lock
@@ -90,6 +91,9 @@ from lockin.projections import load_panel, observed_scores
 from lockin.rollout import SimulationCache, decision_days, opponent_totals
 from lockin.store.db import now_iso
 from lockin.verify import scoring_settings
+
+STARTING_SLOTS = ("PG", "G", "F", "C", "UTIL", "UTIL")
+"""This league's six starting slots, in `roster_positions` order."""
 
 RESOLVED_DECISIONS = ("locked_early", "rode_to_end")
 """Statuses where we know what the manager chose. Ambiguous cases — several
@@ -224,6 +228,120 @@ def _upside(games: list[Game], counted: float) -> tuple[float, float] | None:
     if ceiling - floor <= 0:
         return None  # riding was already optimal; nothing to get wrong
     return counted - floor, ceiling - floor
+
+
+@dataclass(frozen=True, slots=True)
+class RosterStrength:
+    """How good a team was, separated from how well it was managed."""
+
+    roster_id: int
+    ceiling: float
+    """Best legal lineup from the whole roster, every lock perfect. The roster's
+    capability, with lineup selection removed."""
+    realised_ceiling: float
+    """The same, but restricted to the six the manager actually started — the
+    plain oracle. Lower than ``ceiling`` by whatever the lineup cost."""
+    lineup_gap: float
+    """``ceiling − realised_ceiling``. Not roster quality at all: it is the price
+    of starting the wrong players, and belongs with the decision metrics."""
+    talent_per_game: float
+    """Best legal lineup valued at points *per game played* rather than per
+    week. Schedule-neutral, so a team that drew a dense week cannot borrow
+    strength from it."""
+    games_per_week: float
+
+
+def evaluate_rosters(
+    conn: sqlite3.Connection,
+    season: str,
+    *,
+    params: ProjectionParams | None = None,
+    panel: SeasonPanel | None = None,
+) -> list[RosterStrength]:
+    """Rank teams on the roster rather than the manager.
+
+    The obvious measure is the oracle already in the backtest — what the team
+    would have scored with every lock perfect. It is close to right, and its
+    confounds are worth knowing:
+
+    - **Schedule density: not a problem here.** Games per starter-week ranges
+      only 3.25 to 3.40 across the ten rosters, a 4.6% spread, and correlates
+      −0.36 with the oracle. Over a full season the schedule evens out. It is
+      reported anyway so a short or lopsided season would show it.
+    - **Health and form: unavoidable.** Every measure here is built from what
+      players actually did, so a team whose stars stayed fit looks better. A
+      genuinely ex-ante number would have to come from the projection layer.
+    - **Lineup selection: the real confound.** The plain oracle is computed over
+      the six the manager *chose*, so starting the wrong players depresses it —
+      and that is a decision, not the roster. It matters: nine of the ten
+      rosters lose about 20 points a week to their lineups, and one loses 53.
+
+    So ``ceiling`` picks the best legal six from the full roster with
+    :func:`~lockin.core.eligibility.assign_slots`, and the gap against the plain
+    oracle is reported separately as what it is.
+    """
+    scoring = scoring_settings(conn)
+    panel = panel or load_panel(conn, season, params=params)
+    scores = observed_scores(panel, scoring)
+    scored_through = last_scored_week(conn)
+
+    roster_weeks: dict[tuple[int, int], list[str]] = defaultdict(list)
+    started: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for row in conn.execute(
+        "SELECT week, roster_id, sleeper_id, is_starter FROM weekly_matchups_latest"
+        " WHERE week <= ?",
+        (scored_through,),
+    ):
+        key = (row["week"], row["roster_id"])
+        roster_weeks[key].append(row["sleeper_id"])
+        if row["is_starter"]:
+            started[key].append(row["sleeper_id"])
+
+    positions: dict[tuple[str, int], list[str]] = {}
+    for row in conn.execute(
+        "SELECT sleeper_id, fantasy_week, pit_positions FROM box_scores"
+        " WHERE pit_positions IS NOT NULL AND pit_positions != '[]'"
+    ):
+        positions[(row["sleeper_id"], row["fantasy_week"])] = json.loads(row["pit_positions"])
+
+    acc: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for (week, roster_id), roster in sorted(roster_weeks.items()):
+        best_game, per_game, n_games = {}, {}, {}
+        for pid in roster:
+            games = player_games(panel, scores, pid, week)
+            played = [g.score for g in games if g.played]
+            best_game[pid] = max(played) if played else 0.0
+            per_game[pid] = float(np.mean(played)) if played else 0.0
+            n_games[pid] = len(games)
+
+        starters = started[(week, roster_id)]
+        if starters:
+            acc[roster_id]["realised"].append(sum(best_game[p] for p in starters))
+            acc[roster_id]["games"].append(float(np.mean([n_games[p] for p in starters])))
+
+        eligible = {p: positions.get((p, week), []) for p in roster}
+        for name, values in (("ceiling", best_game), ("talent", per_game)):
+            try:
+                lineup = assign_slots(list(STARTING_SLOTS), roster, eligible, values)
+            except NoValidLineup:
+                continue  # too few healthy bodies to field a legal six that week
+            acc[roster_id][name].append(sum(values[p] for p in lineup.values()))
+
+    out = []
+    for roster_id, a in sorted(acc.items()):
+        ceiling = float(np.mean(a["ceiling"])) if a["ceiling"] else 0.0
+        realised = float(np.mean(a["realised"])) if a["realised"] else 0.0
+        out.append(
+            RosterStrength(
+                roster_id=roster_id,
+                ceiling=ceiling,
+                realised_ceiling=realised,
+                lineup_gap=ceiling - realised,
+                talent_per_game=float(np.mean(a["talent"])) if a["talent"] else 0.0,
+                games_per_week=float(np.mean(a["games"])) if a["games"] else 0.0,
+            )
+        )
+    return sorted(out, key=lambda r: -r.ceiling)
 
 
 def evaluate_managers(
@@ -422,6 +540,29 @@ def evaluate_managers(
             )
         )
     return report
+
+
+def persist_rosters(conn: sqlite3.Connection, rosters: list[RosterStrength]) -> int:
+    """Write the roster-strength table a dashboard reads."""
+    stamp = now_iso()
+    conn.execute("DELETE FROM roster_strength")
+    conn.executemany(
+        "INSERT INTO roster_strength (roster_id, ceiling, realised_ceiling, lineup_gap,"
+        " talent_per_game, games_per_week, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                r.roster_id,
+                r.ceiling,
+                r.realised_ceiling,
+                r.lineup_gap,
+                r.talent_per_game,
+                r.games_per_week,
+                stamp,
+            )
+            for r in rosters
+        ],
+    )
+    return len(rosters)
 
 
 def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:

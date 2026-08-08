@@ -290,13 +290,15 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
             conn, cfg.season, n_sims=sims, competitive_only=competitive
         )
         n_decisions, n_cards = managers_mod.persist(conn, report)
+        strengths = managers_mod.evaluate_rosters(conn, cfg.season)
+        managers_mod.persist_rosters(conn, strengths)
 
     labels: dict[int, str] = {}
     if names:
         client = sleeper_ingest.SleeperClient()
         users = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/users")
-        rosters = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
-        owner_to_roster = {r["owner_id"]: r["roster_id"] for r in rosters}
+        roster_payload = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
+        owner_to_roster = {r["owner_id"]: r["roster_id"] for r in roster_payload}
         for u in users:
             if u["user_id"] in owner_to_roster:
                 labels[owner_to_roster[u["user_id"]]] = u.get("display_name", "")
@@ -360,6 +362,29 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
         f"\n  this scale — it is graded by its own model."
         f"\n\n  wrote {n_decisions} rows to manager_decisions and {n_cards} to"
         f" manager_scorecards,\n  which is what a dashboard should read."
+    )
+
+    click.echo(
+        "\n\nTeams on paper — how good the roster was, as distinct from how it was run."
+        "\nRanked by ceiling: the best legal six from the WHOLE roster, every lock perfect.\n"
+    )
+    click.echo(
+        f"  {'#':>2} {'roster':>6} {'manager':<16} {'ceiling':>8} {'oracle':>8}"
+        f" {'lineup cost':>12} {'talent/gm':>10} {'games/wk':>9}"
+    )
+    for i, r in enumerate(strengths, 1):
+        click.echo(
+            f"  {i:>2} {r.roster_id:>6} {labels.get(r.roster_id, ''):<16}"
+            f" {r.ceiling:>8.1f} {r.realised_ceiling:>8.1f} {r.lineup_gap:>12.1f}"
+            f" {r.talent_per_game:>10.1f} {r.games_per_week:>9.2f}"
+        )
+    click.echo(
+        "\n  'oracle' is the same ceiling over only the six actually started, so"
+        " 'lineup cost'\n  is the price of starting the wrong players — a decision, not"
+        " roster quality.\n  'talent/gm' values the same lineup per game rather than per"
+        " week; schedule density\n  spans only 3.25-3.40 games a week here, so it changes"
+        " little.\n\n  Built from what players actually did, so health and form are in it."
+        " A truly ex-ante\n  measure would have to come from the projection layer."
     )
 
 
