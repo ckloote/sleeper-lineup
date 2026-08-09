@@ -108,11 +108,40 @@ def ingest_rosters(conn: sqlite3.Connection, client: SleeperClient, league_id: s
     return n
 
 
+def record_player_status(conn: sqlite3.Connection, payload: dict, as_of: str) -> int:
+    """Append today's injury designations to `player_status`.
+
+    Keyed on (sleeper_id, as_of) so re-running in a day is idempotent and
+    running across days accumulates. Only players carrying a designation are
+    stored — the absence of a row means "nothing reported", which is what an
+    empty ``injury_status`` means anyway, and storing 2,000 nulls a day would
+    bury the signal.
+    """
+    rows = [
+        (sleeper_id, as_of, p.get("injury_status"))
+        for sleeper_id, p in payload.items()
+        if isinstance(p, dict) and p.get("injury_status")
+    ]
+    conn.executemany(
+        "INSERT OR REPLACE INTO player_status (sleeper_id, as_of, designation) VALUES (?, ?, ?)",
+        rows,
+    )
+    return len(rows)
+
+
 def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
     """Refresh the player reference table.
 
-    This is a LIVE SNAPSHOT with no history. Nothing reconstructing a past week
-    may read positions or team from here — use box_scores.pit_* instead.
+    This is a LIVE SNAPSHOT with no history — and so, it turns out, is the
+    ``player`` object embedded in each stat row, so ``box_scores.pit_*`` is the
+    same data and offers no protection (implementation-plan.md §17). The only
+    genuinely point-in-time player attribute Sleeper publishes is the stat row's
+    own ``team``, stored as ``box_scores.team``.
+
+    Each run therefore also appends today's injury designation to
+    ``player_status``. That cannot recover the past, but it starts the record
+    that evaluating start/sit decisions will need, and it is unrecoverable if
+    nobody starts it.
     """
     started = now_iso()
     payload = client.players()
@@ -141,7 +170,12 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
             ),
         )
         n += 1
+
+    # Start the availability record. It cannot be backfilled, so the only way
+    # to have it next season is to begin now.
+    flagged = record_player_status(conn, payload, updated[:10])
     log_ingest(conn, "sleeper", "players", n, started)
+    log_ingest(conn, "sleeper", "player_status", flagged, started)
     return n
 
 

@@ -69,7 +69,9 @@ def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) ->
         have_players = conn.execute("SELECT COUNT(*) c FROM players").fetchone()["c"]
         if full or not have_players:
             n = sleeper_ingest.ingest_players(conn, client)
+            status_rows = conn.execute("SELECT COUNT(*) c FROM player_status").fetchone()["c"]
             click.echo(f"  players     {n} (live snapshot)")
+            click.echo(f"  status      {status_rows} availability rows accumulated")
         else:
             click.echo(f"  players     {have_players} cached (--full to refresh)")
 

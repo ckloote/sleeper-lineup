@@ -418,7 +418,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 293 tests, ~1.5s
+uv run pytest              # 296 tests, ~1.8s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -490,9 +490,23 @@ started there anyway, so Sleeper's real eligibility is broader than what it publ
 them. Those are carried as per-player overrides rather than by loosening `F` for every
 guard, because being too permissive recommends lineups Sleeper rejects.
 
-**`/players/nba` is a live snapshot with no history.** Today's positions and team are not
-January's. Anything reconstructing a past week reads `box_scores.pit_positions` and
-`pit_team`, captured per game.
+**`/players/nba` is a live snapshot with no history — and so is the `player` object
+embedded in each stat row.** Sleeper writes that object when the request is served, not
+when the game was played: `fantasy_positions`, `team` and `injury_status` are identical
+across weeks 3, 12 and 20 for all 519 players, and match today's live values exactly. So
+`box_scores.pit_positions` / `pit_team` are **not** point-in-time despite the name, and 0
+of 633 players ever show a change in them.
+
+The one genuinely point-in-time player attribute is the stat row's own `team`, stored as
+`box_scores.team` — 104 of 602 players changed team mid-season there. Prefer it over
+`pit_team`. There is no equivalent for positions or injury status; see
+[implementation-plan.md §17](docs/implementation-plan.md).
+
+**There is no historical availability data at all.** `dnp_reason` is NULL on all 16,692
+unplayed rows and `player_status` was empty until now. This is why start/sit decisions
+cannot be evaluated (§16). `lockin ingest` now records today's designations into
+`player_status` so the history starts accumulating — useless for 2025-26, and the only way
+to have it for 2026-27.
 
 **`matchup_id` is nullable.** Teams eliminated from the playoff bracket have no matchup
 in weeks 23-24, and week 25 is unscored entirely.

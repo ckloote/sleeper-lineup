@@ -153,6 +153,13 @@ those rows.
 per-game snapshots, never from `players`. Same hard-cutoff treatment the doc gives
 projections.
 
+> ⚠️ **This section is wrong. See §17.** The embedded `player` object is *also* a live
+> snapshot — Sleeper writes it at fetch time, not at game time — so `pit_positions` and
+> `pit_team` are today's values stamped on a historical row, and preferring them over
+> `players` protects nothing. The "zero drift in week 12" reported above is zero **by
+> construction**, which is the tell that was missed: a null result read as reassurance
+> when it was diagnostic of a broken measurement.
+
 ---
 
 ## 4. Repo layout
@@ -1688,3 +1695,94 @@ read every one as a catastrophic blunder and cost about eight points of apparent
 capture per manager. `last_scored_week()` now reads the league's own setting rather than
 hardcoding a number, since a season that ended early would move it. The regret ranking was
 never affected: week 25 has no `matchup_id`, so no decisions were evaluated there.
+
+
+---
+
+## 17. There is no historical availability data — and `pit_*` is not point-in-time
+
+Asked whether manager start/sit decisions could be evaluated, given §16 could not do it.
+Checking properly turned up something larger than the original question.
+
+### The embedded player object is a live snapshot
+
+§3 is built on the claim that each stat row embeds a `player` object giving point-in-time
+`fantasy_positions` and `team` "as of that game". It does not. Comparing the same 519
+players across weeks 3, 12 and 20:
+
+```
+field                identical across all three weeks
+  fantasy_positions    519/519  ALL IDENTICAL
+  position             519/519  ALL IDENTICAL
+  team                 519/519  ALL IDENTICAL
+  injury_status        519/519  ALL IDENTICAL
+  news_updated         519/519  ALL IDENTICAL
+```
+
+And against today's live `/players/nba`: **100%** agreement on both `fantasy_positions` and
+`team`. The `news_updated` timestamps on week-12 rows have a median of **2026-06-30** — six
+months after those games were played. The object is written when the request is served.
+
+In our own database, **0 of 633** players ever had `pit_positions` or `pit_team` change
+across the whole season. In a league with mid-season trades that is impossible for real
+data, and it should have been noticed earlier.
+
+§3's evidence was "week 12 showed zero drift between the embedded snapshot and today across
+all 60 starters, so the effect is small in that week". The drift is zero *by construction*.
+A null result was read as reassurance when it was diagnostic of the measurement being
+broken — the same error shape as §16's week-25 zeros.
+
+### What *is* point-in-time
+
+The stat row's **own** `team` field, stored as `box_scores.team`, is genuine:
+
+```
+players whose stat-row `team` changed during the season : 104/602
+players whose embedded `pit_team` changed              :   0/602
+
+  James Harden     LAC (2025-10-22..2026-02-02, 49g)  CLE (2026-02-04..2026-04-12, 31g)
+                   pit_team = CLE   <- applied to all 49 LAC games
+```
+
+So the guidance was exactly inverted: the column described as a "nullable convenience"
+carries the history, and the columns named `pit_*` do not. The schema comment and §3 now
+say so, and two invariant tests pin it — asserting the *broken* behaviour deliberately, so
+that if Sleeper ever starts publishing real per-game snapshots the tests fail and that
+becomes visible as good news rather than passing unnoticed.
+
+### What this does and does not cost
+
+**It does not change any result.** Every number in this project was computed from the same
+live values either way, because `pit_*` and `players` are the same data. Nothing needs
+recomputing.
+
+**It removes a protection that was believed to exist.** The projection layer's
+`position_group` uses today's positions for every historical game, so a player
+reclassified over the summer is grouped wrongly for the whole replayed season. That
+affects the pooled donor cohort for thin histories and `assign_slots` in §16. The effect is
+small — positions move less than teams — but it is real and it is not mitigated.
+
+**`box_scores.team` is available as a genuine fix for team**, and is not yet used anywhere;
+the projection layer does not need team today, so this is recorded rather than acted on.
+
+### The answer to the original question: no, and it cannot be backfilled
+
+Evaluating start/sit needs to know what a manager knew: who was out, who was a game-time
+decision, who was a late scratch. None of it exists retrospectively.
+
+- `dnp_reason` is NULL on all 16,692 unplayed rows.
+- `player_status` has been empty since Phase 0.
+- The embedded `injury_status` is live, as above — the one place it might have hidden.
+- Sleeper publishes no historical endpoint (§12 established this for scores; it holds here).
+
+So §16's refusal to ship a lineup-quality metric is not caution, it is a hard limit.
+
+**What has changed: the record has started.** `lockin ingest` now writes today's
+designations to `player_status`, keyed `(sleeper_id, as_of)` so repeated runs in a day are
+idempotent and runs across days accumulate. The first run captured 110 designations (100
+DTD, 9 Out, 1 IR). That does nothing for 2025-26 and everything for 2026-27, and it is the
+kind of thing that is free to start now and impossible to start later — the same lesson
+§12 paid for by losing 24 weeks of matchup history.
+
+Evaluating start/sit decisions is therefore a **2026-27 capability**, gated on daily
+capture beginning the day the season opens.

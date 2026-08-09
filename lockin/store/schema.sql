@@ -4,9 +4,16 @@
 -- doc design rule 2). Readers must never reach past this into an API client.
 --
 -- Point-in-time discipline: `players` is a LIVE SNAPSHOT and carries no history.
--- Anything reconstructing a past week must read positions and team from
--- box_scores.pit_positions / pit_team, which are captured per game. See
--- implementation-plan.md §3.
+--
+-- CORRECTION (2026-08-08): so is box_scores.pit_positions / pit_team. The
+-- `player` object Sleeper embeds in each stat row is written at FETCH time, not
+-- at game time — identical across weeks 3, 12 and 20 for all 519 players, and a
+-- 100% match to today's /players/nba. §3 told readers to prefer pit_* over
+-- `players`; that is the same data and offers no protection. See §17.
+--
+-- The one genuinely point-in-time player attribute is `box_scores.team`, which
+-- comes from the stat row itself rather than the embedded object: 104 of 602
+-- players changed team mid-season there, against 0 in pit_team.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -134,10 +141,16 @@ CREATE TABLE IF NOT EXISTS box_scores (
     dd INTEGER, td INTEGER,
     plus_minus REAL,
 
-    -- Point-in-time player attributes, embedded in the stat row by Sleeper.
-    -- Use THESE for historical reconstruction, never players.positions/team.
-    pit_positions   TEXT,            -- JSON array
-    pit_team        TEXT,
+    -- Embedded player attributes. NOT point-in-time despite the name: Sleeper
+    -- writes this object at fetch time, so these are today's values stamped on
+    -- a historical row (§17). Kept because they are what we have, and because
+    -- deleting them would only hide the problem.
+    --
+    -- For a player's team as of this game, use `team` above, not pit_team.
+    -- There is no equivalent for positions: Sleeper publishes no history, so
+    -- `player_status` has to be accumulated live from here on.
+    pit_positions   TEXT,            -- JSON array; live snapshot
+    pit_team        TEXT,            -- live snapshot; prefer `team`
 
     dnp_reason      TEXT,
     raw_stats       TEXT NOT NULL,   -- full stats dict, for reprocessing

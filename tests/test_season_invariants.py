@@ -463,3 +463,64 @@ def test_late_season_dnp_rate_rises_sharply(conn):
     ).fetchall()
     rate = {r["stage"]: r["dnp_rate"] for r in rows}
     assert rate["playoffs"] > rate["regular"] + 0.05
+
+
+# --- what is and is not point-in-time -----------------------------------------
+
+
+def test_embedded_player_attributes_are_a_live_snapshot_not_history(conn):
+    """`pit_positions` / `pit_team` do NOT vary by game, despite the name.
+
+    Sleeper writes the `player` object embedded in a stat row at *fetch* time,
+    so a historical row carries today's values. Implementation-plan §3 told
+    readers to prefer these over the `players` table for reconstructing a past
+    week; they are the same data, and the protection it claimed does not exist
+    (§17). This test pins the fact so the belief cannot be quietly re-derived.
+
+    It asserts the *broken* behaviour on purpose. If Sleeper ever starts writing
+    a genuine per-game snapshot this fails, and that would be good news worth
+    acting on rather than a regression.
+    """
+    rows = conn.execute(
+        "SELECT COUNT(*) c FROM ("
+        "  SELECT sleeper_id FROM box_scores"
+        "   WHERE pit_team IS NOT NULL AND COALESCE(is_team_row, 0) = 0"
+        "   GROUP BY sleeper_id HAVING COUNT(DISTINCT pit_team) > 1)"
+    ).fetchone()["c"]
+    assert rows == 0, "pit_team varies by game — Sleeper may now publish real history"
+
+
+def test_the_stat_rows_own_team_is_genuinely_point_in_time(conn):
+    """`box_scores.team` comes from the stat row, not the embedded object.
+
+    This is the one player attribute that really is as-of-the-game: 104 of 602
+    players changed team mid-season here, against zero in `pit_team`. Anything
+    reconstructing a past week wants this column.
+    """
+    moved = conn.execute(
+        "SELECT COUNT(*) c FROM ("
+        "  SELECT sleeper_id FROM box_scores"
+        "   WHERE team IS NOT NULL AND COALESCE(is_team_row, 0) = 0"
+        "   GROUP BY sleeper_id HAVING COUNT(DISTINCT team) > 1)"
+    ).fetchone()["c"]
+    assert moved > 50, f"only {moved} players changed team; expected in-season trades"
+
+
+def test_no_historic_availability_exists_to_evaluate_start_sit_decisions(conn):
+    """The reason start/sit decisions are not ranked (§17).
+
+    `dnp_reason` is NULL on every unplayed row, and the embedded injury fields
+    are live. `player_status` is the only place availability can accumulate, and
+    it can only be filled going forward — every row in it must be dated at or
+    after the season it describes, never during.
+    """
+    assert (
+        conn.execute("SELECT COUNT(*) c FROM box_scores WHERE dnp_reason IS NOT NULL").fetchone()[
+            "c"
+        ]
+        == 0
+    )
+    dates = [r["as_of"] for r in conn.execute("SELECT DISTINCT as_of FROM player_status")]
+    assert all(d >= "2026-04-12" for d in dates), (
+        "player_status contains in-season dates — if real, start/sit evaluation is unblocked"
+    )
