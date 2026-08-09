@@ -1621,6 +1621,53 @@ one.
 
 That is the argument for separating the two: the confound is not noise, it is the finding.
 
+### The decision ranking covers lock/pass only — and lineup quality cannot be measured yet
+
+The ranking takes the six starters as given. Who to *start* is a separate decision and
+probably a larger one: `lineup_gap` spans 18 to 53 points a week, against a lock-decision
+spread that is smaller in points. So it was attempted properly, and it does not work.
+
+`lineup_gap` itself is an oracle comparison, so it charges a manager for lacking foresight
+— the same flaw that disqualifies points capture. The fair version is point-in-time: value
+every rostered player with the projection layer at the start of the week, pick the best
+legal six with `assign_slots`, and charge the manager the expected points forgone. That
+produces a clean-looking table, 8.9 to 35.8 points per week, and it is **wrong**:
+
+```
+group                                n  played 0 games  projected  actual best
+both started                      1025           0.5%       47.7         55.0
+model wanted, manager benched      415           9.9%       41.3         35.4
+manager started, model benched     415           2.7%       29.6         46.7
+```
+
+Players the model wanted and the manager benched were **four times more likely to miss the
+entire week** (9.9% against 2.7%). The model rated the manager's picks at 29.6 and they
+delivered 46.7 — it underrated them by 17 points each. Across roughly 1.7 swaps per
+roster-week that is about 20 points a week, and **following the model's lineup would have
+made nine of the ten teams worse** (mean −20.4/week; only roster 9 gained, by 0.9).
+
+Two tells that the metric measures the model rather than the manager:
+
+- The manager with the **highest** lineup regret (35.8) is roster 3, who went 20-1 and
+  leads every other metric in the project.
+- Removing the `starter_dnp_scale` correction changes the result by 0.1 points, so this is
+  not an artefact of that correction being misapplied to bench players.
+
+The cause is the blind spot already priced twice in this project: `player_status` is empty
+and `/players/nba` publishes only today's designation (§13), which cost 26 points per team
+total in §15 and costs ~20 points per week here. Managers read the injury report before
+setting a lineup; the projection layer cannot.
+
+**So no lineup-quality metric ships.** Ranking managers by deviation from advice that is
+worse than their own would be actively misleading, and it would be *most* punitive toward
+the best managers. `lineup_gap` is reported as what the lineups cost, with no claim about
+whether they were mistakes.
+
+**Prerequisite for ever measuring this:** a point-in-time availability feed, captured
+daily during the season into `player_status` — which is exactly the table that exists in
+the schema and has sat empty since Phase 0. That is Phase 6 work and it cannot be
+backfilled, so it has to start the day the 2026-27 season opens.
+
 ### Three limits, printed with every run
 
 1. **It reads the field Sleeper rewrote** (§12). This ranks how the current data makes

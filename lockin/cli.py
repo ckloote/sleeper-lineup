@@ -379,6 +379,10 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
             f" {r.talent_per_game:>10.1f} {r.games_per_week:>9.2f}"
         )
     click.echo(
+        "\n  'lineup cost' is what the lineups cost, NOT whether they were mistakes."
+        " Judging that\n  needs an injury feed: the model's own lineup picks are ~20"
+        " pts/week WORSE than the\n  managers' (§16), because it cannot see who is out."
+        " The decision ranking above is\n  lock/pass only.\n"
         "\n  'oracle' is the same ceiling over only the six actually started, so"
         " 'lineup cost'\n  is the price of starting the wrong players — a decision, not"
         " roster quality.\n  'talent/gm' values the same lineup per game rather than per"

@@ -361,6 +361,14 @@ than concordant ones (1.329%). Divergence arises when a matchup is already
 lopsided, so the marginal win probability at stake is small. High-leverage
 decisions are real but individually cheaper than ordinary ones.
 
+**The ranking covers lock/pass decisions only.** Who to start is a separate and probably
+larger decision, and it is deliberately not scored: the fair point-in-time version was
+built and it fails, because the model's own lineup picks are about **20 points a week
+worse** than the managers'. Players it wanted and managers benched were four times more
+likely to miss the whole week — managers read the injury report and the projection layer
+cannot. Measuring lineup quality needs a live availability feed first; see
+[implementation-plan.md §16](docs/implementation-plan.md).
+
 Three limits, which the command prints alongside its output:
 
 - **It reads the field Sleeper rewrote** (§12) — this is how the current data makes

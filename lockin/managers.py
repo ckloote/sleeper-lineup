@@ -58,6 +58,11 @@ on difficulty — restricting to competitive states, P(win) between 30% and 70% 
 reproduces the ranking at Spearman **+0.94**, and moves only one manager at the
 top: the one who went 20-1 and was favoured in 59.7% of his decisions.
 
+**It ranks lock/pass decisions only.** The six starters are taken as given; who
+to *start* is a separate and probably larger decision, and it is deliberately
+not scored here. That is not an oversight — it was attempted and it does not
+work yet. See :func:`evaluate_rosters` and implementation-plan.md §16.
+
 Three limits, all of which belong in any write-up of the output:
 
 1. **It reads the field Sleeper rewrote** (§12). This ranks how the current data
@@ -279,6 +284,35 @@ def evaluate_rosters(
     So ``ceiling`` picks the best legal six from the full roster with
     :func:`~lockin.core.eligibility.assign_slots`, and the gap against the plain
     oracle is reported separately as what it is.
+
+    **``lineup_gap`` is not a skill measure, and no lineup skill measure is
+    shipped.** The gap is an oracle comparison, so it charges a manager for
+    lacking foresight — the same flaw that disqualifies points capture from
+    ranking lock decisions. The fair version was built and measured: value every
+    rostered player by the projection layer at the start of the week, pick the
+    best legal six, and charge the manager the expected points forgone. It gives
+    a clean-looking 8.9 to 35.8 points per week and it is **wrong**, because the
+    lineups it prefers are worse than the ones managers actually set:
+
+    ========================================  =====  ==============  ===========
+    group                                         n  played 0 games  actual best
+    ========================================  =====  ==============  ===========
+    both started                               1025            0.5%         55.0
+    model wanted, manager benched               415            9.9%         35.4
+    manager started, model benched              415            2.7%         46.7
+    ========================================  =====  ==============  ===========
+
+    Players the model wanted and the manager sat were **four times** more likely
+    to miss the entire week. Managers read the injury report; the projection
+    layer cannot, because ``player_status`` is empty (§13, §15). Following the
+    model's lineup would have cost about **20 points a week** across nine of the
+    ten rosters, so "lineup regret" ranks managers by how far they stray from
+    advice worse than their own — and indeed the manager with the *highest*
+    lineup regret is the one who went 20-1 and leads every other metric.
+
+    Measuring lineup quality needs a point-in-time availability feed first. Until
+    then this reports what the lineups cost, and does not pretend to say whether
+    they were mistakes.
     """
     scoring = scoring_settings(conn)
     panel = panel or load_panel(conn, season, params=params)
