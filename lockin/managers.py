@@ -254,6 +254,18 @@ class RosterStrength:
     week. Schedule-neutral, so a team that drew a dense week cannot borrow
     strength from it."""
     games_per_week: float
+    availability: float
+    """Share of their rostered players' scheduled games actually played.
+
+    Durability is part of team quality — a player who scores 100 a night and
+    misses the season is worth nothing — and it is already inside ``ceiling``,
+    which counts a missed week as zero. This column exists to make that visible
+    rather than to add it. Note it needs **no injury data**: the ``played`` flag
+    says who suited up. Injury data would say *why* and *whether it was known*,
+    which is what start/sit needs and team quality does not."""
+    points_per_game_played: float
+    """Scoring rate while available. Together with ``availability`` this splits
+    ``ceiling`` into the two things that produce it."""
 
 
 def evaluate_rosters(
@@ -347,6 +359,9 @@ def evaluate_rosters(
             best_game[pid] = max(played) if played else 0.0
             per_game[pid] = float(np.mean(played)) if played else 0.0
             n_games[pid] = len(games)
+            acc[roster_id]["_scheduled"].append(float(len(games)))
+            acc[roster_id]["_played"].append(float(len(played)))
+            acc[roster_id]["_points"].extend(played)
 
         starters = started[(week, roster_id)]
         if starters:
@@ -365,6 +380,7 @@ def evaluate_rosters(
     for roster_id, a in sorted(acc.items()):
         ceiling = float(np.mean(a["ceiling"])) if a["ceiling"] else 0.0
         realised = float(np.mean(a["realised"])) if a["realised"] else 0.0
+        scheduled = float(sum(a["_scheduled"]))
         out.append(
             RosterStrength(
                 roster_id=roster_id,
@@ -373,6 +389,8 @@ def evaluate_rosters(
                 lineup_gap=ceiling - realised,
                 talent_per_game=float(np.mean(a["talent"])) if a["talent"] else 0.0,
                 games_per_week=float(np.mean(a["games"])) if a["games"] else 0.0,
+                availability=(sum(a["_played"]) / scheduled) if scheduled else 0.0,
+                points_per_game_played=float(np.mean(a["_points"])) if a["_points"] else 0.0,
             )
         )
     return sorted(out, key=lambda r: -r.ceiling)
@@ -582,7 +600,8 @@ def persist_rosters(conn: sqlite3.Connection, rosters: list[RosterStrength]) -> 
     conn.execute("DELETE FROM roster_strength")
     conn.executemany(
         "INSERT INTO roster_strength (roster_id, ceiling, realised_ceiling, lineup_gap,"
-        " talent_per_game, games_per_week, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " talent_per_game, games_per_week, availability, points_per_game_played,"
+        " computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 r.roster_id,
@@ -591,6 +610,8 @@ def persist_rosters(conn: sqlite3.Connection, rosters: list[RosterStrength]) -> 
                 r.lineup_gap,
                 r.talent_per_game,
                 r.games_per_week,
+                r.availability,
+                r.points_per_game_played,
                 stamp,
             )
             for r in rosters

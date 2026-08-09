@@ -316,6 +316,41 @@ The win comparison pools **all ten rosters** — one roster's held-out block is 
 matchups, which cannot resolve an effect this size. The held-out block is still reported,
 and reported honestly: 4 discordant pairs, too few to conclude anything from on its own.
 
+### `lockin teams`
+
+Ranks teams on **roster quality** — how good the side was, not how it was run. Needs no
+simulation, so it returns in about a second.
+
+```bash
+uv run lockin teams --names
+```
+
+```
+   # roster manager           ceiling  available  pts/game  talent/gm  lineup cost
+   1      3 yinzknow            383.5     70.6%      39.3      293.2         20.0
+   2     10 jordany32           357.1     80.3%      36.7      272.7         20.4
+   3      9 coopermycupp        353.3     80.0%      36.1      261.1         53.3
+   ...
+  10      1 smorgan83           310.9     60.1%      32.9      239.1         27.7
+```
+
+`ceiling` is the best legal six from the **whole** roster with every lock perfect, so both
+lineup selection and stopping skill are removed. It is produced by two things and both are
+shown: how often the roster was **available**, and how much it scored when it was.
+
+**Durability is already inside `ceiling`** — a missed week counts zero, so a star who scores
+100 a night and misses the season is correctly worth nothing. Measuring that needs no injury
+data: `played` says who suited up. Injury data would say *why*, and whether it was known
+before tip, which is what start/sit needs and team quality does not.
+
+Availability spans 60.1% to 85.2% here and correlates +0.36 with ceiling against +0.90 for
+scoring rate. Roster 1 is last largely *because* of durability; his points per game played
+is mid-table.
+
+What it cannot do: separate durability skill from health luck, or predict next season. It is
+a record, not a forecast. `lineup cost` is a decision rather than roster quality — that
+belongs with `lockin managers`.
+
 ### `lockin managers`
 
 Ranks the ten managers on **decision quality**, holding roster talent constant.
@@ -418,7 +453,7 @@ id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 ## Development
 
 ```bash
-uv run pytest              # 296 tests, ~1.8s
+uv run pytest              # 298 tests, ~1.6s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -554,7 +589,7 @@ lockin/
   projections.py   builds the point-in-time panel from SQLite
   calibrate.py     the Phase 3 gates — quantiles against realised frequencies
   rollout.py       walks a week under the rollout policy, with an opponent
-  managers.py      ranks the managers on decision quality, not results
+  managers.py      ranks managers on decision quality, and teams on roster quality
   backtest.py      the Phase 4-5 gates — policy against policy over the season
   cli.py
 tests/

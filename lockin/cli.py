@@ -275,6 +275,81 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
 
 
+def _manager_labels(cfg) -> dict[int, str]:
+    """Display names, which live only in the API — no table stores them."""
+    client = sleeper_ingest.SleeperClient()
+    users = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/users")
+    payload = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
+    owner_to_roster = {r["owner_id"]: r["roster_id"] for r in payload}
+    return {
+        owner_to_roster[u["user_id"]]: u.get("display_name", "")
+        for u in users
+        if u["user_id"] in owner_to_roster
+    }
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+def teams(as_json: bool, names: bool) -> None:
+    """Rank teams on roster quality — how good the side was, not how it was run."""
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        strengths = managers_mod.evaluate_rosters(conn, cfg.season)
+        managers_mod.persist_rosters(conn, strengths)
+
+    labels = _manager_labels(cfg) if names else {}
+    if as_json:
+        click.echo(
+            json.dumps(
+                [
+                    {
+                        "rank": i,
+                        "roster_id": r.roster_id,
+                        "manager": labels.get(r.roster_id),
+                        "ceiling": r.ceiling,
+                        "realised_ceiling": r.realised_ceiling,
+                        "lineup_gap": r.lineup_gap,
+                        "talent_per_game": r.talent_per_game,
+                        "availability": r.availability,
+                        "points_per_game_played": r.points_per_game_played,
+                        "games_per_week": r.games_per_week,
+                    }
+                    for i, r in enumerate(strengths, 1)
+                ],
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(
+        "Teams on paper. Ranked by ceiling: the best legal six from the WHOLE roster,\n"
+        "every lock perfect — so lineup selection and stopping skill are both removed.\n"
+    )
+    click.echo(
+        f"  {'#':>2} {'roster':>6} {'manager':<16} {'ceiling':>8} {'available':>10}"
+        f" {'pts/game':>9} {'talent/gm':>10} {'lineup cost':>12}"
+    )
+    for i, r in enumerate(strengths, 1):
+        click.echo(
+            f"  {i:>2} {r.roster_id:>6} {labels.get(r.roster_id, ''):<16} {r.ceiling:>8.1f}"
+            f" {r.availability:>9.1%} {r.points_per_game_played:>9.1f}"
+            f" {r.talent_per_game:>10.1f} {r.lineup_gap:>12.1f}"
+        )
+    click.echo(
+        "\n  ceiling is produced by two things, both shown: how often the roster was"
+        "\n  available, and how much it scored when it was. Durability is already inside"
+        "\n  ceiling — a missed week counts zero — so a star who scores 100 a night and"
+        "\n  misses the season is correctly worth nothing here."
+        "\n\n  Neither column needs injury data: `played` says who suited up. Injury data"
+        "\n  would say WHY, and whether it was known in advance — which is what start/sit"
+        "\n  evaluation needs and team quality does not (§17)."
+        "\n\n  What this cannot do: separate durability skill from health luck, or predict"
+        "\n  next season. It is a record of what happened, not a forecast."
+        "\n  'lineup cost' is a decision, not roster quality — see `lockin managers`."
+    )
+
+
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
 @click.option("--sims", default=300, show_default=True, help="Simulations per decision.")
@@ -295,15 +370,7 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
         strengths = managers_mod.evaluate_rosters(conn, cfg.season)
         managers_mod.persist_rosters(conn, strengths)
 
-    labels: dict[int, str] = {}
-    if names:
-        client = sleeper_ingest.SleeperClient()
-        users = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/users")
-        roster_payload = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
-        owner_to_roster = {r["owner_id"]: r["roster_id"] for r in roster_payload}
-        for u in users:
-            if u["user_id"] in owner_to_roster:
-                labels[owner_to_roster[u["user_id"]]] = u.get("display_name", "")
+    labels = _manager_labels(cfg) if names else {}
 
     ranked = report.ranked()
     if as_json:

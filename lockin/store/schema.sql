@@ -353,6 +353,13 @@ CREATE TABLE IF NOT EXISTS roster_strength (
     lineup_gap       REAL NOT NULL,   -- ceiling - realised_ceiling
     talent_per_game  REAL NOT NULL,   -- schedule-neutral
     games_per_week   REAL NOT NULL,
+    -- Durability, and scoring rate while available: the two components that
+    -- produce `ceiling`. Both are already inside it — a missed week counts zero
+    -- — and are broken out so that is visible. Neither needs injury data: the
+    -- `played` flag says who suited up. Injury data would say why, and whether
+    -- it was known in advance, which is what start/sit needs (§16, §17).
+    availability             REAL NOT NULL,
+    points_per_game_played   REAL NOT NULL,
     computed_at      TEXT NOT NULL
 );
 

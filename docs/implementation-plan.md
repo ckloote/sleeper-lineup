@@ -1765,6 +1765,42 @@ small — positions move less than teams — but it is real and it is not mitiga
 **`box_scores.team` is available as a genuine fix for team**, and is not yet used anywhere;
 the projection layer does not need team today, so this is recorded rather than acted on.
 
+### What this does NOT block: rating team quality
+
+A natural next thought is that team quality is also unmeasurable, since durability is part
+of it — a player who scores 100 a night and misses the season is worth nothing. The premise
+is right and the conclusion does not follow. **Durability needs no injury data.** The
+`played` flag says who suited up, and `ceiling` counts a missed week as zero, so a
+season-ending injury already reduces a team's rating to exactly what it should be.
+
+Injury data would say *why* a player sat and *whether it was known before tip*. That is
+what start/sit evaluation needs. Team quality only needs to know that he sat.
+
+`lockin teams` now breaks `ceiling` into the two things that produce it, so this is visible
+rather than asserted:
+
+```
+   # roster manager           ceiling  available  pts/game  talent/gm  lineup cost
+   1      3 yinzknow            383.5     70.6%      39.3      293.2         20.0
+   2     10 jordany32           357.1     80.3%      36.7      272.7         20.4
+   ...
+  10      1 smorgan83           310.9     60.1%      32.9      239.1         27.7
+```
+
+Availability spans **60.1% to 85.2%** and correlates +0.36 with ceiling, against +0.90 for
+scoring rate. Roster 1 is last mostly *because* of durability — his points per game played
+is mid-table. The measure is already doing the work.
+
+What team quality genuinely cannot do, and none of it is about injury data:
+
+- **Separate durability skill from health luck.** Did roster 1 draft fragile players or get
+  unlucky? Ten rosters over one season cannot tell.
+- **Predict.** Every number is a record of what happened. An ex-ante rating needs a
+  durability forecast, which is hard in a way this project has not attempted.
+- **Attribute an absence.** Rest, injury and coach's decision are indistinguishable here.
+  That one *is* the missing `dnp_reason`, and it is a nice-to-have for team quality where it
+  is a blocker for start/sit.
+
 ### The answer to the original question: no, and it cannot be backfilled
 
 Evaluating start/sit needs to know what a manager knew: who was out, who was a game-time

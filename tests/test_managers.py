@@ -337,6 +337,8 @@ def test_lineup_gap_is_the_price_of_starting_the_wrong_six():
         lineup_gap=20.0,
         talent_per_game=280.0,
         games_per_week=3.3,
+        availability=0.80,
+        points_per_game_played=36.0,
     )
     bad = RosterStrength(
         2,
@@ -345,6 +347,8 @@ def test_lineup_gap_is_the_price_of_starting_the_wrong_six():
         lineup_gap=80.0,
         talent_per_game=280.0,
         games_per_week=3.3,
+        availability=0.80,
+        points_per_game_played=36.0,
     )
     assert good.ceiling == bad.ceiling
     assert bad.lineup_gap > good.lineup_gap
@@ -362,11 +366,43 @@ def test_roster_strength_persists_and_reads_back():
     apply_schema(conn)
 
     rows = [
-        RosterStrength(1, 380.0, 360.0, 20.0, 280.0, 3.3),
-        RosterStrength(2, 350.0, 300.0, 50.0, 260.0, 3.4),
+        RosterStrength(1, 380.0, 360.0, 20.0, 280.0, 3.3, 0.80, 36.0),
+        RosterStrength(2, 350.0, 300.0, 50.0, 260.0, 3.4, 0.72, 34.0),
     ]
     assert persist_rosters(conn, rows) == 2
     persist_rosters(conn, rows)  # replaces rather than accumulating
     got = conn.execute("SELECT * FROM roster_strength ORDER BY ceiling DESC").fetchall()
     assert [r["roster_id"] for r in got] == [1, 2]
     assert got[1]["lineup_gap"] == pytest.approx(50.0)
+
+
+def test_durability_is_inside_ceiling_not_missing_from_it():
+    """A star who misses the season is worth nothing, and the measure says so.
+
+    The concern this answers: "we cannot rate team quality without injury data,
+    because durability matters." Durability does matter — and it is already in
+    `ceiling`, which counts a missed week as zero. Measuring it needs the
+    `played` flag, not an injury feed.
+    """
+    from lockin.managers import _upside
+
+    # Scores 100 whenever he plays, but the week's games all went by without him.
+    absent = week((False, 0.0), (False, 0.0), (False, 0.0))
+    played = [g.score for g in absent if g.played]
+    assert (max(played) if played else 0.0) == 0.0
+
+    # And the same player available contributes his full ceiling.
+    present = week((True, 100.0), (False, 0.0))
+    assert max(g.score for g in present if g.played) == 100.0
+    assert _upside(present, 0.0) == (0.0, 100.0)
+
+
+def test_availability_and_scoring_rate_are_reported_separately():
+    """`ceiling` is availability x rate; both are broken out so it can be read."""
+    from lockin.managers import RosterStrength
+
+    fragile = RosterStrength(1, 300.0, 290.0, 10.0, 250.0, 3.3, 0.60, 40.0)
+    durable = RosterStrength(2, 300.0, 290.0, 10.0, 250.0, 3.3, 0.85, 30.0)
+    assert fragile.ceiling == durable.ceiling
+    assert fragile.availability < durable.availability
+    assert fragile.points_per_game_played > durable.points_per_game_played

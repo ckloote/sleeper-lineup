@@ -41,6 +41,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "counted_points": "REAL",
     },
     "manager_scorecards": {"squandered_share": "REAL", "mean_stake": "REAL"},
+    "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
 }
 
 
