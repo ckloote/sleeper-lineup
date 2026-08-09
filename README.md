@@ -537,6 +537,16 @@ The one genuinely point-in-time player attribute is the stat row's own `team`, s
 `pit_team`. There is no equivalent for positions or injury status; see
 [implementation-plan.md §17](docs/implementation-plan.md).
 
+**Other sources exist but do not close the gap.** `nba_api`'s `BoxScoreTraditionalV3`
+carries a real DNP reason (`DNP - Coach's Decision`, `DND - Injury/Illness`), but it covers
+only 25% of our unplayed rows — 75% of players Sleeper marks unplayed never appear in an
+NBA box score, because it lists the gameday roster. It documents healthy scratches well and
+the injured poorly, and it reintroduces the ID crosswalk (`players.nba_id` is 0 of 2107)
+that Phase 0 was glad to avoid. The official NBA injury report is the right source and is
+reachable but JavaScript-rendered. See
+[implementation-plan.md §18](docs/implementation-plan.md) for the full survey — including
+why none of it is needed for **live** use.
+
 **There is no historical availability data at all.** `dnp_reason` is NULL on all 16,692
 unplayed rows and `player_status` was empty until now. This is why start/sit decisions
 cannot be evaluated (§16). `lockin ingest` now records today's designations into

@@ -1822,3 +1822,88 @@ kind of thing that is free to start now and impossible to start later — the sa
 
 Evaluating start/sit decisions is therefore a **2026-27 capability**, gated on daily
 capture beginning the day the season opens.
+
+
+---
+
+## 18. Where availability data could come from
+
+§17 established that our own dataset has no historical availability. That is not the same
+as it not existing. Surveyed, and probed where probing was cheap.
+
+First, be clear what three different questions need answering, because the sources differ:
+
+| question | needed for | have it? |
+|---|---|---|
+| Did he play? | everything | **yes** — Sleeper `played`, complete |
+| *Why* didn't he play? | attribution, team-quality colour | partially, see below |
+| Was it **known before tip**? | start/sit evaluation (§16) | **no** — this is the blocker |
+
+### Verified: `nba_api` box scores carry a DNP reason
+
+`BoxScoreTraditionalV3` has a `comment` field, and it is populated:
+
+```
+DNP - Coach's Decision
+DND - Injury/Illness
+DNP - Injury/Illness
+```
+
+`nba_api` is already a dependency, and `game_links` already maps our fixtures to NBA game
+ids, so the plumbing exists. Two findings from probing eight random games, though:
+
+**Coverage is 25%, and it misses the players we care about.** Of 102 rows Sleeper marks
+unplayed, only 26 appear in the NBA box score at all. The other **75% are absent
+entirely** — the NBA box score lists the gameday roster, while Sleeper generates a row for
+every rostered player against every scheduled fixture. So the comment field documents
+*healthy scratches* well and the *injured* poorly, which is the wrong half. Of the 26
+reasons found, 22 were Coach's Decision.
+
+**It reintroduces the ID crosswalk.** `players.nba_id` is 0 of 2107 populated. Architecture
+doc §16 ranked the crosswalk the project's top risk and §2 dissolved it by taking box
+scores from Sleeper. Any NBA-side *player* data brings it back — name matching with
+accents, suffixes and nicknames. Fixture-level data (schedule, tipoffs) does not, which is
+why the current `nba_api` use is cheap.
+
+**Also: `BoxScoreTraditionalV2` is dead.** It is deprecated and returns zero rows for
+2025-26. Anything written against v2 silently produces nothing.
+
+### The right source, not yet retrieved: the official NBA injury report
+
+The league has published a mandatory injury report since 2017, listing every player with a
+designation (Out / Doubtful / Questionable / Probable) before tip. That is exactly the
+"was it known" signal, and nothing else surveyed provides it.
+
+`https://official.nba.com/nba-injury-report-2025-26-season/` returns 200 and is titled
+"NBA Injury Report: 2025-26 Season", so the archive exists and is reachable. But the page
+is a JavaScript app and its PDF links are client-rendered — a plain GET returns no
+`playerinjury` URLs. A guessed `ak-static.cms.nba.com/referral/playerinjury/...` pattern
+returned 403. Retrieving it needs either the API the page calls or a rendered fetch, and
+the reports are PDFs that would then need parsing.
+
+**Not attempted further.** It is a real lead, not a solved one.
+
+### Others, known but unverified here
+
+- **Basketball-Reference** — carries DNP reasons and per-player injury history. Check the
+  terms of use before any automated access; they are explicit about scraping.
+- **ProSportsTransactions.com** — a free, searchable archive of NBA injury and transaction
+  history going back decades, widely used in published research. Probably the lowest-effort
+  historical injury source.
+- **Community archives** of the official injury report PDFs exist on GitHub and Kaggle,
+  which would sidestep the retrieval problem if one covers 2025-26.
+- **DARKO** — projections, not availability. Already noted in architecture doc §9 as a
+  later enhancement with a leakage warning attached.
+
+### Recommendation: do not chase this for 2025-26
+
+The tool's job is deciding tonight, and **for live use none of this is needed** — Sleeper
+publishes `injury_status` on `/players/nba`, and as of §17 `lockin ingest` records it daily
+into `player_status`. From day one of 2026-27 the engine will have the availability signal
+it was missing, from a source already integrated.
+
+Historical injury data buys only the ability to *evaluate* start/sit decisions on a season
+that is already over. That is an interesting analysis, not a capability the engine needs,
+and the cost is an ID crosswalk plus PDF parsing for partial coverage. The honest ordering
+is: keep capturing daily, revisit ProSportsTransactions or an injury-report archive if the
+retrospective question ever becomes worth that price.
