@@ -10,6 +10,11 @@ This plan takes the architecture doc as the spec. Everything below either confir
 against the live API, or proposes a change with the evidence for that change. Section 8
 lists the decisions I need from you before starting.
 
+**Phase write-ups:** §9 Phase 0 · §10 Phase 1 · §11 Phase 2 · §13 Phase 3 · §14 Phase 4 ·
+§15 Phase 5. **Findings that changed the design:** §12 Sleeper mutates completed seasons ·
+§16 manager decision quality · §17 `pit_*` is not point-in-time · §18 where availability
+data could come from · §19 why start/sit cannot be backtested.
+
 ---
 
 ## 1. What I verified against the live API
@@ -369,10 +374,9 @@ data lie:
 `p_win_pass` and what the points policy would have done, so "show me the 20
 high-leverage decisions roster 4 faced" is a `WHERE` clause.
 
-**Note:** Phases 0-3 still ship a CLI, but only the read-only subset the gates need —
-`ingest`, `reconcile`, `verify`, `locks`, `calibrate`, plus `project` for inspecting a
-single distribution. `digest` and `backtest` arrive with the phases that give them
-something to say.
+**Note:** Phases 0-5 ship a read-only CLI — `ingest`, `reconcile`, `verify`, `locks`,
+`calibrate`, `backtest`, plus `project`, `teams` and `managers` for inspection and
+analysis. Only `digest` remains, and it arrives with Phase 6.
 
 ---
 
@@ -473,7 +477,7 @@ slot usage later, and is worth persisting rather than discarding.
 
 | Decision | Resolution | Effect |
 |---|---|---|
-| **Scope** | Phases 0-2, then 3 | Ingest, scoring engine, lock inference. Phase 3 taken on after the reassessment and complete (§13); 4-6 still deferred. |
+| **Scope** | Phases 0-5 complete | Committed scope was 0-2. Phases 3, 4 and 5 were each taken on after reassessment and each closed its gate (§13, §14, §15). Only Phase 6 remains. |
 | **Phase 5 gate** | Replay all ten rosters | 105 matchups instead of 21. Lands on Phase 2 now as a gating requirement (§7.1). |
 | **Lock mechanic** | Must stay in a slot to lock | Stricter state definition; confirms the Phase 2 inference method (§7.6). |
 | **Deployment** | Develop here, deploy to Pi later | Hold the `uv` discipline and cron form; no Pi work in this build. |

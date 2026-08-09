@@ -432,7 +432,7 @@ probabilities, so a drill-down is a `WHERE` clause. Rendering guidance, includin
 column must never be sortable, is in
 [implementation-plan.md §6](docs/implementation-plan.md) under Phase 6.
 
-Commands arriving with later phases: `digest`.
+`digest` is the one command still to come; it arrives with Phase 6.
 
 ## Configuration
 
