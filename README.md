@@ -572,6 +572,29 @@ fantasy playoffs. Any availability model fit early and left alone is miscalibrat
 precisely when the decisions are worth the most, so the hazard is refit at every cutoff
 and carries a season-stage feature.
 
+## What cannot be validated yet
+
+**Start/sit algorithms cannot be backtested**, and will not be until 2026-27 accumulates
+point-in-time availability. This is the leakage rule in mirror image: the project guards
+everywhere against the backtest knowing *more* than the live engine, and here it knows
+*less*. A replay against 2025-26 lacks the injury information a live recommender would
+have, so a poor result would indict the missing input rather than the algorithm, and a good
+one would be good at a task nobody will ask for.
+
+Lock/pass survives because a lock decision is made *after* a game — the score is known, and
+the only forecast is over the games still to come, which is exactly what the projection
+layer is calibrated for. A start/sit decision is made before anything and is entirely
+forecast.
+
+The one start/sit input needing no availability data is the published schedule, and it is
+weak here: starters averaged 3.31 scheduled games against 3.23 for the bench, and games
+scheduled correlates just +0.10 with the week's best game. Lock-in counts one game per
+player, so a busier schedule buys less than it would in a points format.
+
+Consequence: a start/sit feature would be the first thing in this project to ship without a
+gate. See [implementation-plan.md §19](docs/implementation-plan.md) for the sequencing that
+avoids that.
+
 ## Layout
 
 ```

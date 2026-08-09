@@ -1907,3 +1907,69 @@ that is already over. That is an interesting analysis, not a capability the engi
 and the cost is an ID crosswalk plus PDF parsing for partial coverage. The honest ordering
 is: keep capturing daily, revisit ProSportsTransactions or an injury-report archive if the
 retrospective question ever becomes worth that price.
+
+
+---
+
+## 19. The cost: start/sit algorithms cannot be backtested
+
+The practical consequence of §17 and §18, stated plainly because it changes the roadmap.
+
+### It is the leakage rule in mirror image
+
+Everywhere else this project guards against the backtest knowing **more** than the live
+engine would — that is what §3's cutoff, `as_of`, and `check_no_leakage` are for. Here the
+backtest knows **less**. A start/sit algorithm shipped for 2026-27 will have Sleeper's live
+`injury_status`; replayed against 2025-26 it would not. Both directions break the same
+thing: correspondence between what is tested and what would run.
+
+So a 2025-26 backtest of a start/sit algorithm is uninformative in *both* directions. If it
+looks bad, that is the missing input, not the algorithm — §17 measured the model's own
+lineup picks at 20 points a week worse than the managers'. If it looks good, it is good at
+a task nobody will ask it to do.
+
+### Why lock/pass survives and start/sit does not
+
+The two decisions sit on opposite sides of the information they need:
+
+- A **lock** decision is made *after* a game. The score is known; the only forecast is over
+  the games still to come, and the projection layer is calibrated for exactly that (§13).
+- A **start/sit** decision is made *before* anything. It is entirely forecast, and its single
+  largest input — is he playing tonight — is the one we lack.
+
+That is the whole asymmetry, and it is why §16 can rank lock decisions and cannot rank
+lineups.
+
+### The salvageable part is small
+
+One start/sit input needs no availability data at all: the published schedule. Starting a
+player with four games rather than two is a real decision, knowable weeks ahead, and fully
+backtestable. It is also weak in this format, because lock-in counts one game per player:
+
+```
+games scheduled that week   started 3.31   benched 3.23   edge +0.08
+roster-weeks where starters averaged more games : 55% (against 37% fewer)
+correlation, games scheduled vs that week's best game : +0.10
+```
+
+A +0.10 correlation and a 0.08-game edge is not an algorithm worth validating. Managers
+barely favour the busier schedule, and they are close to right not to.
+
+### Consequence for the roadmap
+
+Every capability so far shipped behind a gate that could fail. A start/sit feature for
+2026-27 would be the **first to ship unvalidated**, and that should be a deliberate choice
+rather than something noticed later.
+
+The sequencing that follows:
+
+1. **Capture from day one.** Already in place as of §17 — `lockin ingest` writes daily
+   designations to `player_status`. Nothing else is possible without it.
+2. **Ship lock/pass, which is validated.** The digest can recommend locks from the opening
+   week on Phase 3-5 evidence.
+3. **Hold start/sit until it has its own gate.** By roughly week 10 of 2026-27 there would
+   be ~100 roster-weeks of lineup decisions with genuine point-in-time availability —
+   enough to build the gate the other phases had, in-season, before trusting it.
+
+Shipping start/sit advice in week 1 on the strength of a backtest that could not have
+tested it would be exactly the failure this project has spent five phases avoiding.
