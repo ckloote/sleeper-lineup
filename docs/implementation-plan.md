@@ -507,6 +507,10 @@ slot usage later, and is worth persisting rather than discarding.
 ### Still open
 
 Everything below is blocked on the 2026-27 season existing. Nothing is blocked on work.
+All of it is due on one morning, so it is assembled as an ordered checklist in
+[day-one.md](day-one.md) — including two hazards found while validating it: a second season
+ingested into the same database silently hides the first, and the shipped crontab captured
+no availability data at all.
 
 - **§7.5 — forward-looking stat rows.** Unverifiable until the season opens. Does not
   block Phases 0-2, but the NBA schedule ingest built in Phase 0 is what makes the
@@ -1999,8 +2003,11 @@ rather than something noticed later.
 
 The sequencing that follows:
 
-1. **Capture from day one.** Already in place as of §17 — `lockin ingest` writes daily
-   designations to `player_status`. Nothing else is possible without it.
+1. **Capture from day one.** The capability is in place as of §17 — but read the caveat in
+   §20 before trusting it. `player_status` is written by the player-reference refresh,
+   which only runs under `ingest --full`, and a cron missing that flag captures nothing
+   while appearing to work. Nothing else here is possible without it, and it cannot be
+   backfilled.
 2. **Ship lock/pass, which is validated.** The digest can recommend locks from the opening
    week on Phase 3-5 evidence.
 3. **Hold start/sit until it has its own gate.** By roughly week 10 of 2026-27 there would
@@ -2226,9 +2233,22 @@ given day, and that is not recoverable by recomputation.
 
 Unchanged from §15, and none of it is closable before October:
 
-1. **Today's injury designations.** `lockin ingest` has written `player_status` daily since
-   §17, so the capture is in place; there is simply no history yet. `starter_dnp_scale` is
-   the seam the real feed replaces.
+1. **Today's injury designations.** The capture is built; there is no history yet.
+   `starter_dnp_scale` is the seam the real feed replaces.
+
+   **Corrected 2026-08-15, while validating the day-one checklist.** Earlier wording here
+   and in §19 said the capture "runs daily". It does not, and could not have: designations
+   are written by `ingest_players`, which the CLI calls only under `--full` or against an
+   empty `players` table. The database holds **one** date, 2026-08-08 — the day `--full`
+   was last run — and the crontab shipped with Phase 6 omitted the flag entirely, so
+   deploying it as written would have captured nothing for a season while every command
+   reported success. The cron form is fixed and `docs/day-one.md` step 6 verifies the row
+   count is growing rather than assuming it.
+
+   Worth deciding rather than leaving: the failure is silent and the loss is permanent, so
+   there is a case for making `ingest` always record designations instead of relying on a
+   flag being remembered. It costs a 2.5MB fetch per run. Not changed here, because
+   altering what the default ingest does is a decision rather than a fix.
 2. **The polling loop.** `weekly_matchups` is append-only so that a frozen `players_points`
    can reveal an opponent's lock one game later. That needs in-season polling, which needs
    a season.

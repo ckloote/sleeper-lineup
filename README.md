@@ -577,7 +577,7 @@ unactivated venv silently falls back to system Python. Use absolute paths:
 
 ```cron
 # Post-game ingest, and the morning digest.
-30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
+30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --full --weeks $(date +\%V) >> logs/ingest.log 2>&1
 0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
 ```
 
@@ -585,6 +585,13 @@ The ingest runs first because the digest reads what it wrote. `--frozen` pins th
 so a cron run can never resolve a different dependency set from the one that was tested.
 Keep the topic in a file only your user can read rather than in the crontab, which is
 world-readable on some systems.
+
+**`--full` is load-bearing here, and it is not about the 2.5MB.** Today's injury
+designations are written by the player-reference refresh, which only runs with `--full` or
+against an empty `players` table. Without it the ingest works, the digest works, and
+`player_status` silently never grows — and that record is the prerequisite for ever ranking
+start/sit decisions (§19), cannot be backfilled, and a missing day is missing forever.
+Verify it is accumulating rather than assuming: see [day-one.md](docs/day-one.md) step 6.
 
 ## Development
 
@@ -732,10 +739,12 @@ gate. See [implementation-plan.md §19](docs/implementation-plan.md) for the seq
 avoids that. This is why `lockin digest` emits no lineup advice.
 
 **Three live-only paths have never run against a live league**, because there is not one to
-run against. Each is built and each is unexercised:
+run against. Each is built and each is unexercised. They all come due on one morning, so
+they are assembled as an ordered checklist in [docs/day-one.md](docs/day-one.md) — read
+that before the first ingest of 2026-27, because step 2 is destructive if skipped.
 
-- **Today's injury designations.** `lockin ingest` writes `player_status` daily and has
-  done since §17, so the capture works — it simply has no history yet, and cannot be
+- **Today's injury designations.** `lockin ingest --full` writes `player_status`, so the
+  capture works — it simply has no history yet, and cannot be
   backfilled. Until it does, `starter_dnp_scale` stands in, correcting a hazard that
   otherwise predicts 17.2% absence for started players against a realised 8.5%.
 - **The poll history.** `weekly_matchups` is append-only so that a frozen `players_points`
