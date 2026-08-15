@@ -210,7 +210,7 @@ def test_a_render_failure_returns_no_traceback(served, monkeypatch):
     """A stack trace in an HTTP response describes the filesystem to a stranger."""
     base, _ = served
 
-    def explode(db_path, roster_id):
+    def explode(src):
         raise RuntimeError("/home/secret/path blew up")
 
     monkeypatch.setitem(serve.ROUTES, "/", explode)
@@ -228,3 +228,60 @@ def test_reachable_addresses_always_includes_loopback():
     urls = serve.reachable_addresses(8080)
     assert "http://127.0.0.1:8080" in urls
     assert len(set(urls)) == len(urls), "duplicates would be noise at startup"
+
+
+# ------------------------------------------------------- two seasons, two files
+
+
+def test_the_dashboard_can_read_a_different_season(tmp_path, report):
+    """The shape a live deployment actually has.
+
+    Seasons cannot share a database — `weekly_matchups` has no season column, so
+    the newer one hides the older. But scorecards are retrospective: the only
+    ones that exist mid-season describe *last* season. Without this the served
+    dashboard reads "No scorecards yet" for a whole year, which is true and
+    useless.
+    """
+    current = tmp_path / "2026.db"
+    previous = tmp_path / "2025.db"
+    with session(current) as conn:
+        digest_mod.persist(conn, report, state_supplied=True)
+    with session(previous) as conn:
+        conn.execute(
+            "INSERT INTO manager_scorecards (roster_id, decisions, squandered_share,"
+            " mean_stake, mean_regret, right_rate, regret_lo, regret_hi, divergent,"
+            " divergent_right_rate, upside_share, upside_decisions, rode_to_zero,"
+            " computed_at) VALUES (4, 200, 0.09, 0.09, 0.009, 0.87, 0.004, 0.015,"
+            " 20, 0.7, 0.8, 100, 2, '2026-05-01T00:00:00+00:00')"
+        )
+
+    httpd = serve.build_server(
+        current, report.roster_id, dashboard_db=previous, host="127.0.0.1", port=0, quiet=True
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        advice_page = fetch(f"{base}/")[1]
+        dash_page = fetch(f"{base}/dashboard")[1]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    assert "What to do" in advice_page, "advice still comes from the current season"
+    assert "Who decided well" in dash_page, "dashboard came from the previous one"
+    assert "No scorecards yet" not in dash_page
+
+
+def test_one_database_is_still_the_default(tmp_path, report):
+    """Out of season both pages come from the same file, and should."""
+    db = tmp_path / "only.db"
+    with session(db) as conn:
+        digest_mod.persist(conn, report, state_supplied=True)
+    httpd = serve.build_server(db, report.roster_id, host="127.0.0.1", port=0, quiet=True)
+    try:
+        sources = httpd.RequestHandlerClass.sources
+        assert sources.advice_db == sources.dashboard_db == db
+    finally:
+        httpd.server_close()

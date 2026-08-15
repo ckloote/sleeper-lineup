@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -56,16 +57,35 @@ margin:3rem auto;padding:0 1rem;color-scheme:light dark}a{display:block;margin:.
 """
 
 
-def _advice_page(db_path: Path, roster_id: int) -> str:
-    conn = connect_readonly(db_path)
+@dataclass(frozen=True, slots=True)
+class Sources:
+    """Where each page reads from. Two databases, on purpose.
+
+    Seasons cannot share a database — `weekly_matchups` has no season column, so
+    the newer one silently hides the older (day-one.md step 2). But manager
+    scorecards are *retrospective*: they describe a season that has finished, so
+    in-season the only ones worth showing come from last year's database while
+    tonight's advice comes from this year's.
+
+    Without this the served dashboard reads "No scorecards yet" for an entire
+    season, which is true and useless.
+    """
+
+    advice_db: Path
+    dashboard_db: Path
+    roster_id: int
+
+
+def _advice_page(src: Sources) -> str:
+    conn = connect_readonly(src.advice_db)
     try:
-        return advice_mod.render(advice_mod.latest_run(conn, roster_id))
+        return advice_mod.render(advice_mod.latest_run(conn, src.roster_id))
     finally:
         conn.close()
 
 
-def _dashboard_page(db_path: Path, roster_id: int) -> str:
-    conn = connect_readonly(db_path)
+def _dashboard_page(src: Sources) -> str:
+    conn = connect_readonly(src.dashboard_db)
     try:
         rows = dashboard_mod.load(conn)
         return dashboard_mod.render(rows, stamp=dashboard_mod.computed_at(conn))
@@ -73,7 +93,7 @@ def _dashboard_page(db_path: Path, roster_id: int) -> str:
         conn.close()
 
 
-ROUTES: dict[str, Callable[[Path, int], str]] = {
+ROUTES: dict[str, Callable[[Sources], str]] = {
     "/": _advice_page,
     "/dashboard": _dashboard_page,
 }
@@ -82,8 +102,7 @@ ROUTES: dict[str, Callable[[Path, int], str]] = {
 class Handler(BaseHTTPRequestHandler):
     """Route-table only. No path is ever turned into a filename."""
 
-    db_path: Path
-    roster_id: int
+    sources: Sources
     quiet: bool = False
 
     server_version = "lockin"
@@ -96,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(404, NOT_FOUND)
             return
         try:
-            body = render(self.db_path, self.roster_id)
+            body = render(self.sources)
         except Exception as exc:  # noqa: BLE001
             # A traceback in an HTTP response tells whoever is reading it the
             # filesystem layout. Log it locally, return something bland.
@@ -126,18 +145,28 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def build_server(
-    db_path: Path, roster_id: int, *, host: str = "0.0.0.0", port: int = PORT, quiet: bool = False
+    db_path: Path,
+    roster_id: int,
+    *,
+    dashboard_db: Path | None = None,
+    host: str = "0.0.0.0",
+    port: int = PORT,
+    quiet: bool = False,
 ) -> ThreadingHTTPServer:
     """A server bound and ready, not yet running.
 
     Returned rather than started so the caller decides — the CLI calls
     `serve_forever`, the tests run it in a thread and shut it down.
+
+    ``dashboard_db`` defaults to ``db_path``, which is right out of season and
+    wrong during one: see :class:`Sources`.
     """
-    bound = type(
-        "BoundHandler",
-        (Handler,),
-        {"db_path": db_path, "roster_id": roster_id, "quiet": quiet},
+    sources = Sources(
+        advice_db=db_path,
+        dashboard_db=dashboard_db or db_path,
+        roster_id=roster_id,
     )
+    bound = type("BoundHandler", (Handler,), {"sources": sources, "quiet": quiet})
     return ThreadingHTTPServer((host, port), bound)
 
 

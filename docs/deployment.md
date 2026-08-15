@@ -62,33 +62,84 @@ headroom, which is why Eastern needs no special handling. **A Pi east of UTC+2 w
 
 ---
 
-## 3. First run, by hand, watching it
+## 3. Bring last season's database across — do not re-ingest it
 
-Do not install the cron yet.
+`snapshots/` is committed, so it arrives with the clone. **`data/` is gitignored**, so a
+fresh clone has no database at all.
+
+```bash
+# from the dev machine
+rsync -avP data/lockin.db pi@raspberrypi:/home/pi/lockin/data/lockin-2025.db
+```
+
+**Copy it; do not rebuild it on the Pi.** Sleeper rewrites completed seasons (§12) — 38% of
+week-12 starter values changed under us between two days in August. Re-ingesting 2025-26 on
+the Pi would fetch *today's* version, producing a database that disagrees with this one and
+with the committed snapshots. Copying preserves the record that was actually observed;
+`lockin reconcile` then confirms it still matches the archive.
+
+Name it for its season from the start. Two seasons must never share a database:
+`weekly_matchups` carries no season column, so 2026-27 rows would silently hide 2025-26
+ones — see [day-one.md](day-one.md) step 2, which is where the second database appears.
+
+```bash
+# /home/pi/lockin/.env
+LOCKIN_DB=data/lockin-2025.db
+```
+
+**What this does and does not buy you.**
+
+It does **not** help next season's projections. `load_panel` filters `WHERE season = ?`, so
+the 2026-27 panel ignores 2025-26 entirely. The cold start in the opening weeks — where
+players have no own history and fall back to the pooled donor cohort — is real, and last
+season sitting on disk does not soften it. Fixing that would mean cross-season panel
+support, which does not exist and is not planned.
+
+What it does buy is the next step.
+
+## 4. Run the whole gate suite on the Pi
+
+This is the deployment test. With the season present, every gate the project has can run on
+the actual hardware — not a smoke test of imports, a proof that the engine produces the
+same answers there.
 
 ```bash
 cd /home/pi/lockin
-uv run --frozen lockin ingest --weeks 12        # one week, to prove the path
 uv run --frozen lockin reconcile
 uv run --frozen lockin verify
+uv run --frozen lockin locks
+uv run --frozen lockin calibrate
+uv run --frozen lockin backtest
 ```
 
-**Pass:** both gates report `all gates passed`. `verify` is the one that matters — it
-reproduces every nonzero counted score from box scores, so it catches a scoring-settings
-change or a broken ingest immediately.
+**Pass:** five × `all gates passed`. `backtest` is the slow one — minutes of Monte Carlo —
+and is the single best evidence that the Pi is a working host. If it passes there, nothing
+about the digest will surprise you.
 
-Watch the ingest's `status` line:
+Then populate the dashboard, which reads what this stores:
+
+```bash
+uv run --frozen lockin managers
+```
+
+## 5. One live ingest, watching it
+
+```bash
+uv run --frozen lockin ingest --weeks 12
+```
+
+Watch the `status` line:
 
 ```
 status      219 availability rows across 2 day(s)
 ```
 
-The **day count** is the number to watch, not the row count. A capture frozen months ago
-still reports thousands of rows.
+The **day count** is the number to watch, not the row count — a capture frozen months ago
+still reports thousands of rows. It should be one higher than before.
 
 ---
 
-## 4. Prove the notification works, before you depend on it
+## 6. Prove the notification works, before you depend on it
 
 ```bash
 head -c 24 /dev/urandom | base64 | tr -d '/+=' > ~/.lockin-topic
@@ -113,7 +164,7 @@ tested deliberately, and testing it found a crash (§20).
 
 ---
 
-## 5. Install the cron
+## 7. Install the cron
 
 ```cron
 30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
@@ -134,7 +185,7 @@ the night a network call hangs.
 
 ---
 
-## 6. Serve the pages
+## 8. Serve the pages
 
 ```bash
 sudo tee /etc/systemd/system/lockin-serve.service >/dev/null <<'EOF'
@@ -145,7 +196,8 @@ After=network-online.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/lockin
-ExecStart=/home/pi/.local/bin/uv run --frozen lockin serve --quiet
+ExecStart=/home/pi/.local/bin/uv run --frozen lockin serve --quiet \\
+  --dashboard-db data/lockin-2025.db
 Restart=on-failure
 
 [Install]
@@ -161,13 +213,19 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/
 Then from the phone, on the LAN: `http://<pi>:8080/`. Over Tailscale it is the same URL
 with the tailnet address — the server binds all interfaces, so nothing further is needed.
 
+`--dashboard-db` is what makes the two-database split usable. Scorecards are retrospective:
+the only ones that exist during 2026-27 describe 2025-26, and they live in that season's
+file. Without the flag `/dashboard` reads "No scorecards yet" for the entire season — true,
+and useless. `LOCKIN_DB` still points at the current season, so tonight's advice is
+unaffected.
+
 **Do not port-forward it.** There is no authentication; the network is the boundary. And
 do not substitute `python -m http.server`, which in this directory would publish
 `data/lockin.db` — the entire season — with directory listing on.
 
 ---
 
-## 7. The morning after
+## 9. The morning after
 
 The checks that matter are the ones that prove the *scheduled* runs worked, not the manual
 ones.

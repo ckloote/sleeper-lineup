@@ -713,8 +713,15 @@ def advice(out: Path, roster: int | None) -> None:
 @click.option("--host", default="0.0.0.0", show_default=True, help="Interface to bind.")
 @click.option("--port", default=serve_mod.PORT, show_default=True, help="Port to bind.")
 @click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
+@click.option(
+    "--dashboard-db",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Database for /dashboard. Default: the same one. In-season, point this at "
+    "last season, whose scorecards are the only ones that exist.",
+)
 @click.option("--quiet", is_flag=True, help="Do not log requests.")
-def serve(host: str, port: int, roster: int | None, quiet: bool) -> None:
+def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, quiet: bool) -> None:
     """Serve the advice and dashboard pages over HTTP.
 
     Rendered from the database on each request, so the page cannot be older than
@@ -737,6 +744,11 @@ def serve(host: str, port: int, roster: int | None, quiet: bool) -> None:
         click.echo(f"  {url}")
     click.echo("  /            what to do tonight")
     click.echo("  /dashboard   who decided well last season")
+    if dashboard_db is None:
+        click.echo(
+            "  (--dashboard-db is unset: in-season /dashboard will be empty until"
+            "\n   `lockin managers` runs, since scorecards are retrospective)"
+        )
     if host == "0.0.0.0":  # noqa: S104 - the default, and deliberately so
         click.echo(
             "\n  bound to all interfaces: anyone who can route here can read your"

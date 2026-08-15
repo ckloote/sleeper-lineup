@@ -82,6 +82,10 @@ the two. The backtest would still run. It would just be meaningless.
 A separate file per season is the intended shape anyway: the database is disposable and
 rebuilt from the API, which is why the archive that is *not* disposable lives outside it.
 
+**Point `lockin serve --dashboard-db` at the old file.** Scorecards are retrospective, so
+the only ones that exist now describe 2025-26 and live in `data/lockin-2025.db`. Without it
+`/dashboard` reads "No scorecards yet" until this season is over.
+
 **Keep `LOCKIN_SNAPSHOTS` pointing at the same directory.** Snapshot paths are already
 season-scoped (`snapshots/<kind>/<season>/wkNN/`), so the seasons cannot collide, and the
 2025-26 archive is the only defence against §12's rewriting. Do not start a fresh one.

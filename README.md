@@ -474,6 +474,7 @@ Both pages over HTTP, so a phone can read them.
 ```bash
 uv run lockin serve                     # all interfaces, port 8080
 uv run lockin serve --host 127.0.0.1    # this machine only
+uv run lockin serve --dashboard-db data/lockin-2025.db   # in-season
 ```
 
 ```
@@ -496,6 +497,12 @@ served copy cannot lag the last digest.
 
 The database is opened **read-only**, enforced by SQLite rather than by the handlers being
 careful, and WAL means it coexists with the cron ingest writing at the same moment.
+
+**`--dashboard-db` exists because seasons cannot share a database.** `weekly_matchups`
+carries no season column, so a second season silently hides the first — hence one file per
+season. But manager scorecards are retrospective, and the only ones that exist mid-season
+describe *last* season, in last season's file. Point the flag at it or `/dashboard` reads
+"No scorecards yet" until the current season is over.
 
 **On exposure.** Binding all interfaces is the default because that is the entire point;
 it means the LAN, and it means Tailscale when that interface is up, which is the sensible

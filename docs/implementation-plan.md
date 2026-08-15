@@ -2452,6 +2452,34 @@ The two warnings look alike and are marked apart in the markup (`data-warning="a
 `"ingest"`), because a test that cannot tell them apart is a test that passes for the wrong
 reason — a mistake made twice already in this phase.
 
+### The Pi needs last season, and copying it is not the same as rebuilding it
+
+Asked whether the deployment runbook would put 2025-26 in the production database. It would
+not: `data/` is gitignored, so a fresh clone has no database at all, and the runbook only
+ingested one week as a smoke test. `snapshots/` *is* committed, so the §12 archive travels
+with the clone — but the data it guards did not.
+
+**Copy the file; do not re-ingest.** §12 is the reason: Sleeper rewrites completed seasons,
+so rebuilding 2025-26 on the Pi would fetch today's version and produce a database that
+disagrees with this one and with the committed snapshots. Copying preserves what was
+observed, and `reconcile` then confirms it still matches the archive.
+
+**It does not help next season's projections**, which is the natural assumption and is
+wrong. `load_panel` filters `WHERE season = ?`, so the 2026-27 panel ignores 2025-26
+entirely. The opening-weeks cold start is real and having last season on disk does not
+soften it; that would need cross-season panel support, which does not exist.
+
+What it does buy is that **every gate can run on the Pi** — `verify`, `locks`, `calibrate`
+and `backtest`, not just an import check. A `backtest` that passes on the target hardware is
+the strongest deployment evidence available, and it was previously impossible there.
+
+**And it exposed a papercut worth fixing.** Seasons cannot share a database (day-one step
+2), but manager scorecards are *retrospective*: the only ones that exist during 2026-27
+describe 2025-26 and live in that season's file. Served from the current database,
+`/dashboard` would read "No scorecards yet" for an entire season — true, and useless.
+`lockin serve --dashboard-db` points that one route at the previous season while tonight's
+advice keeps coming from this one.
+
 ### What is still live-only, and therefore still unverified
 
 Unchanged from §15, and none of it is closable before October:
