@@ -467,6 +467,63 @@ the digest describes and stated in colour before any advice appears.
 It shows the latest run only. That is deliberate: the question is "what am I supposed to
 do", and a date picker invites reading a stale answer on purpose.
 
+### `lockin serve`
+
+Both pages over HTTP, so a phone can read them.
+
+```bash
+uv run lockin serve                     # all interfaces, port 8080
+uv run lockin serve --host 127.0.0.1    # this machine only
+```
+
+```
+serving roster 4 from data/lockin.db (read-only)
+  http://127.0.0.1:8080
+  http://phaedrus:8080
+  /            what to do tonight
+  /dashboard   who decided well last season
+```
+
+**Do not use `python -m http.server` instead.** Pointed at this directory it would publish
+`data/lockin.db` — the entire season — plus `snapshots/` and the source, with directory
+listing on. This server holds no document root and never opens a file, so there is no path
+handling to get wrong; every path that is not one of the two routes is a 404.
+
+**Pages are rendered per request, not served from disk.** `advice` is a reader — two SQL
+queries, no simulation — so regenerating on each request is free, and it removes the
+failure this area keeps producing: a page quietly older than the data behind it. The
+served copy cannot lag the last digest.
+
+The database is opened **read-only**, enforced by SQLite rather than by the handlers being
+careful, and WAL means it coexists with the cron ingest writing at the same moment.
+
+**On exposure.** Binding all interfaces is the default because that is the entire point;
+it means the LAN, and it means Tailscale when that interface is up, which is the sensible
+way to reach it from outside the house. There is no authentication — the network is the
+boundary, so do not port-forward it. `--host 127.0.0.1` restricts it to the machine.
+
+To keep it running on the Pi, a unit rather than a cron entry:
+
+```ini
+# /etc/systemd/system/lockin-serve.service
+[Unit]
+Description=Lock-in pages
+After=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/lockin
+ExecStart=/home/pi/.local/bin/uv run --frozen lockin serve --quiet
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now lockin-serve
+```
+
 ### `lockin dashboard`
 
 Renders that ranking as a self-contained HTML page — no server, no build step, opens over

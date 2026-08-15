@@ -236,6 +236,9 @@ uv run lockin advice
 **Pass:** a green banner saying the advice is for this morning. A red one means the digest
 did not run today — check `logs/digest.log` before trusting anything on the page.
 
+If `lockin-serve` is running on the Pi, the same page is at `http://<pi>:8080/` and is
+rendered fresh on each request, so it cannot lag behind the digest.
+
 ---
 
 ## 8. What stays switched off

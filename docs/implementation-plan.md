@@ -2317,6 +2317,40 @@ coloured banner above the advice, not a footnote below it.
 Deliberately not a history browser. The question is "what am I supposed to do"; a date
 picker invites reading a stale answer on purpose.
 
+### `lockin serve`, and why it is not `python -m http.server`
+
+Wanting the page on a phone is a two-line problem — until you notice what the obvious
+answer publishes. `python -m http.server` in this project's directory serves
+`data/lockin.db`, all 27MB of the season, plus `snapshots/` and the source, with directory
+listing on. The naive advice is actively harmful, and that is the justification for writing
+something narrow.
+
+`lockin serve` **never opens a file**. It holds no document root, has a two-entry route
+table, and renders both pages from the database. There is no path handling, so there is no
+path handling to get wrong; `/../data/lockin.db` is a 404 for the same reason `/nope` is.
+
+Two properties beyond that:
+
+- **Rendered per request.** `advice` is a reader — two queries, no simulation — so this
+  costs nothing and removes the staleness step entirely. A served page cannot be older
+  than the last digest, which is the failure this area has now produced twice.
+- **Read-only, enforced by SQLite** rather than by handlers being careful. A bug in a
+  request handler cannot corrupt the season, and WAL means it coexists with the cron
+  ingest writing at that moment.
+
+Binding all interfaces is the default, because a loopback default would be a command that
+does not do the thing it exists for. That is the LAN, and Tailscale when the interface is
+up — which is how it should be reached from outside the house. There is no authentication:
+adding a password field would imply more safety than it delivers, so the boundary is the
+network and the command says so at startup, every time.
+
+Writing the tests found a rendering bug worth noting, because it is the shape this project
+keeps producing. `render` guarded the projected-totals line on `p_win` rather than on the
+fields it actually formats, so a `digest_runs` row carrying a win probability and no
+projections raised `TypeError` and turned into a 500. `persist` never writes that shape —
+but "the writer never produces it" is not a property a page served over HTTP should depend
+on, and each line now guards its own field.
+
 ### What is still live-only, and therefore still unverified
 
 Unchanged from §15, and none of it is closable before October:

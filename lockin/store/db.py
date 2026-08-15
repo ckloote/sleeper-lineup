@@ -16,6 +16,25 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """A connection that cannot write, for readers that must not.
+
+    `lockin serve` handles requests from the network. Opening the database
+    read-only means a bug in a request handler cannot corrupt the season, and it
+    is not a promise anyone has to keep — SQLite enforces it.
+
+    No schema is applied, deliberately: applying it is a write, and a server that
+    creates tables is a server that can be made to create tables. A database too
+    old to have the tables a page needs is a `lockin digest` away from having
+    them, and the page says so.
+
+    WAL means this coexists with the cron ingest writing at the same moment.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None)

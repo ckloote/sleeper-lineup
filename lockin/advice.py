@@ -232,13 +232,19 @@ def render(run: Run | None, *, today: str | None = None) -> str:
         banked = ""
         if run.banked_slots:
             banked = f"<div>banked {run.banked_total:.1f} across {run.banked_slots} of 6</div>"
+        # Each line guarded on its own field rather than on `p_win` standing in
+        # for all of them. A row carrying a win probability and nothing else is
+        # not a shape `persist` produces, but this is rendered into an HTTP
+        # response: a missing number must drop a line, not return a 500.
+        projected = ""
+        if run.projected is not None and run.opponent_projected is not None:
+            projected = f"<div>projected {run.projected:.0f} v {run.opponent_projected:.0f}</div>"
         state = (
             "<div class=state>"
             f"<div class=pwin>{run.p_win:.0%}</div>"
             f"<div class=pwinlabel>chance to win, roster {run.roster_id}"
             f" v {run.opponent_roster_id}</div>"
-            f"<div>projected {run.projected:.0f} v {run.opponent_projected:.0f}</div>"
-            f"{margin}{banked}</div>"
+            f"{projected}{margin}{banked}</div>"
         )
 
     provenance = (

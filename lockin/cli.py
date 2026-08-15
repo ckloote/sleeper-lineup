@@ -11,6 +11,7 @@ Three surfaces, three questions, and they are easy to confuse:
     digest      what do I do tonight          -> push notification
     advice      what did it say               -> a page you can re-read
     dashboard   who decided well last season  -> a page, retrospective
+    serve       both pages, over HTTP         -> a phone on the LAN or tailnet
 
 `advice` and `dashboard` are readers. Neither recomputes, and for `advice` that
 is a correctness rule rather than a performance one — see lockin/advice.py.
@@ -41,6 +42,7 @@ from lockin import managers as managers_mod
 from lockin import notify as notify_mod
 from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
+from lockin import serve as serve_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config
 from lockin.core import projections as core_projections
@@ -701,6 +703,49 @@ def advice(out: Path, roster: int | None) -> None:
     )
     if age > 0:
         click.echo("  the page says so in a red banner; re-run `lockin digest` to refresh.")
+
+
+@main.command()
+@click.option("--host", default="0.0.0.0", show_default=True, help="Interface to bind.")
+@click.option("--port", default=serve_mod.PORT, show_default=True, help="Port to bind.")
+@click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
+@click.option("--quiet", is_flag=True, help="Do not log requests.")
+def serve(host: str, port: int, roster: int | None, quiet: bool) -> None:
+    """Serve the advice and dashboard pages over HTTP.
+
+    Rendered from the database on each request, so the page cannot be older than
+    the last digest. Read-only, and it never opens a file — `python -m
+    http.server` pointed here would publish `data/lockin.db` and `snapshots/`.
+
+    Binds all interfaces by default, which is what makes it reachable from a
+    phone and from Tailscale. There is no authentication: the network is the
+    boundary, so do not port-forward it.
+    """
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
+    if roster_id is None:
+        raise click.ClickException(f"no roster for user {cfg.user_id}; pass --roster")
+
+    httpd = serve_mod.build_server(cfg.db_path, roster_id, host=host, port=port, quiet=quiet)
+    click.echo(f"serving roster {roster_id} from {cfg.db_path} (read-only)")
+    for url in serve_mod.reachable_addresses(port):
+        click.echo(f"  {url}")
+    click.echo("  /            what to do tonight")
+    click.echo("  /dashboard   who decided well last season")
+    if host == "0.0.0.0":  # noqa: S104 - the default, and deliberately so
+        click.echo(
+            "\n  bound to all interfaces: anyone who can route here can read your"
+            "\n  lineup. Fine on a LAN or a tailnet; do not port-forward it."
+            "\n  --host 127.0.0.1 restricts it to this machine."
+        )
+    click.echo("\nCtrl-C to stop.")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nstopped.")
+    finally:
+        httpd.server_close()
 
 
 @main.command()
