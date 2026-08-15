@@ -129,6 +129,19 @@ def record_player_status(conn: sqlite3.Connection, payload: dict, as_of: str) ->
     return len(rows)
 
 
+def status_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
+    """How many distinct days of availability data exist, and how many rows.
+
+    Printed by every ingest because the *day count* is the number that reveals a
+    stalled capture. Rows alone do not: a capture frozen since October still
+    reports thousands of them, and the failure this exposes — a season of
+    designations never recorded — is silent, permanent, and otherwise looks
+    exactly like a working system.
+    """
+    row = conn.execute("SELECT COUNT(DISTINCT as_of) d, COUNT(*) n FROM player_status").fetchone()
+    return int(row["d"]), int(row["n"])
+
+
 def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
     """Refresh the player reference table.
 
@@ -142,6 +155,13 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
     ``player_status``. That cannot recover the past, but it starts the record
     that evaluating start/sit decisions will need, and it is unrecoverable if
     nobody starts it.
+
+    **Called on every ingest, unconditionally.** This used to sit behind
+    `--full` so a re-ingest could skip the 2.5MB fetch. The designations ride in
+    on that same payload, so the flag was really a switch on whether to record
+    the one thing that cannot be recovered later — and the Phase 6 crontab
+    omitted it, which would have cost a season of data without a single error
+    message. 2.5MB a run is not a price worth a failure mode.
     """
     started = now_iso()
     payload = client.players()

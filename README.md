@@ -105,7 +105,6 @@ scores, plus the NBA schedule and tipoff times. Writes to SQLite.
 uv run lockin ingest                     # everything, all 25 weeks
 uv run lockin ingest --weeks 12          # one week
 uv run lockin ingest --weeks 1-10,22-25  # ranges and lists
-uv run lockin ingest --full              # also refetch the ~2.5MB player reference
 uv run lockin ingest --skip-tipoffs      # skip the slow per-date scoreboard sweep
 uv run lockin ingest --skip-nba          # Sleeper only
 ```
@@ -577,7 +576,7 @@ unactivated venv silently falls back to system Python. Use absolute paths:
 
 ```cron
 # Post-game ingest, and the morning digest.
-30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --full --weeks $(date +\%V) >> logs/ingest.log 2>&1
+30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
 0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
 ```
 
@@ -586,12 +585,12 @@ so a cron run can never resolve a different dependency set from the one that was
 Keep the topic in a file only your user can read rather than in the crontab, which is
 world-readable on some systems.
 
-**`--full` is load-bearing here, and it is not about the 2.5MB.** Today's injury
-designations are written by the player-reference refresh, which only runs with `--full` or
-against an empty `players` table. Without it the ingest works, the digest works, and
-`player_status` silently never grows — and that record is the prerequisite for ever ranking
-start/sit decisions (§19), cannot be backfilled, and a missing day is missing forever.
-Verify it is accumulating rather than assuming: see [day-one.md](docs/day-one.md) step 6.
+**Every ingest records today's injury designations**, and there is no flag that skips
+it. There used to be: the player payload sat behind `--full`, the designations rode in on
+it, and a crontab without the flag captured nothing while reporting success every morning.
+That record cannot be backfilled and is the prerequisite for ever ranking start/sit
+decisions (§19), so it no longer depends on anyone remembering. The ingest prints the day
+count each run — see [day-one.md](docs/day-one.md) step 6 for what to check.
 
 ## Development
 
@@ -743,7 +742,7 @@ run against. Each is built and each is unexercised. They all come due on one mor
 they are assembled as an ordered checklist in [docs/day-one.md](docs/day-one.md) — read
 that before the first ingest of 2026-27, because step 2 is destructive if skipped.
 
-- **Today's injury designations.** `lockin ingest --full` writes `player_status`, so the
+- **Today's injury designations.** Every `lockin ingest` writes `player_status`, so the
   capture works — it simply has no history yet, and cannot be
   backfilled. Until it does, `starter_dnp_scale` stands in, correcting a hazard that
   otherwise predicts 17.2% absence for started players against a realised 8.5%.

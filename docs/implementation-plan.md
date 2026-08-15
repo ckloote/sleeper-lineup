@@ -1790,6 +1790,27 @@ say so, and two invariant tests pin it — asserting the *broken* behaviour deli
 that if Sleeper ever starts publishing real per-game snapshots the tests fail and that
 becomes visible as good news rather than passing unnoticed.
 
+> **Corrected 2026-08-15: the good-news detector had a false-positive mode, and it fired.**
+> Re-ingesting a single week made `pit_team` vary across a player's games — player 1254
+> reads `CLE` for 24 weeks fetched on 2026-08-08 and `CHA` for week 12 fetched a week later,
+> because he was traded in between and only that week was refetched. The test reported
+> exactly what it was built to report: per-game variance in `pit_team`. The variance was
+> real; the inference would have been wrong.
+>
+> This is the same shape of error §3 made — a measurement whose result is determined by how
+> the data was collected rather than by what it describes. There the drift was zero *by
+> construction*; here the drift is nonzero by construction, and both read as findings.
+>
+> The test now partitions by ingest date, because "today's value stamped at fetch time"
+> means rows from different fetches legitimately disagree. **Incremental weekly ingest makes
+> that the normal state of the database**, so uncorrected this would have fired every week
+> of 2026-27 and been believed the first time.
+>
+> Partitioning costs something, so a second test guards the cost: the claim only has force
+> when some batch spans several weeks, and a database rebuilt purely by weekly increments
+> would satisfy the assertion trivially. A test that can quietly become vacuous still
+> reports success, which is the worst available outcome.
+
 ### What this does and does not cost
 
 **It does not change any result.** Every number in this project was computed from the same
@@ -2003,11 +2024,9 @@ rather than something noticed later.
 
 The sequencing that follows:
 
-1. **Capture from day one.** The capability is in place as of §17 — but read the caveat in
-   §20 before trusting it. `player_status` is written by the player-reference refresh,
-   which only runs under `ingest --full`, and a cron missing that flag captures nothing
-   while appearing to work. Nothing else here is possible without it, and it cannot be
-   backfilled.
+1. **Capture from day one.** In place as of §17 and unconditional as of §20: every
+   `lockin ingest` records today's designations, with no flag that skips it. Nothing else
+   here is possible without it, and it cannot be backfilled.
 2. **Ship lock/pass, which is validated.** The digest can recommend locks from the opening
    week on Phase 3-5 evidence.
 3. **Hold start/sit until it has its own gate.** By roughly week 10 of 2026-27 there would
@@ -2245,10 +2264,16 @@ Unchanged from §15, and none of it is closable before October:
    reported success. The cron form is fixed and `docs/day-one.md` step 6 verifies the row
    count is growing rather than assuming it.
 
-   Worth deciding rather than leaving: the failure is silent and the loss is permanent, so
-   there is a case for making `ingest` always record designations instead of relying on a
-   flag being remembered. It costs a 2.5MB fetch per run. Not changed here, because
-   altering what the default ingest does is a decision rather than a fix.
+   **Decided the same day: `--full` is gone and the capture is unconditional.** The flag
+   existed to save a 2.5MB fetch on a re-ingest, and the designations rode in on the payload
+   it gated — so what it really controlled was whether to record the one thing that cannot
+   be recovered later. That is not a trade worth offering. Every ingest now fetches the
+   payload and writes the designations, and passing `--full` is a parse error rather than a
+   no-op, so a stale crontab breaks loudly instead of silently skipping a season.
+
+   The ingest also prints **days** of coverage, not just rows. Rows cannot reveal a stalled
+   capture — a feed frozen since October still reports thousands — and the day count is the
+   number that goes flat when something has gone wrong.
 2. **The polling loop.** `weekly_matchups` is append-only so that a frozen `players_points`
    can reveal an opponent's lock one game later. That needs in-season polling, which needs
    a season.

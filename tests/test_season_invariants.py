@@ -480,14 +480,47 @@ def test_embedded_player_attributes_are_a_live_snapshot_not_history(conn):
     It asserts the *broken* behaviour on purpose. If Sleeper ever starts writing
     a genuine per-game snapshot this fails, and that would be good news worth
     acting on rather than a regression.
+
+    **Partitioned by ingest date, which is the whole subtlety.** "Today's value
+    stamped at fetch time" means rows fetched on *different* days legitimately
+    disagree — re-ingesting one week in August gave a traded player his new team
+    for that week alone, while the other 24 kept the team he had at the previous
+    fetch. Comparing across batches therefore reports variance that is an
+    artefact of when each row was downloaded, and reports it as the good news
+    this test exists to detect. Incremental weekly ingest makes that the normal
+    state of the database, so uncorrected this would have fired every week of
+    2026-27 and been believed.
+
+    Within one fetch the values are still uniform, which is the real claim.
     """
     rows = conn.execute(
         "SELECT COUNT(*) c FROM ("
         "  SELECT sleeper_id FROM box_scores"
         "   WHERE pit_team IS NOT NULL AND COALESCE(is_team_row, 0) = 0"
-        "   GROUP BY sleeper_id HAVING COUNT(DISTINCT pit_team) > 1)"
+        "   GROUP BY sleeper_id, substr(ingested_at, 1, 10)"
+        "   HAVING COUNT(DISTINCT pit_team) > 1)"
     ).fetchone()["c"]
-    assert rows == 0, "pit_team varies by game — Sleeper may now publish real history"
+    assert rows == 0, "pit_team varies by game within one fetch — Sleeper may publish history"
+
+
+def test_the_snapshot_test_above_has_not_gone_vacuous(conn):
+    """Its power comes from a batch spanning many weeks. Check one still does.
+
+    Partitioning by ingest date costs something: a batch covering a single week
+    cannot exhibit per-game variance across weeks, so a database rebuilt purely
+    by weekly increments would satisfy the assertion trivially and stop testing
+    anything. A test that can quietly become vacuous is worse than no test,
+    because it still reports success.
+    """
+    widest = conn.execute(
+        "SELECT MAX(weeks) w FROM ("
+        "  SELECT COUNT(DISTINCT fantasy_week) weeks FROM box_scores"
+        "   GROUP BY substr(ingested_at, 1, 10))"
+    ).fetchone()["w"]
+    assert widest >= 5, (
+        f"widest ingest batch spans {widest} week(s); the live-snapshot test needs a"
+        " multi-week fetch to mean anything — re-run `lockin ingest` over a week range"
+    )
 
 
 def test_the_stat_rows_own_team_is_genuinely_point_in_time(conn):

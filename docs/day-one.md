@@ -115,13 +115,14 @@ do not exist yet.
 ## 4. First ingest, then the gates that still apply
 
 ```bash
-uv run lockin ingest --weeks 1 --full
+uv run lockin ingest --weeks 1
 uv run lockin reconcile
 uv run lockin verify
 ```
 
-`--full` refreshes the player reference payload and, importantly, writes the first
-`player_status` row of the season (step 6).
+This also writes the first `player_status` rows of the season (step 6). That happens on
+every ingest and cannot be skipped — it used to sit behind a `--full` flag, which is exactly
+how a season of it nearly went uncaptured.
 
 **Pass:** both gates report all gates passed. `verify` is the one that matters — it
 reproduces every nonzero counted score from box scores, so it catches a scoring-settings
@@ -183,9 +184,9 @@ for r in c.execute('SELECT as_of, COUNT(*) n FROM player_status GROUP BY as_of O
 ```
 
 **Pass:** one row per calendar day, each with a plausible count (110 designations on
-2026-08-08). A missing day is a missing day forever. Note this only accumulates when
-`ingest` runs with `--full` or on a database with no cached players — **check that the
-crontab uses `--full`**, or add a separate daily call that does.
+2026-08-08). A missing day is a missing day forever. Every ingest now captures this
+unconditionally, and prints the day count as it goes, so the check is that the number is
+**one higher than yesterday** — not merely nonzero.
 
 **Matchup poll history** (§10/§15 — what live opponent-lock inference needs):
 

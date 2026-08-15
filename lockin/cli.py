@@ -84,11 +84,16 @@ def main() -> None:
 
 @main.command()
 @click.option("--weeks", default=None, help="Week range, e.g. '1-25' or '12,13'. Default: all.")
-@click.option("--full", is_flag=True, help="Refetch the ~2.5MB player reference payload.")
 @click.option("--skip-nba", is_flag=True, help="Skip the NBA schedule ingest.")
 @click.option("--skip-tipoffs", is_flag=True, help="Skip the per-date tipoff sweep (slow).")
-def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) -> None:
-    """Refresh league state, box scores, matchups and the NBA schedule."""
+def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
+    """Refresh league state, box scores, matchups and the NBA schedule.
+
+    Also records today's injury designations, which Sleeper publishes only for
+    today and never in history. That happens on every run and cannot be turned
+    off: it is the one record here that cannot be backfilled, so it must not
+    depend on remembering a flag. See `lockin.ingest.sleeper.ingest_players`.
+    """
     cfg = Config.from_env()
     week_list = _parse_weeks(weeks)
     client = sleeper_ingest.SleeperClient()
@@ -103,14 +108,10 @@ def ingest(weeks: str | None, full: bool, skip_nba: bool, skip_tipoffs: bool) ->
         n = sleeper_ingest.ingest_rosters(conn, client, cfg.league_id)
         click.echo(f"  rosters     {n} roster-player rows")
 
-        have_players = conn.execute("SELECT COUNT(*) c FROM players").fetchone()["c"]
-        if full or not have_players:
-            n = sleeper_ingest.ingest_players(conn, client)
-            status_rows = conn.execute("SELECT COUNT(*) c FROM player_status").fetchone()["c"]
-            click.echo(f"  players     {n} (live snapshot)")
-            click.echo(f"  status      {status_rows} availability rows accumulated")
-        else:
-            click.echo(f"  players     {have_players} cached (--full to refresh)")
+        n = sleeper_ingest.ingest_players(conn, client)
+        click.echo(f"  players     {n} (live snapshot)")
+        days, status_rows = sleeper_ingest.status_coverage(conn)
+        click.echo(f"  status      {status_rows} availability rows across {days} day(s)")
 
         total_rows = total_played = snapshots_written = 0
         for week in week_list:
