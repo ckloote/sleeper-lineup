@@ -190,11 +190,24 @@ def render(run: Run | None, *, today: str | None = None) -> str:
             "</tr>"
             for i in sorted(calls, key=lambda x: -(x.edge or 0))
         )
+        # The heading carries the verdict, because it is the part that gets
+        # scanned. A section of four PASS rows under "do these now" told the
+        # reader to act when the correct action was to do nothing — passing *is*
+        # inaction, and only a LOCK has a deadline.
+        locks = [i for i in calls if i.action == "LOCK"]
+        if locks:
+            heading = f"Lock now &mdash; {night}"
+            hint = (
+                "Marked LOCK: bank before his next game tips, or the score is gone."
+                " The rest are worth riding."
+            )
+        else:
+            heading = f"Nothing to lock &mdash; {night}"
+            hint = "Every one of these is worth riding. No action needed tonight."
         parts.append(
-            f"<h2>Last night &mdash; {night}</h2>"
-            "<p class=hint>Do these now. &lsquo;Break-even&rsquo; is the score he needed to"
-            " make locking correct; &lsquo;worth&rsquo; is the win probability the call"
-            " gains.</p>"
+            f"<h2>{heading}</h2>"
+            f"<p class=hint>{hint} &lsquo;Break-even&rsquo; is the score he would have"
+            " needed for locking to be correct.</p>"
             "<table><thead><tr><th></th><th>Player</th>"
             "<th class=num>Break-even</th><th class=num>Worth</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
@@ -292,7 +305,10 @@ def render(run: Run | None, *, today: str | None = None) -> str:
           font-size:.72rem; font-weight:700; letter-spacing:.04em; }}
   .lock {{ background:var(--lockbg); color:var(--lock); }}
   .pass {{ background:var(--passbg); color:var(--pass); }}
-  .state {{ margin-top:1.8rem; padding-top:1rem; border-top:1px solid var(--line);
+  /* Above the advice, not below it: where the matchup stands is the context
+     everything else is read against, and it was doing no work at the bottom. */
+  .state {{ margin:0 0 .5rem; padding-bottom:.9rem;
+            border-bottom:1px solid var(--line);
             color:var(--mute); font-size:.85rem; }}
   .pwin {{ font-size:2.4rem; font-weight:700; color:var(--fg);
            font-variant-numeric:tabular-nums; line-height:1.1; }}
@@ -305,8 +321,8 @@ def render(run: Run | None, *, today: str | None = None) -> str:
 
 <h1>What to do &mdash; week {run.week}</h1>
 <p class="banner {tone}">{sentence}</p>
-{"".join(parts)}
 {state}
+{"".join(parts)}
 <footer>
 Read from <code>recommendations</code>, not recomputed &mdash; this is what the engine
 actually said at {html.escape(run.generated_at)}, which recomputing would not reproduce

@@ -213,8 +213,10 @@ def test_the_staleness_banner_precedes_the_advice(stored):
     """It qualifies everything below it, so it cannot come after."""
     _, run = stored
     page = advice.render(run, today=date_of(day_index(AS_OF) + 3))
-    assert page.index("banner") < page.index("Last night")
-    assert "stale" in page
+    # Keyed on the first section heading rather than its wording, which now
+    # varies with whether there is anything to lock.
+    assert page.index("banner") < page.index("<h2>")
+    assert 'class="banner stale"' in page
 
 
 def test_a_fresh_page_is_not_dressed_as_a_warning(stored):
@@ -285,3 +287,57 @@ def test_an_inferred_state_is_disclosed_on_the_page(tmp_path, source_conn):
     page = advice.render(run, today=AS_OF)
     assert "--locked" in page
     assert "least stable" in page
+
+
+# ------------------------------------------------------- the heading is a verdict
+
+
+def test_an_all_pass_night_does_not_tell_you_to_act(stored):
+    """Passing is inaction. "Do these now" over four PASS rows was an instruction
+    to do something when the correct move was to do nothing."""
+    _, run = stored
+    assert all(i.action == "PASS" for i in run.calls), "this date should be all pass"
+    page = advice.render(run, today=AS_OF)
+    assert "Nothing to lock" in page
+    assert "Lock now" not in page
+    assert "No action needed" in page
+
+
+def test_a_night_with_a_lock_says_so_in_the_heading(stored):
+    """The heading is what gets scanned, so it carries the verdict."""
+    _, run = stored
+    with_lock = replace(run, items=(replace(run.calls[0], action="LOCK"), *run.items[1:]))
+    page = advice.render(with_lock, today=AS_OF)
+    assert "Lock now" in page
+    assert "Nothing to lock" not in page
+    assert "before his next game tips" in page
+
+
+def test_the_heading_tracks_the_calls_not_the_count(stored):
+    """One lock among several passes is still a night you must act on."""
+    _, run = stored
+    only_passes = advice.render(run, today=AS_OF)
+    one_lock = advice.render(
+        replace(run, items=(replace(run.calls[-1], action="LOCK"), *run.items[:-1])),
+        today=AS_OF,
+    )
+    assert "Nothing to lock" in only_passes
+    assert "Lock now" in one_lock
+
+
+# ------------------------------------------------------------------ page order
+
+
+def test_where_the_matchup_stands_comes_before_the_advice(stored):
+    """Context is read first; it was doing no work at the bottom of the page."""
+    _, run = stored
+    page = advice.render(run, today=AS_OF)
+    assert page.index("class=state") < page.index("<h2>")
+    assert page.index("class=pwin") < page.index("Nothing to lock")
+
+
+def test_the_banner_still_outranks_everything(stored):
+    """Staleness qualifies the state block too, so it cannot slip below it."""
+    _, run = stored
+    page = advice.render(run, today=date_of(day_index(AS_OF) + 2))
+    assert page.index("banner") < page.index("class=state")
