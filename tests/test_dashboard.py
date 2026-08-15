@@ -107,6 +107,18 @@ def test_the_bands_are_drawn_on_the_column_the_table_is_sorted_by(rows):
         assert row.share_lo <= row.squandered_share <= row.share_hi
 
 
+def test_the_page_says_overlapping_bars_are_a_tie(page):
+    """Bars alone do not tell you what to conclude from them.
+
+    The instruction started life in the column header, which is what made the
+    table scroll sideways; it moved to the subtitle rather than being dropped,
+    and this pins that it is still somewhere a reader will meet it *before* the
+    table.
+    """
+    assert "overlapping bars are a tie" in page
+    assert page.index("overlapping bars are a tie") < page.index("<table")
+
+
 def test_the_bands_actually_overlap(rows):
     """§6: "the bands overlap from about rank 2 to rank 8".
 

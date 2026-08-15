@@ -94,7 +94,9 @@ def load(conn: sqlite3.Connection, labels: dict[int, str] | None = None) -> list
     return [
         Row(
             roster_id=r["roster_id"],
-            manager=labels.get(r["roster_id"], f"roster {r['roster_id']}"),
+            # Empty, not "roster N". The roster id is already rendered beneath
+            # the name; defaulting to it prints the same string twice.
+            manager=labels.get(r["roster_id"], ""),
             decisions=r["decisions"],
             squandered_share=r["squandered_share"],
             share_lo=r["share_lo"],
@@ -162,11 +164,17 @@ def render(rows: list[Row], *, stamp: str | None = None) -> str:
 
     body = []
     for rank, row in enumerate(rows, 1):
+        # Without `--names` there is no display name to show, so the roster id
+        # is promoted to the line rather than repeated under itself.
+        who = (
+            f"{html.escape(row.manager)}<span class=rid>roster {row.roster_id}</span>"
+            if row.manager
+            else f"roster {row.roster_id}"
+        )
         body.append(
             "<tr>"
             f"<td class=rank>{rank}</td>"
-            f"<td class=who>{html.escape(row.manager)}"
-            f"<span class=rid>roster {row.roster_id}</span></td>"
+            f"<td class=who>{who}</td>"
             f"<td class=num><strong>{row.squandered_share:.1%}</strong></td>"
             f"<td class=bar>{_bar(row, lo, hi)}</td>"
             f"<td class=num>{1 - row.right_rate:.1%}</td>"
@@ -201,7 +209,9 @@ def render(rows: list[Row], *, stamp: str | None = None) -> str:
     :root {{ --fg:#e8e8e8; --bg:#16181c; --mute:#9aa0a6; --line:#2c2f36;
              --band:#3f5c7d; --point:#8fc0ef; --warn:#e0b356; --warnbg:#2a2416; }}
   }}
-  body {{ margin:0 auto; padding:1.25rem; max-width:60rem; background:var(--bg);
+  /* Wide enough for eleven columns; the prose below is pulled back in
+     separately, because a 68rem line length is miserable to read. */
+  body {{ margin:0 auto; padding:1.25rem; max-width:68rem; background:var(--bg);
           color:var(--fg); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",
           Roboto,sans-serif; }}
   h1 {{ font-size:1.35rem; margin:0 0 .2rem; }}
@@ -210,21 +220,27 @@ def render(rows: list[Row], *, stamp: str | None = None) -> str:
              padding:.7rem .9rem; margin:0 0 1.2rem; font-size:.92rem; }}
   .scroll {{ overflow-x:auto; }}
   table {{ border-collapse:collapse; width:100%; font-size:.9rem; }}
-  th, td {{ padding:.45rem .5rem; border-bottom:1px solid var(--line);
+  th, td {{ padding:.45rem .4rem; border-bottom:1px solid var(--line);
             text-align:left; white-space:nowrap; }}
-  th {{ font-weight:600; font-size:.78rem; text-transform:uppercase;
-        letter-spacing:.04em; color:var(--mute); }}
+  /* Headers wrap, cells do not. A header is prose and can take two lines; a
+     number that wraps is unreadable. Sharing one nowrap rule made the widest
+     *label* set the column width, which is what forced the whole table to
+     scroll sideways. */
+  th {{ font-weight:600; font-size:.75rem; text-transform:uppercase;
+        letter-spacing:.03em; color:var(--mute); white-space:normal;
+        vertical-align:bottom; }}
   td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
   td.rank {{ color:var(--mute); }}
   .who {{ font-weight:600; }}
   .rid {{ display:block; font-weight:400; font-size:.75rem; color:var(--mute); }}
-  td.bar {{ width:34%; min-width:11rem; }}
+  td.bar, th.bar {{ width:30%; min-width:9rem; }}
   .track {{ position:relative; height:1.1rem; }}
   .band {{ position:absolute; top:.32rem; height:.46rem; border-radius:3px;
            background:var(--band); }}
   .point {{ position:absolute; top:.2rem; width:2px; height:.7rem;
             background:var(--point); }}
   .muted {{ color:var(--mute); }}
+  .sub, .notes {{ max-width:44rem; }}
   .notes {{ margin-top:1.4rem; font-size:.88rem; color:var(--mute); }}
   .notes li {{ margin-bottom:.5rem; }}
   .stamp {{ font-size:.8rem; color:var(--mute); }}
@@ -233,7 +249,8 @@ def render(rows: list[Row], *, stamp: str | None = None) -> str:
 
 <h1>Who decided well</h1>
 <p class=sub>Lock/pass decision quality, 2025-26, with roster talent divided out.
-Lower is better.</p>
+Lower is better &mdash; but read the bars, not the ranks:
+<strong>overlapping bars are a tie</strong>.</p>
 
 <p class=caveat>{CAVEAT}</p>
 
@@ -241,8 +258,8 @@ Lower is better.</p>
 <table>
   <thead><tr>
     <th class=num>#</th><th>Manager</th>
-    <th class=num>Squandered</th>
-    <th>90% band &mdash; overlapping bars are a tie</th>
+    <th class=num>Squan&shy;dered</th>
+    <th class=bar>90% band</th>
     <th class=num>Wrong</th><th class=num>Stake</th><th class=num>n</th>
     <th class=num>Pts cap</th><th class=num>Zeros</th>
     <th class=num>Ceiling</th><th class=num>Lineup cost</th>
