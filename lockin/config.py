@@ -21,6 +21,10 @@ DEFAULT_LEAGUE_ID = "1283214955830575104"
 DEFAULT_SEASON = "2025"
 DEFAULT_USER_ID = "1283460931447164928"
 
+# The timezone NBA game dates are filed under, which is not the same question
+# as where the server is. See lockin/clock.py.
+DEFAULT_TZ = "America/New_York"
+
 # Weeks 1-21 are regular season, 22-24 playoffs, 25 exists in the stats feed but
 # is unscored by the league (`last_scored_leg: 24`).
 REGULAR_SEASON_WEEKS = range(1, 22)
@@ -34,6 +38,7 @@ class Config:
     season: str
     user_id: str
     db_path: Path
+    timezone: str
     snapshot_root: Path
     """Raw matchup payloads, kept OUTSIDE the database.
 
@@ -50,6 +55,7 @@ class Config:
             league_id=os.environ.get("LOCKIN_LEAGUE_ID", DEFAULT_LEAGUE_ID),
             season=os.environ.get("LOCKIN_SEASON", DEFAULT_SEASON),
             user_id=os.environ.get("LOCKIN_USER_ID", DEFAULT_USER_ID),
+            timezone=os.environ.get("LOCKIN_TZ", DEFAULT_TZ),
             db_path=Path(db).expanduser(),
             snapshot_root=Path(snaps).expanduser(),
         )

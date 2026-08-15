@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
 from pathlib import Path
 
 import click
@@ -35,6 +34,7 @@ import numpy as np
 from lockin import advice as advice_mod
 from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
+from lockin import clock
 from lockin import dashboard as dashboard_mod
 from lockin import digest as digest_mod
 from lockin import locks as locks_mod
@@ -48,6 +48,7 @@ from lockin.config import ALL_STAT_WEEKS, Config
 from lockin.core import projections as core_projections
 from lockin.ingest import nba as nba_ingest
 from lockin.ingest import sleeper as sleeper_ingest
+from lockin.store import db
 from lockin.store.db import session
 
 
@@ -142,6 +143,9 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
             snapshots_written += 1 if snap else 0
             marker = "  *snapshot changed*" if snap else ""
             click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played){marker}")
+            # Release the write lock between weeks. Holding it for the whole run
+            # is what would make a digest firing mid-ingest fail outright.
+            db.checkpoint(conn)
         click.echo(f"  box scores  {total_rows} rows, {total_played} played")
         click.echo(
             f"  snapshots   {snapshots_written} new/changed of {len(week_list)} weeks"
@@ -543,7 +547,7 @@ def digest(
     removes that noise instead of averaging over it.
     """
     cfg = Config.from_env()
-    as_of = as_of or date.today().isoformat()
+    as_of = as_of or clock.today_iso(cfg.timezone)
     banked = _parse_locked(locked)
 
     with session(cfg.db_path) as conn:
@@ -806,7 +810,7 @@ def explain(
     value, or the explanation would describe a different state from the digest.
     """
     cfg = Config.from_env()
-    as_of = as_of or date.today().isoformat()
+    as_of = as_of or clock.today_iso(cfg.timezone)
     banked = _parse_locked(locked)
 
     with session(cfg.db_path) as conn:

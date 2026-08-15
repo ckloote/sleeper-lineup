@@ -2410,6 +2410,48 @@ projections raised `TypeError` and turned into a 500. `persist` never writes tha
 but "the writer never produces it" is not a property a page served over HTTP should depend
 on, and each line now guards its own field.
 
+### Three things found by asking what deployment would need
+
+Asked, before starting Pi work, what else was worth considering. Measuring rather than
+guessing found that the expected risk was not one and three unexpected ones were.
+
+**Performance is a non-issue.** The digest is 0.54s and 61MB peak on a laptop; several
+times slower on a Pi is still seconds. Readers never block either: WAL lets `serve` render
+while an ingest is mid-write, which was checked rather than assumed.
+
+**1. "Today" had three different answers.** The CLI used `date.today()` (the machine's),
+`advice` used `datetime.now(UTC).date()`. On a US Eastern host those disagree every evening
+after 7pm, so a digest generated that morning was labelled a day old — in red, telling you
+to re-run something that had already run — the moment the page was opened after dinner.
+
+The right basis is neither: **945 of the season's 1231 games (77%) tip on a different UTC
+date than the one they are filed under**, because they start 23:00-04:00 UTC. Game dates
+are US Eastern. `lockin/clock.py` now owns the question, `LOCKIN_TZ` names the *schedule's*
+timezone rather than the operator's, and a host with a wrong clock can no longer shift a
+digest by a day.
+
+A timing rule falls out and is stated in code as `too_early_for`: the digest treats games
+dated `today - 1` as complete, the last of them finish around 06:30 UTC, so it must not run
+before ~07:00 UTC. At 9am US Eastern there is seven hours of headroom. East of UTC+2 there
+would not be.
+
+**2. A digest firing mid-ingest failed outright.** Measured: `database is locked` after
+exactly 5.0 seconds, sqlite3's default. `session` holds one transaction for a whole
+multi-week ingest, so the window is minutes of network-bound work. Two fixes, because
+either alone is insufficient — a 60-second `busy_timeout` on the connection, and
+`db.checkpoint` between weeks so the lock is held for seconds rather than the whole run.
+Re-measured after: a writer holding for 8 seconds is now waited out rather than fatal.
+
+**3. A failed ingest was invisible to the digest.** If the 6:30 ingest dies, the 9:00
+digest still runs, still finds box scores and still makes confident calls — on yesterday's
+data minus yesterday. Nothing on the page would look wrong. `digest_runs.last_ingest_at`
+now records how fresh the data was, and `advice` renders a warning beside the staleness
+banner: same question asked of the other input.
+
+The two warnings look alike and are marked apart in the markup (`data-warning="age"` versus
+`"ingest"`), because a test that cannot tell them apart is a test that passes for the wrong
+reason — a mistake made twice already in this phase.
+
 ### What is still live-only, and therefore still unverified
 
 Unchanged from §15, and none of it is closable before October:

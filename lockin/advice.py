@@ -31,8 +31,9 @@ from __future__ import annotations
 import html
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
+from lockin import clock
 from lockin.projections import date_of, day_index
 
 
@@ -74,6 +75,7 @@ class Run:
     banked_total: float | None
     banked_slots: int | None
     state_supplied: bool
+    last_ingest_at: str | None
     note: str | None
     items: tuple[Item, ...] = ()
     availability_days: int = 0
@@ -95,9 +97,14 @@ class Run:
 
         Measured against `as_of` rather than `generated_at`: what matters is
         whether the advice is about today, not when the process happened to run.
+
+        "Today" comes from :mod:`lockin.clock`, in the schedule's timezone. It
+        used to come from `datetime.now(UTC)`, which on an Eastern machine rolls
+        over at 7pm — so a digest generated that morning was labelled a day old
+        the moment you opened the page after dinner, in red, telling you to
+        re-run something that had already run.
         """
-        now = today or datetime.now(UTC).date().isoformat()
-        return day_index(now) - day_index(self.as_of)
+        return day_index(today or clock.today_iso()) - day_index(self.as_of)
 
 
 def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
@@ -154,6 +161,7 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         banked_total=row["banked_total"],
         banked_slots=row["banked_slots"],
         state_supplied=bool(row["state_supplied"]),
+        last_ingest_at=row["last_ingest_at"],
         note=row["note"],
         items=tuple(items),
         **availability_coverage(conn, row["as_of"]),
@@ -237,6 +245,39 @@ def modelling_prompt(run: Run) -> tuple[str, str] | None:
     )
 
 
+INGEST_STALE_HOURS = 30
+"""How old the ingest may be before the digest is reading yesterday's games.
+
+A daily cron gives roughly 24 hours between runs; 30 allows a late or slow one
+without crying wolf, while still catching a run that simply did not happen.
+"""
+
+
+def ingest_warning(run: Run) -> str | None:
+    """Whether the digest was built on data the ingest failed to refresh.
+
+    The failure this catches is quiet by construction: if the 6:30 ingest dies,
+    the 9:00 digest still runs, still finds box scores, and still produces
+    confident calls — on last night's data minus last night. Nothing else on this
+    page would look wrong.
+    """
+    if run.last_ingest_at is None:
+        return "No ingest has been recorded, so these calls may rest on stale box scores."
+    try:
+        ingested = datetime.fromisoformat(run.last_ingest_at)
+        generated = datetime.fromisoformat(run.generated_at)
+    except ValueError:
+        return None
+    hours = (generated - ingested).total_seconds() / 3600
+    if hours < INGEST_STALE_HOURS:
+        return None
+    return (
+        f"The last successful ingest was {hours:.0f} hours before this digest."
+        " Last night's games may not be in the data &mdash; check the ingest cron"
+        " before acting on anything here."
+    )
+
+
 def _freshness(run: Run, today: str | None = None) -> tuple[str, str]:
     """(css class, sentence). The most important thing on the page."""
     age = run.age_days(today)
@@ -256,6 +297,13 @@ def render(run: Run | None, *, today: str | None = None) -> str:
 
     tone, sentence = _freshness(run, today)
     parts: list[str] = []
+
+    # Directly under the staleness banner, because it is the same question asked
+    # of the other input: that one says the advice is old, this says the data
+    # under it is. Either makes the numbers below untrustworthy.
+    stale_data = ingest_warning(run)
+    if stale_data is not None:
+        parts.append(f'<p class="banner stale" data-warning="ingest">{stale_data}</p>')
 
     if run.note:
         parts.append(f"<p class=note>{html.escape(run.note)}</p>")
@@ -417,7 +465,7 @@ def render(run: Run | None, *, today: str | None = None) -> str:
 </style>
 
 <h1>What to do &mdash; week {run.week}</h1>
-<p class="banner {tone}">{sentence}</p>
+<p class="banner {tone}" data-warning="age">{sentence}</p>
 {state}
 {"".join(parts)}
 {prompt}

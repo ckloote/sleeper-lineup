@@ -744,6 +744,20 @@ def render(digest: Digest, *, compact: bool = False) -> str:
 # ------------------------------------------------------------------- persistence
 
 
+def last_ingest_at(conn: sqlite3.Connection) -> str | None:
+    """When the ingest last finished, from its own log.
+
+    Recorded with every digest because a digest running on data a failed cron
+    never refreshed is indistinguishable from a healthy one: it reads yesterday's
+    box scores, makes confident calls and says nothing. This is the only signal
+    that separates the two, and it costs one query.
+    """
+    row = conn.execute(
+        "SELECT MAX(finished_at) f FROM ingest_log WHERE source = 'sleeper'"
+    ).fetchone()
+    return row["f"] if row else None
+
+
 def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = False) -> int:
     """Write the digest to `recommendations` and `digest_runs`.
 
@@ -766,8 +780,8 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
         INSERT OR REPLACE INTO digest_runs
             (generated_at, roster_id, as_of, week, opponent_roster_id, p_win,
              projected, opponent_projected, margin_p10, margin_p50, margin_p90,
-             banked_total, banked_slots, state_supplied, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             banked_total, banked_slots, state_supplied, last_ingest_at, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -784,6 +798,7 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             sum(digest.banked.values()),
             len(digest.banked),
             int(state_supplied),
+            last_ingest_at(conn),
             digest.note,
         ),
     )

@@ -24,7 +24,7 @@ from lockin import advice
 from lockin import digest as digest_mod
 from lockin.config import Config
 from lockin.projections import date_of, day_index
-from lockin.store.db import apply_schema, session
+from lockin.store.db import apply_schema, now_iso, session
 
 cfg = Config.from_env()
 pytestmark = pytest.mark.skipif(
@@ -70,6 +70,14 @@ def seed_players(conn, report):
 def stored(tmp_path, report):
     """Persist into a scratch database and read it back. The round trip."""
     with session(tmp_path / "advice.db") as conn:
+        # Log an ingest that just finished. `persist` stamps `generated_at` with
+        # the real clock, so a fixture dating the ingest to the replayed January
+        # would look like a cron four thousand hours dead.
+        conn.execute(
+            "INSERT INTO ingest_log (source, target, rows, started_at, finished_at)"
+            " VALUES ('sleeper', 'stats', 1, ?, ?)",
+            (now_iso(), now_iso()),
+        )
         digest_mod.persist(conn, report, state_supplied=True)
         seed_players(conn, report)
         yield conn, advice.latest_run(conn, report.roster_id)
@@ -216,15 +224,16 @@ def test_the_staleness_banner_precedes_the_advice(stored):
     # Keyed on the first section heading rather than its wording, which now
     # varies with whether there is anything to lock.
     assert page.index("banner") < page.index("<h2>")
-    assert 'class="banner stale"' in page
+    assert 'class="banner stale" data-warning="age"' in page
 
 
 def test_a_fresh_page_is_not_dressed_as_a_warning(stored):
     _, run = stored
     page = advice.render(run, today=AS_OF)
     assert 'class="banner fresh"' in page
-    # The CSS defines both palettes; what must not appear is the stale *class*.
-    assert 'class="banner stale"' not in page
+    # Two warnings share the look, so target the one this test is about.
+    assert 'data-warning="age"' in page
+    assert 'class="banner stale" data-warning="age"' not in page
 
 
 # ------------------------------------------------------------------ rendering
@@ -434,3 +443,55 @@ def test_availability_coverage_ignores_the_future(tmp_path):
         record_player_status(conn, {"1": {"injury_status": "Out"}}, "2026-03-01")
         got = advice.availability_coverage(conn, "2026-01-08")
     assert got == {"availability_days": 0, "recent_availability_days": 0}
+
+
+# --------------------------------------------------- the data under the advice
+
+
+def test_a_failed_ingest_is_reported_on_the_page(tmp_path, report):
+    """The quiet failure: a dead ingest cron leaves the digest looking healthy.
+
+    It still runs, still finds box scores, still makes confident calls — on
+    yesterday's data minus yesterday. Nothing else on the page would look wrong.
+    """
+    with session(tmp_path / "stale.db") as conn:
+        stale = date_of(day_index(now_iso()[:10]) - 4) + "T11:30:00+00:00"
+        conn.execute(
+            "INSERT INTO ingest_log (source, target, rows, started_at, finished_at)"
+            " VALUES ('sleeper', 'stats', 1, ?, ?)",
+            (stale, stale),  # four days before this digest
+        )
+        digest_mod.persist(conn, report, state_supplied=True)
+        run = advice.latest_run(conn, report.roster_id)
+
+    warning = advice.ingest_warning(run)
+    assert warning is not None
+    assert "check the ingest cron" in warning
+    page = advice.render(run, today=AS_OF)
+    assert 'data-warning="ingest"' in page
+
+
+def test_a_recent_ingest_says_nothing(stored):
+    _, run = stored
+    assert advice.ingest_warning(run) is None
+    assert 'data-warning="ingest"' not in advice.render(run, today=AS_OF)
+
+
+def test_no_ingest_at_all_is_reported_rather_than_assumed_fine(tmp_path, report):
+    with session(tmp_path / "none.db") as conn:
+        digest_mod.persist(conn, report, state_supplied=True)
+        run = advice.latest_run(conn, report.roster_id)
+    assert "No ingest has been recorded" in advice.ingest_warning(run)
+
+
+def test_a_late_cron_is_not_treated_as_a_failure(tmp_path, report):
+    """Runs drift. 30 hours allows a slow night without crying wolf."""
+    from dataclasses import replace as dc_replace
+
+    with session(tmp_path / "late.db") as conn:
+        digest_mod.persist(conn, report, state_supplied=True)
+        run = advice.latest_run(conn, report.roster_id)
+
+    generated = run.generated_at
+    fresh = dc_replace(run, last_ingest_at=generated)
+    assert advice.ingest_warning(fresh) is None

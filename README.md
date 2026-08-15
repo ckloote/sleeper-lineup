@@ -637,6 +637,7 @@ Environment variables, all optional:
 | `LOCKIN_LEAGUE_ID` | `1283214955830575104` | The 2025-26 league |
 | `LOCKIN_SEASON` | `2025` | Sleeper labels 2025-26 as `2025` |
 | `LOCKIN_USER_ID` | `1283460931447164928` | Resolves to roster 4 |
+| `LOCKIN_TZ` | `America/New_York` | The timezone NBA game dates are filed under &mdash; not where you are |
 | `LOCKIN_NTFY_TOPIC` | *unset* | Enables `digest --notify`. **The topic name is the secret** |
 | `LOCKIN_NTFY_SERVER` | `https://ntfy.sh` | Point at a self-hosted instance if you have one |
 
@@ -649,6 +650,9 @@ unauthenticated by default, so anyone who knows or guesses the topic can read yo
 pick something long and unguessable, and keep it out of the repo.
 
 ### Running it daily
+
+The full Pi runbook, with the checks that matter, is in
+[docs/deployment.md](docs/deployment.md).
 
 `uv run` resolves the environment itself, which avoids the classic cron failure where an
 unactivated venv silently falls back to system Python. Use absolute paths:

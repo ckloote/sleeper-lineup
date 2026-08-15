@@ -429,6 +429,10 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     banked_total        REAL,
     banked_slots        INTEGER,
     state_supplied      INTEGER,         -- 1 if --locked was given, 0 if inferred
+    -- When ingest last finished, as of this digest. A digest running on data a
+    -- failed cron never refreshed looks identical to a healthy one otherwise:
+    -- it reads yesterday's box scores, makes confident calls, and says nothing.
+    last_ingest_at      TEXT,
     note                TEXT,
     PRIMARY KEY (generated_at, roster_id)
 );

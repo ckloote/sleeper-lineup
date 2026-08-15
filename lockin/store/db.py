@@ -42,6 +42,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
+    # Wait for a busy writer rather than failing at sqlite3's 5-second default.
+    # Measured: with the ingest mid-transaction, a concurrent digest raised
+    # "database is locked" after exactly 5.0s — which on a Pi means no digest
+    # that morning and a mailed traceback. Readers are unaffected either way;
+    # WAL never blocks them. See also `checkpoint`, which keeps the ingest from
+    # holding the lock for minutes in the first place.
+    conn.execute("PRAGMA busy_timeout = 60000")
     return conn
 
 
@@ -69,6 +76,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     # Without it, two rosters digested on the same day interleave into one
     # undistinguishable list. Nullable, so the rows written before it survive.
     "recommendations": {"roster_id": "INTEGER"},
+    "digest_runs": {"last_ingest_at": "TEXT"},
 }
 
 
@@ -128,6 +136,25 @@ def session(db_path: Path) -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+def checkpoint(conn: sqlite3.Connection) -> None:
+    """Commit what is done and start a fresh transaction.
+
+    `session` wraps its whole body in one transaction, which for a 25-week
+    ingest means holding the write lock for minutes while the network is slow.
+    Anything else wanting to write during that window waits, and a `busy_timeout`
+    only helps if the wait is shorter than the timeout.
+
+    Calling this between units of work keeps the lock held for seconds instead.
+    It is safe precisely because ingest is idempotent — every write is INSERT OR
+    REPLACE and re-running fills any gap — so a partial commit is a re-runnable
+    state rather than a corrupt one, and `lockin reconcile` is what says whether
+    the result is complete.
+    """
+    if conn.in_transaction:
+        conn.execute("COMMIT")
+    conn.execute("BEGIN")
 
 
 def log_ingest(
