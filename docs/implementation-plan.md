@@ -2036,6 +2036,65 @@ The sequencing that follows:
 Shipping start/sit advice in week 1 on the strength of a backtest that could not have
 tested it would be exactly the failure this project has spent five phases avoiding.
 
+### What is actually built for this, and what is not — audited 2026-08-15
+
+Asked whether step 3 will simply start working once the data exists. It will not. Only the
+prerequisite is built, and the prerequisite is the *only* part that had to be.
+
+| | state |
+|---|---|
+| Daily capture into `player_status` | **built** — unconditional since §20, tested |
+| `assign_slots`, exact best-legal-six | **built** — `lockin/core/eligibility.py` |
+| Anything that *reads* `player_status` | **nothing does** |
+| Point-in-time lineup metric | removed when §16 showed it failing |
+| A gate for start/sit | described here, not implemented |
+| `START` / `SIT` in the digest | deliberately absent |
+
+The third row is the one that matters. Every mention of `player_status` in the codebase is
+a comment saying it is empty. The DNP hazard's features are schedule, rest days, 7-day
+load, trailing-DNP run and season stage — **there is no injury-designation feature**.
+Capturing the data does not make the model use it.
+
+**And it is not a bolt-on.** `starter_dnp_scale` is a *proxy* for exactly this signal — a
+blunt correction that scales the hazard down for started players, because a lineup slot is
+evidence a manager read something the model could not (§15). Real availability data should
+retire that proxy, which moves the **lock/pass** thresholds, not just lineup advice. So
+this touches the validated core: Phase 3's calibration must be re-checked and Phases 4-5's
+gates re-closed. Budget accordingly, and expect it to be genuinely uncertain — the honest
+possibility is that the designations do not help enough.
+
+The sequence, once there is data:
+
+1. Add designation as a hazard feature; refit; check §13's PIT deciles still hold. **If
+   they do not, stop** — the model got worse and nothing downstream is safe.
+2. Rebuild the point-in-time lineup metric: value every rostered player at the start of the
+   week, `assign_slots` the best six, charge the difference.
+3. **The gate is that it now beats the managers**, where §16 measured it losing by 20.4
+   points a week across nine of ten teams. Not "looks plausible" — beats them.
+4. Re-run the Phase 4-5 gates, because the thresholds moved.
+5. Only then emit `START` / `SIT`.
+
+Steps 1-4 are the work. Step 5 is trivial by comparison, which is worth remembering when it
+is tempting to do step 5 first.
+
+### The reminder lives on the page, and reports readiness rather than the date
+
+Because none of the above will happen unless something says so. `lockin advice` shows a
+callout from **week 10** (`advice.REVISIT_WEEK`), and it deliberately checks the data
+rather than the calendar:
+
+- **Capture healthy** — at least 20 of the last 30 days carry designations — it invites the
+  work, quoting how many days have accumulated.
+- **Capture stalled** — fewer than that — it says so instead, and says nothing about
+  modelling. Week 10 with no data is not "time to build the model", it is "your
+  irreplaceable data stopped arriving", and that is the more urgent message. An invitation
+  to build something that cannot be gated would bury it.
+
+Twenty of thirty rather than thirty, because cron misses mornings and a prompt that cried
+failure over one would be ignored by the time it mattered. It appears every day from week
+10 onward, which is intended: there is no dismiss button, because a reminder you can wave
+away is one you will wave away. Silence it by doing the work or by raising `REVISIT_WEEK`.
+
 
 ---
 

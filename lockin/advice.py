@@ -76,6 +76,11 @@ class Run:
     state_supplied: bool
     note: str | None
     items: tuple[Item, ...] = ()
+    availability_days: int = 0
+    """Distinct days of `player_status` on or before this morning."""
+    recent_availability_days: int = 0
+    """The same, within the last 30 days — the number that says whether the
+    capture is still *running*, as opposed to having run once in October."""
 
     @property
     def calls(self) -> list[Item]:
@@ -151,6 +156,84 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         state_supplied=bool(row["state_supplied"]),
         note=row["note"],
         items=tuple(items),
+        **availability_coverage(conn, row["as_of"]),
+    )
+
+
+def availability_coverage(conn: sqlite3.Connection, as_of: str) -> dict[str, int]:
+    """How much injury-designation history exists as of this morning.
+
+    Two numbers because they answer different questions. The total says whether
+    there is enough history to attempt §19's start/sit gate; the recent count
+    says whether the capture is still running at all. A capture that stopped in
+    November still reports a healthy total forever, which is exactly the failure
+    that made `ingest` drop its `--full` flag.
+    """
+    window = date_of(day_index(as_of) - 30)
+    row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT as_of) total,
+               COUNT(DISTINCT CASE WHEN as_of > ? THEN as_of END) recent
+          FROM player_status
+         WHERE as_of <= ?
+        """,
+        (window, as_of),
+    ).fetchone()
+    return {
+        "availability_days": int(row["total"]),
+        "recent_availability_days": int(row["recent"]),
+    }
+
+
+REVISIT_WEEK = 10
+"""When to start prompting for the start/sit modelling work (§19).
+
+Not a deadline, an earliest-useful point: ten weeks is roughly 100 roster-weeks
+of lineup decisions across the league, which is the sample §19 argues is needed
+to build a gate rather than to ship on faith.
+"""
+
+CAPTURE_HEALTHY = 20
+"""Days of designation capture in the last 30 that count as "still running".
+
+Not 30. Cron misses days — a reboot, a Sleeper outage, a laptop asleep — and a
+prompt that cried failure over one missed morning would be ignored by the time
+it mattered.
+"""
+
+
+def modelling_prompt(run: Run) -> tuple[str, str] | None:
+    """(css class, message) reminding you the start/sit question is reopenable.
+
+    Deliberately reports *readiness* rather than counting weeks. Week 10 with a
+    stalled capture is not "time to build the model", it is "your irreplaceable
+    data stopped arriving" — the more urgent message, and the one a bare
+    week-number reminder would bury under an invitation to do modelling that
+    cannot be gated.
+
+    This will show every day from week 10 onward, which is intended and will
+    eventually be irritating. Silencing it means doing the work or raising
+    `REVISIT_WEEK`; there is no dismiss button, because a reminder you can wave
+    away is one you will wave away.
+    """
+    if run.week < REVISIT_WEEK:
+        return None
+    if run.recent_availability_days < CAPTURE_HEALTHY:
+        return (
+            "alarm",
+            f"Only {run.recent_availability_days} of the last 30 days have injury"
+            f" designations. <strong>The capture has stopped</strong> &mdash; check the"
+            f" ingest cron. It cannot be backfilled, and start/sit can never be"
+            f" gated without it (&sect;19).",
+        )
+    return (
+        "prompt",
+        f"Week {run.week}, and {run.availability_days} days of availability data have"
+        f" accumulated. That is enough to attempt the start/sit gate &mdash; value every"
+        f" rostered player point-in-time, pick the best legal six, and check whether it"
+        f" now beats the managers it lost to by 20.4 points a week (&sect;19). Nothing"
+        f" reads <code>player_status</code> yet, so this is real work, and it moves the"
+        f" lock thresholds too.",
     )
 
 
@@ -260,6 +343,14 @@ def render(run: Run | None, *, today: str | None = None) -> str:
             f"{projected}{margin}{banked}</div>"
         )
 
+    prompt = ""
+    if (found := modelling_prompt(run)) is not None:
+        tone_class, message = found
+        # Above the footer, below the advice. It is a standing invitation, not
+        # something with a deadline, and putting it near the staleness banner
+        # would make the two compete on a morning when only one of them expires.
+        prompt = f'<p class="callout {tone_class}">{message}</p>'
+
     provenance = (
         "State was supplied on the command line."
         if run.state_supplied
@@ -275,12 +366,14 @@ def render(run: Run | None, *, today: str | None = None) -> str:
   :root {{ color-scheme: light dark; --fg:#111; --bg:#fff; --mute:#666;
            --line:#e3e3e3; --lock:#0b6b3a; --lockbg:#e6f4ec; --pass:#5a5a5a;
            --passbg:#eee; --freshbg:#e6f4ec; --freshfg:#0b6b3a;
-           --stalebg:#fdecea; --stalefg:#a8261c; }}
+           --stalebg:#fdecea; --stalefg:#a8261c;
+           --promptbg:#eef2fb; --promptfg:#28456e; }}
   @media (prefers-color-scheme: dark) {{
     :root {{ --fg:#e8e8e8; --bg:#16181c; --mute:#9aa0a6; --line:#2c2f36;
              --lock:#6fd39b; --lockbg:#12331f; --pass:#b0b4b8; --passbg:#24272c;
              --freshbg:#12331f; --freshfg:#6fd39b;
-             --stalebg:#3a1b18; --stalefg:#ff9a90; }}
+             --stalebg:#3a1b18; --stalefg:#ff9a90;
+             --promptbg:#1b2432; --promptfg:#a8c4ec; }}
   }}
   body {{ margin:0 auto; padding:1rem; max-width:34rem; background:var(--bg);
           color:var(--fg); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",
@@ -315,6 +408,10 @@ def render(run: Run | None, *, today: str | None = None) -> str:
   .pwinlabel {{ margin-bottom:.5rem; }}
   .margin {{ font-variant-numeric:tabular-nums; }}
   .note {{ color:var(--mute); }}
+  .callout {{ margin:2rem 0 0; padding:.75rem .9rem; border-radius:8px;
+              font-size:.85rem; line-height:1.45; }}
+  .callout.prompt {{ background:var(--promptbg); color:var(--promptfg); }}
+  .callout.alarm {{ background:var(--stalebg); color:var(--stalefg); }}
   footer {{ margin-top:1.6rem; color:var(--mute); font-size:.75rem; }}
   code {{ font-size:.85em; }}
 </style>
@@ -323,6 +420,7 @@ def render(run: Run | None, *, today: str | None = None) -> str:
 <p class="banner {tone}">{sentence}</p>
 {state}
 {"".join(parts)}
+{prompt}
 <footer>
 Read from <code>recommendations</code>, not recomputed &mdash; this is what the engine
 actually said at {html.escape(run.generated_at)}, which recomputing would not reproduce

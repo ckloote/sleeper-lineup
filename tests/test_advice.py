@@ -341,3 +341,96 @@ def test_the_banner_still_outranks_everything(stored):
     _, run = stored
     page = advice.render(run, today=date_of(day_index(AS_OF) + 2))
     assert page.index("banner") < page.index("class=state")
+
+
+# ------------------------------------------------- the week-10 modelling prompt
+
+
+def _at(run, *, week, recent, total=70):
+    return replace(run, week=week, recent_availability_days=recent, availability_days=total)
+
+
+def test_nothing_is_said_before_the_revisit_week(stored):
+    """Ten weeks is when ~100 roster-weeks of lineup decisions exist (§19).
+
+    Earlier than that there is nothing to do about it, and a prompt you cannot
+    act on is one you learn to skip.
+    """
+    _, run = stored
+    for week in range(1, advice.REVISIT_WEEK):
+        assert advice.modelling_prompt(_at(run, week=week, recent=28)) is None
+
+
+def test_from_the_revisit_week_it_prompts_for_the_start_sit_gate(stored):
+    _, run = stored
+    tone, message = advice.modelling_prompt(_at(run, week=advice.REVISIT_WEEK, recent=28))
+    assert tone == "prompt"
+    assert "start/sit gate" in message
+    assert "20.4 points a week" in message
+    # It must say this is work, not a switch to flip.
+    assert "player_status" in message
+    assert "moves the lock thresholds" in message
+
+
+def test_a_stalled_capture_outranks_the_invitation(stored):
+    """Week 10 with no data is not "time to model", it is "your data stopped".
+
+    Reporting readiness rather than counting weeks is the whole reason this
+    reads `player_status` instead of the calendar: an invitation to build a
+    model that cannot be gated would bury the more urgent message.
+    """
+    _, run = stored
+    tone, message = advice.modelling_prompt(_at(run, week=12, recent=3))
+    assert tone == "alarm"
+    assert "capture has stopped" in message
+    assert "cannot be backfilled" in message
+    assert "start/sit gate" not in message
+
+
+def test_a_few_missed_days_are_not_treated_as_failure(stored):
+    """Cron misses mornings. Crying failure over one would train you to ignore it."""
+    _, run = stored
+    tone, _ = advice.modelling_prompt(_at(run, week=12, recent=advice.CAPTURE_HEALTHY))
+    assert tone == "prompt"
+    tone, _ = advice.modelling_prompt(_at(run, week=12, recent=advice.CAPTURE_HEALTHY - 1))
+    assert tone == "alarm"
+
+
+def test_the_prompt_reaches_the_page_and_sits_below_the_advice(stored):
+    _, run = stored
+    page = advice.render(_at(run, week=advice.REVISIT_WEEK, recent=28), today=AS_OF)
+    assert 'class="callout prompt"' in page
+    # Matched on the element, not the bare word: `.callout` is also a CSS rule
+    # in the <style> block, which precedes everything and would make any
+    # ordering assertion pass for the wrong reason.
+    element = page.index('<p class="callout')
+    assert page.index("<h2>") < element < page.index("<footer>")
+
+
+def test_no_callout_appears_when_there_is_nothing_to_say(stored):
+    _, run = stored
+    page = advice.render(_at(run, week=3, recent=28), today=AS_OF)
+    assert '<p class="callout' not in page
+
+
+def test_availability_coverage_counts_days_not_rows(tmp_path):
+    """One day with 110 designations is one day of history, not 110."""
+    from lockin.ingest.sleeper import record_player_status
+
+    payload = {str(i): {"injury_status": "DTD"} for i in range(50)}
+    with session(tmp_path / "cov.db") as conn:
+        record_player_status(conn, payload, "2026-11-01")
+        record_player_status(conn, payload, "2026-11-02")
+        record_player_status(conn, payload, "2026-09-01")  # outside the 30-day window
+        got = advice.availability_coverage(conn, "2026-11-03")
+    assert got == {"availability_days": 3, "recent_availability_days": 2}
+
+
+def test_availability_coverage_ignores_the_future(tmp_path):
+    """A digest for January must not be told about designations captured in March."""
+    from lockin.ingest.sleeper import record_player_status
+
+    with session(tmp_path / "cov.db") as conn:
+        record_player_status(conn, {"1": {"injury_status": "Out"}}, "2026-03-01")
+        got = advice.availability_coverage(conn, "2026-01-08")
+    assert got == {"availability_days": 0, "recent_availability_days": 0}
