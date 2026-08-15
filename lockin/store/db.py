@@ -40,7 +40,12 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "locked_early": "INTEGER",
         "counted_points": "REAL",
     },
-    "manager_scorecards": {"squandered_share": "REAL", "mean_stake": "REAL"},
+    "manager_scorecards": {
+        "squandered_share": "REAL",
+        "mean_stake": "REAL",
+        "share_lo": "REAL",
+        "share_hi": "REAL",
+    },
     "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
 }
 
@@ -55,9 +60,32 @@ def _apply_added_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
+def _rebuild_recommendations(conn: sqlite3.Connection) -> None:
+    """Widen `recommendations`' primary key, which ALTER TABLE cannot do.
+
+    Phase 6 found the placeholder key `(generated_at, week, sleeper_id)` too
+    narrow: one digest legitimately writes several rows for one player — a call
+    on last night's game and a standing rule for each of the next few nights —
+    and under the old key those silently overwrote each other.
+
+    Guarded on the table being **empty**. A dropped table is not recoverable, and
+    this table is the only record of what was advised on a given day (§12), so it
+    is rebuilt only in the case where nothing can be lost. A populated old-shape
+    table is left alone and reported by `lockin reconcile` instead.
+    """
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(recommendations)")}
+    if not columns or "for_day" in columns:
+        return
+    if conn.execute("SELECT COUNT(*) c FROM recommendations").fetchone()["c"]:
+        return
+    conn.execute("DROP TABLE recommendations")
+    conn.executescript(SCHEMA_PATH.read_text())
+
+
 def apply_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text())
     _apply_added_columns(conn)
+    _rebuild_recommendations(conn)
 
 
 @contextmanager

@@ -329,6 +329,12 @@ CREATE TABLE IF NOT EXISTS manager_scorecards (
     right_rate           REAL NOT NULL,
     regret_lo            REAL NOT NULL,   -- bootstrap 90% band; the middle of the
     regret_hi            REAL NOT NULL,   -- table is a tie, and must render as one
+    -- The band on the column the table is SORTED by. regret_lo/hi band raw
+    -- regret, which stopped being the ranking when §16 normalised for stake;
+    -- drawing those bars beside a squandered_share ordering would express
+    -- uncertainty about a different number from the one setting the order.
+    share_lo             REAL,
+    share_hi             REAL,
     divergent            INTEGER NOT NULL,
     divergent_right_rate REAL NOT NULL,
     upside_share         REAL NOT NULL,   -- points capture, for contrast only
@@ -364,18 +370,37 @@ CREATE TABLE IF NOT EXISTS roster_strength (
 );
 
 
--- Phase 6 output. Present so the read layer has a stable target.
+-- Phase 6 output: what the digest advised, and when.
+--
+-- APPEND-ONLY across runs. `generated_at` is part of the key so a re-run records
+-- a second opinion rather than overwriting the first. That is not tidiness: §12
+-- established that Sleeper rewrites completed seasons, so "what did the engine
+-- say on the day" cannot be recovered by recomputing it later. This table is the
+-- only place that record exists.
+--
+-- `for_day` is the night the row is about — the game already played for a
+-- LOCK/PASS call, the night a THRESHOLD applies to. It is in the key because one
+-- player legitimately gets several rows from one digest: a call on last night's
+-- game plus a standing rule for each of the next three nights. Without it those
+-- rows collide and INSERT OR REPLACE keeps whichever was written last.
+--
+-- No START / SIT action is emitted. §16 measured what lineup advice from this
+-- model would be worth and it is negative — following it would have made nine of
+-- ten teams worse — so the digest does not produce rows it would be wrong to act
+-- on. The vocabulary is left here because the finding is about today's blind
+-- spot (an empty `player_status`), not about the idea.
 CREATE TABLE IF NOT EXISTS recommendations (
     generated_at    TEXT NOT NULL,
     week            INTEGER NOT NULL,
     sleeper_id      TEXT NOT NULL,
-    action          TEXT NOT NULL,   -- LOCK / PASS / START / SIT
+    action          TEXT NOT NULL,   -- LOCK / PASS / THRESHOLD
+    for_day         INTEGER NOT NULL, -- proleptic Gregorian ordinal
     threshold       REAL,
-    ev_lock         REAL,
+    ev_lock         REAL,            -- P(win | lock), not points
     ev_pass         REAL,
     win_prob_delta  REAL,
     rationale       TEXT,
-    PRIMARY KEY (generated_at, week, sleeper_id)
+    PRIMARY KEY (generated_at, week, sleeper_id, action, for_day)
 );
 
 

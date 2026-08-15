@@ -17,15 +17,29 @@ is executed by hand in the app.
 
 ## Status
 
-**Phases 0-5 complete.** Ingest, the scoring engine, retrospective lock inference, the
-projection layer, the stopping policy and the rollout engine, all validated against the
-full 2025-26 season. Every nonzero counted score in all 25 weeks is reproduced from box
-scores to the cent, 98.4% of starter player-weeks resolve to a specific lock decision,
-projected quantiles match realised frequencies on held-out weeks — including the right
-tail, which is the only part that decides whether banking a score is correct — the greedy
-threshold beats never-lock by 79.8 points per roster-week out of sample, and the rollout
-engine converts that into **9 extra wins over 236 team-weeks** while deliberately giving
-up points. Phase 6 (daily digest, deployment) remains.
+**Phases 0-6 complete.** Ingest, the scoring engine, retrospective lock inference, the
+projection layer, the stopping policy, the rollout engine and the daily digest, all
+validated against the full 2025-26 season. Every nonzero counted score in all 25 weeks is
+reproduced from box scores to the cent, 98.4% of starter player-weeks resolve to a specific
+lock decision, projected quantiles match realised frequencies on held-out weeks — including
+the right tail, which is the only part that decides whether banking a score is correct —
+the greedy threshold beats never-lock by 79.8 points per roster-week out of sample, and the
+rollout engine converts that into **9 extra wins over 236 team-weeks** while deliberately
+giving up points.
+
+> **The 2026-27 league does not exist yet** — `/user/.../leagues/nba/2026` still returns
+> `[]` — so `lockin digest` takes an as-of date and reconstructs the *morning* of it from
+> the recorded season. That is the same code path that will run live; `--date` defaults to
+> today. Three things remain unverifiable until October, all of them live-only: today's
+> injury designations, the poll history that live opponent-lock inference needs, and
+> whether Sleeper publishes stat rows for upcoming games. See
+> [implementation-plan.md §20](docs/implementation-plan.md).
+>
+> **The digest does not recommend a lineup.** It was measured and it is negative: following
+> the model's lineup picks would have made nine of the ten teams worse, by 20.4 points a
+> week, because the projection layer cannot read the injury report a manager reads. What
+> ships instead is a DNP warning on unlocked starters facing their last game of the week —
+> the same quantity, framed as a risk to check rather than an instruction to follow.
 
 > ⚠️ **Sleeper mutates completed-season results.** Between 2026-08-05 and 2026-08-07 the
 > finished 2025-26 season changed under us: 38% of week-12 starter values and every team
@@ -432,7 +446,107 @@ probabilities, so a drill-down is a `WHERE` clause. Rendering guidance, includin
 column must never be sortable, is in
 [implementation-plan.md §6](docs/implementation-plan.md) under Phase 6.
 
-`digest` is the one command still to come; it arrives with Phase 6.
+### `lockin dashboard`
+
+Renders that ranking as a self-contained HTML page — no server, no build step, opens over
+`file://` from a phone.
+
+```bash
+uv run lockin managers      # compute; several seconds of Monte Carlo
+uv run lockin dashboard     # render what it stored
+```
+
+It **reads** `manager_scorecards` and `roster_strength` and never recomputes. The ordering
+is on `squandered_share` and there is no way to change it: no script, no sort control, no
+header link. Points capture is shown for contrast only, and a page that let you sort by it
+would have published a wrong ranking. Each row's 90% bootstrap band is drawn on one shared
+axis, because the bands overlap across ranks 1-8 and a bare ordered list would assert a
+precision the data does not have.
+
+### `lockin digest`
+
+The daily recommendation. Reconstructs the **morning** of a date: what to lock now, the
+standing rules for the next few nights, and where the matchup stands.
+
+```bash
+uv run lockin digest --date 2026-01-08 --locked 1000:46.0,1787:47.5
+```
+
+```
+LOCK-IN  Thu 8 Jan  wk 12
+roster 4 v 5   P(win) 54%
+
+LAST NIGHT (Wed) — do this now
+  pass  Karl-Anthony Towns  49.0  need 55
+  pass  Tyrese Maxey        42.5  need 59
+  pass  OG Anunoby          31.0  need 41
+  pass  Devin Booker        19.0  need 42
+
+FRI 9 — lock if he clears
+  Tyrese Maxey             49  53%
+  Karl-Anthony Towns       48  41%
+  Devin Booker             38  50%
+  OG Anunoby               34  42%
+
+BANKED 93.5 across 2 of 6
+PROJECTED 286 v 281
+margin p10/p50/p90  -54 / +4 / +71
+```
+
+Nothing on or after the as-of date is read. Post-cutoff scores are blanked out of the data
+structure before anything sees them, and a test overwrites them with garbage and asserts
+the digest is byte-identical — a leak is prevented by construction rather than by care.
+
+**Forward thresholds assume you act on none of the nights in between.** That is deliberate
+and it is the whole point: a threshold computed on the assumption that you followed
+yesterday's advice is worthless exactly when you needed it. The count of idle nights
+assumed is printed with each rule.
+
+**Pass `--locked` whenever you know what you have banked.** Without it the state is
+reconstructed by replaying the week under the engine's own policy, and that is the noisiest
+number the digest produces — a chain of near-tied calls, which resampling flips often enough
+that the same date reconstructs 1 to 3 locks across seeds. Live this never arises: you know
+what you locked. Everything downstream is stable once the state is fixed — the lock/pass
+calls are identical across seeds at the default 400 simulations. Thresholds still carry 1-3
+points of Monte Carlo noise, which is why they print as whole numbers.
+
+Each run appends to `recommendations`, keyed by timestamp, so a re-run records a second
+opinion rather than overwriting the first — which matters because Sleeper rewrites
+completed seasons, and this table is the only record of what was advised on the day.
+
+### `lockin explain`
+
+The reasoning behind one call, built from the same digest rather than a second code path.
+
+```bash
+uv run lockin explain Maxey --date 2026-01-08 --locked 1000:46.0,1787:47.5
+```
+
+```
+Tyrese Maxey  (2126)   week 12, as of 2026-01-08
+  roster 4 v 5, P(win) 54.2%
+
+  his week
+    2026-01-05  played   54.0
+    2026-01-07  played   42.5
+    2026-01-09  to come
+    2026-01-11  to come
+
+  distribution for one game, as of today
+    basis own (33 prior played games), P(DNP) 9.6%
+    mean 46.1   q25 36  q50 48  q75 61  q90 73
+
+  last night (2026-01-07): scored 42.5
+    PASS — P(win) 41.1% locking, 54.2% passing
+    break-even 59.0: below it, riding is worth more.
+    The gap is 13.13% of win probability, which is what
+    the call is worth — not the 16.5 points.
+```
+
+Give it the same `--locked` you gave the digest. It rebuilds the whole digest and reads one
+player out of it rather than recomputing — a diagnostic that can disagree with the thing it
+is diagnosing is worse than no diagnostic — so a different state would describe a different
+week.
 
 ## Configuration
 
@@ -444,16 +558,38 @@ Environment variables, all optional:
 | `LOCKIN_SNAPSHOTS` | `snapshots` | Raw payload archive; **not** disposable |
 | `LOCKIN_LEAGUE_ID` | `1283214955830575104` | The 2025-26 league |
 | `LOCKIN_SEASON` | `2025` | Sleeper labels 2025-26 as `2025` |
-| `LOCKIN_USER_ID` | `1283460931447164928` | |
+| `LOCKIN_USER_ID` | `1283460931447164928` | Resolves to roster 4 |
+| `LOCKIN_NTFY_TOPIC` | *unset* | Enables `digest --notify`. **The topic name is the secret** |
+| `LOCKIN_NTFY_SERVER` | `https://ntfy.sh` | Point at a self-hosted instance if you have one |
 
 The default league is `status: complete`. **The 2026-27 league will have a different
 id** — Sleeper mints a new one at rollover — so set `LOCKIN_LEAGUE_ID` and
 `LOCKIN_SEASON` when the new season starts rather than relying on the defaults.
 
+Notifications are off unless `LOCKIN_NTFY_TOPIC` is set. ntfy topics are public and
+unauthenticated by default, so anyone who knows or guesses the topic can read your digest —
+pick something long and unguessable, and keep it out of the repo.
+
+### Running it daily
+
+`uv run` resolves the environment itself, which avoids the classic cron failure where an
+unactivated venv silently falls back to system Python. Use absolute paths:
+
+```cron
+# Post-game ingest, and the morning digest.
+30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
+0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
+```
+
+The ingest runs first because the digest reads what it wrote. `--frozen` pins the lockfile
+so a cron run can never resolve a different dependency set from the one that was tested.
+Keep the topic in a file only your user can read rather than in the crontab, which is
+world-readable on some systems.
+
 ## Development
 
 ```bash
-uv run pytest              # 298 tests, ~1.6s
+uv run pytest              # 330 tests, ~13s
 uv run ruff check lockin/ tests/
 uv run ruff format lockin/ tests/
 ```
@@ -593,7 +729,22 @@ player, so a busier schedule buys less than it would in a points format.
 
 Consequence: a start/sit feature would be the first thing in this project to ship without a
 gate. See [implementation-plan.md §19](docs/implementation-plan.md) for the sequencing that
-avoids that.
+avoids that. This is why `lockin digest` emits no lineup advice.
+
+**Three live-only paths have never run against a live league**, because there is not one to
+run against. Each is built and each is unexercised:
+
+- **Today's injury designations.** `lockin ingest` writes `player_status` daily and has
+  done since §17, so the capture works — it simply has no history yet, and cannot be
+  backfilled. Until it does, `starter_dnp_scale` stands in, correcting a hazard that
+  otherwise predicts 17.2% absence for started players against a realised 8.5%.
+- **The poll history.** `weekly_matchups` is append-only so that a frozen `players_points`
+  can reveal an opponent's lock one game later. Nothing has been polled. The digest
+  substitutes a base policy for that belief, and assumes you followed the engine when
+  reconstructing what you have already banked.
+- **Stat rows for upcoming games.** Whether Sleeper publishes them is still unconfirmed
+  (§7.5). The `nba_api` schedule ingest exists as the fallback, so absorbing a "no" is
+  cheap — but it must be checked on day one of the season.
 
 ## Layout
 
@@ -624,6 +775,9 @@ lockin/
   rollout.py       walks a week under the rollout policy, with an opponent
   managers.py      ranks managers on decision quality, and teams on roster quality
   backtest.py      the Phase 4-5 gates — policy against policy over the season
+  digest.py        the Phase 6 product — the morning of a date, point-in-time
+  dashboard.py     the manager ranking as static HTML; reads, never computes
+  notify.py        ntfy push; opt-in, and never fatal
   cli.py
 tests/
 docs/
@@ -631,4 +785,10 @@ docs/
 
 Two rules hold the design together: `core/` stays pure so the stopping policy can be
 tested without I/O, and SQLite is the contract, so a dashboard is just a second reader
-needing no changes to `core/`.
+needing no changes to `core/` — which is exactly what `dashboard.py` turned out to be.
+
+`rollout.py` carries a third, added in Phase 6: every simulation entry point takes
+`known_through` (the last day observed) and `act_from` (the first night a lock may be
+taken) rather than one date for both. The backtest only ever asks about the end of a
+completed day, where they coincide; a morning digest is the case where they do not, and
+collapsing them reads scores out of games that have not been played.

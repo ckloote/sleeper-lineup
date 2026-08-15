@@ -1,22 +1,34 @@
 """Command-line surface.
 
-Read-only throughout: the Sleeper API offers no way to act on your behalf, so
-every recommendation is executed by hand in the app. `digest` and `backtest`
-arrive with the phases that give them something to say.
+Read-only against Sleeper throughout: the API offers no way to act on your
+behalf, so every recommendation is executed by hand in the app. `digest` and
+`managers` are the two commands that write, and both write only to this
+project's own tables — `recommendations`, `manager_scorecards`,
+`manager_decisions`, `roster_strength`.
+
+The gates (`reconcile`, `verify`, `locks`, `calibrate`, `backtest`) live here
+rather than in the test suite because they need the ingested season and take
+seconds to minutes. Each exits nonzero on failure, so cron can treat them as
+checks.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from datetime import date
+from pathlib import Path
 
 import click
 import numpy as np
 
 from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
+from lockin import dashboard as dashboard_mod
+from lockin import digest as digest_mod
 from lockin import locks as locks_mod
 from lockin import managers as managers_mod
+from lockin import notify as notify_mod
 from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
 from lockin import verify as verify_mod
@@ -37,6 +49,31 @@ def _parse_weeks(spec: str | None) -> list[int]:
             out.extend(range(int(lo), int(hi) + 1))
         else:
             out.append(int(part))
+    return out
+
+
+def _parse_locked(spec: str | None) -> dict[str, float] | None:
+    """'2126:42.5,1970:31' -> what is already banked.
+
+    None and an empty string mean different things and must not be conflated:
+    None asks the digest to reconstruct the state, while an explicit empty value
+    asserts that nothing has been locked yet. Early in a week that assertion is
+    both true and useful.
+    """
+    if spec is None:
+        return None
+    out: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        sleeper_id, _, score = part.partition(":")
+        if not score:
+            raise click.BadParameter(f"expected 'sleeper_id:score', got {part!r}")
+        try:
+            out[sleeper_id.strip()] = float(score)
+        except ValueError:
+            raise click.BadParameter(f"{score!r} is not a score") from None
     return out
 
 
@@ -462,6 +499,126 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
 
 
 @main.command()
+@click.option("--date", "as_of", default=None, help="As-of date, YYYY-MM-DD. Default: today.")
+@click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option("--sims", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option("--notify", is_flag=True, help="Send the digest as a push notification.")
+@click.option("--no-write", is_flag=True, help="Do not record the advice in `recommendations`.")
+@click.option(
+    "--locked",
+    default=None,
+    help="What you have already banked, as 'sleeper_id:score,...'. Default: reconstructed.",
+)
+def digest(
+    as_of: str | None,
+    roster: int | None,
+    as_json: bool,
+    sims: int,
+    notify: bool,
+    no_write: bool,
+    locked: str | None,
+) -> None:
+    """The daily recommendation: what to lock now, and the standing rules.
+
+    Reconstructs the *morning* of the given date. Nothing on or after it is
+    read — see lockin/digest.py — so this is the same code path that will run
+    live, exercised against the only season that exists.
+
+    Pass --locked whenever you know what you have banked. Reconstructing it is a
+    chain of near-tied calls and it is the noisiest thing here; supplying it
+    removes that noise instead of averaging over it.
+    """
+    cfg = Config.from_env()
+    as_of = as_of or date.today().isoformat()
+    banked = _parse_locked(locked)
+
+    with session(cfg.db_path) as conn:
+        roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
+        if roster_id is None:
+            raise click.ClickException(
+                f"no roster for user {cfg.user_id}; run `lockin ingest` or pass --roster"
+            )
+        ctx = digest_mod.load_context(conn, cfg.season)
+        try:
+            report = digest_mod.build(
+                ctx, roster_id, as_of, n_sims=sims, n_paths=sims, locked=banked
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+        written = 0 if no_write else digest_mod.persist(conn, report)
+
+    if as_json:
+        click.echo(
+            json.dumps(
+                {
+                    "as_of": report.as_of,
+                    "week": report.week,
+                    "roster_id": report.roster_id,
+                    "opponent_roster_id": report.opponent_roster_id,
+                    "note": report.note,
+                    "p_win": report.p_win,
+                    "projected": report.my_total,
+                    "opponent_projected": report.opponent_total,
+                    "margin": report.margin,
+                    "banked": {report.names.get(k, k): v for k, v in report.banked.items()},
+                    "calls": [
+                        {
+                            "player": c.name,
+                            "sleeper_id": c.sleeper_id,
+                            "date": projections_mod.date_of(c.day),
+                            "score": c.score,
+                            "action": "LOCK" if c.lock else "PASS",
+                            "break_even": c.break_even,
+                            "p_win_lock": c.p_win_lock,
+                            "p_win_pass": c.p_win_pass,
+                        }
+                        for c in report.calls
+                    ],
+                    "standing_rules": [
+                        {
+                            "player": r.name,
+                            "sleeper_id": r.sleeper_id,
+                            "night": projections_mod.date_of(r.night),
+                            "threshold": r.threshold,
+                            "p_clear": None if np.isnan(r.p_clear) else r.p_clear,
+                            "idle_nights_assumed": r.idle_nights,
+                            "games_after": r.games_after,
+                        }
+                        for r in report.rules
+                    ],
+                    "warnings": [
+                        {"player": w.name, "kind": w.kind, "detail": w.detail}
+                        for w in report.warnings
+                    ],
+                    "recommendations_written": written,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(digest_mod.render(report))
+    if report.note is None:
+        source = (
+            "banked state as given on the command line"
+            if banked is not None
+            else "banked state assumes you followed this engine so far — the\n"
+            "  noisiest number here; pass --locked when you know it (§20).\n"
+            "  Live it comes from the poll history, which does not exist yet (§15)"
+        )
+        click.echo(
+            f"\n  {source}."
+            f"\n  Thresholds carry 1-3 points of Monte Carlo noise at --sims {sims};"
+            f"\n  the lock/pass calls above are stable from 400."
+            f"\n  {written} row(s) written to recommendations."
+        )
+    if notify:
+        sent = notify_mod.send(digest_mod.render(report, compact=True), cfg)
+        click.echo(f"  notification: {sent}")
+
+
+@main.command()
 @click.argument("player")
 @click.option(
     "--as-of", "as_of", required=True, help="Game date, YYYY-MM-DD. History before it only."
@@ -490,6 +647,178 @@ def project(player: str, as_of: str, week: int, draws: int) -> None:
     click.echo(f"  mean         {dist.mean:.1f}")
     for q in (0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99):
         click.echo(f"  q{q:<11.2f} {float(dist.quantile(q)):.1f}")
+
+
+@main.command()
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("dashboard.html"),
+    show_default=True,
+    help="Where to write the page.",
+)
+@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+def dashboard(out: Path, names: bool) -> None:
+    """Render the manager-quality page from what `lockin managers` stored.
+
+    A second reader of SQLite, never a second computation: the Monte Carlo behind
+    these rows costs seconds, which is fine for a command and hopeless for a page
+    load.
+    """
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        labels = _manager_labels(cfg) if names else {}
+        rows = dashboard_mod.load(conn, labels)
+        stamp = dashboard_mod.computed_at(conn)
+
+    if not rows:
+        raise click.ClickException("no scorecards stored; run `lockin managers` first")
+
+    out.write_text(dashboard_mod.render(rows, stamp=stamp))
+    click.echo(f"wrote {out} — {len(rows)} managers, ranked on squandered_share")
+    click.echo(
+        "  sorted on the stake-normalised share, never on points capture;"
+        "\n  the 90% bands overlap across most of the table and are drawn so"
+        "\n  that is visible. Open it in a browser, or serve the file."
+    )
+
+
+@main.command()
+@click.argument("player")
+@click.option("--date", "as_of", default=None, help="As-of date, YYYY-MM-DD. Default: today.")
+@click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
+@click.option("--sims", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option(
+    "--locked",
+    default=None,
+    help="What you have already banked, as 'sleeper_id:score,...'. Default: reconstructed.",
+)
+def explain(
+    player: str, as_of: str | None, roster: int | None, sims: int, locked: str | None
+) -> None:
+    """Why the engine says what it says about one player.
+
+    PLAYER is a sleeper_id or a case-insensitive substring of a name.
+
+    Built from the same :func:`lockin.digest.build` call the digest itself
+    renders, rather than recomputing the numbers with a second code path. A
+    diagnostic that can disagree with the thing it is diagnosing is worse than
+    no diagnostic — so --locked is accepted here too, and must be given the same
+    value, or the explanation would describe a different state from the digest.
+    """
+    cfg = Config.from_env()
+    as_of = as_of or date.today().isoformat()
+    banked = _parse_locked(locked)
+
+    with session(cfg.db_path) as conn:
+        roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
+        if roster_id is None:
+            raise click.ClickException(f"no roster for user {cfg.user_id}")
+        ctx = digest_mod.load_context(conn, cfg.season)
+        try:
+            report = digest_mod.build(
+                ctx, roster_id, as_of, n_sims=sims, n_paths=sims, locked=banked
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+        if report.note:
+            raise click.ClickException(report.note)
+
+        matches = [
+            pid
+            for pid, name in report.names.items()
+            if pid == player or player.lower() in name.lower()
+        ]
+        mine = set(ctx.lineup_ids(report.week, roster_id))
+        matches = [pid for pid in matches if pid in mine] or matches
+        if not matches:
+            raise click.ClickException(f"no starter matching {player!r} in week {report.week}")
+        if len(matches) > 1:
+            names = ", ".join(f"{report.names[p]} ({p})" for p in matches)
+            raise click.ClickException(f"{player!r} matches several: {names}")
+        pid = matches[0]
+
+        games = digest_mod.lineup_as_of(
+            ctx.panel, ctx.scores, [pid], report.week, report.known_through
+        )[pid]
+        dist = core_projections.EWMAProjectionSource(
+            ctx.panel, verify_mod.scoring_settings(conn)
+        ).project(
+            pid,
+            report.as_of_day,
+            fantasy_week=report.week,
+            rng=np.random.default_rng(0),
+            n_draws=4000,
+        )
+
+    name = report.names.get(pid, pid)
+    click.echo(f"{name}  ({pid})   week {report.week}, as of {as_of}")
+    click.echo(
+        f"  roster {report.roster_id} v {report.opponent_roster_id}, P(win) {report.p_win:.1%}"
+    )
+
+    click.echo("\n  his week")
+    for game in games:
+        when = projections_mod.date_of(game.day)
+        if game.day <= report.known_through:
+            state = f"played {game.score:>6.1f}" if game.played else "did not play"
+        else:
+            state = "to come"
+        click.echo(f"    {when}  {state}")
+
+    if pid in report.banked:
+        click.echo(f"\n  LOCKED at {report.banked[pid]:.1f} — nothing left to decide")
+        return
+
+    click.echo(
+        f"\n  distribution for one game, as of today"
+        f"\n    basis {dist.basis} ({dist.n_own_games} prior played games),"
+        f" P(DNP) {dist.p_dnp:.1%}"
+        f"\n    mean {dist.mean:.1f}   "
+        + "  ".join(
+            f"q{int(q * 100)} {float(dist.quantile(q)):.0f}" for q in (0.25, 0.5, 0.75, 0.9)
+        )
+    )
+
+    calls = [c for c in report.calls if c.sleeper_id == pid]
+    for call in calls:
+        verdict = "LOCK" if call.lock else "PASS"
+        click.echo(
+            f"\n  last night ({projections_mod.date_of(call.day)}): scored {call.score:.1f}"
+            f"\n    {verdict} — P(win) {call.p_win_lock:.1%} locking,"
+            f" {call.p_win_pass:.1%} passing"
+            f"\n    break-even {call.break_even:.1f}: below it, riding is worth more."
+            f"\n    The gap is {call.edge:.2%} of win probability, which is what"
+            f"\n    the call is worth — not the {abs(call.score - call.break_even):.1f} points."
+        )
+
+    rules = [r for r in report.rules if r.sleeper_id == pid]
+    if rules:
+        click.echo("\n  standing rules")
+        for rule in rules:
+            chance = (
+                "" if np.isnan(rule.p_clear) else f", he clears it {rule.p_clear:.0%} of the time"
+            )
+            idle = (
+                f"\n      assumes {rule.idle_nights} idle decision night(s) first (§7.2)"
+                if rule.idle_nights
+                else ""
+            )
+            click.echo(
+                f"    {projections_mod.date_of(rule.night)}: lock if he clears"
+                f" {rule.threshold:.0f}{chance}"
+                f"\n      {rule.games_after} game(s) left after it{idle}"
+            )
+
+    warnings = [w for w in report.warnings if w.sleeper_id == pid]
+    for warn in warnings:
+        click.echo(f"\n  WARNING — {warn.kind}: {warn.detail}")
+
+    click.echo(
+        "\n  Thresholds are win-probability break-evens against THIS opponent in"
+        "\n  THIS state, not a view on the player. The same score is a lock when"
+        "\n  you are ahead and a pass when you need variance (§4)."
+    )
 
 
 def _render(checks, title: str, as_json: bool) -> None:

@@ -14,6 +14,10 @@ __pycache__/
 data/
 logs/
 
+# Rendered output — regenerable via `lockin dashboard`, and it embeds the
+# league's manager names, which do not belong in the repo.
+dashboard.html
+
 # Claude Code local settings and harness temp files
 .claude/settings.local.json
 .claude/*.tmp.*

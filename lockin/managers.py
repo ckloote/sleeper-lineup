@@ -537,7 +537,9 @@ def evaluate_managers(
                 position = next(i for i, g in enumerate(games) if g.day == day)
                 unlocked = [p for p in mine if p not in locked]
                 contributions = np.vstack(
-                    [cache.contribution(p, mine[p], week, day, rng) for p in unlocked]
+                    # End-of-day, like the backtest: the day being decided is
+                    # both the last day observed and the last past banking.
+                    [cache.contribution(p, mine[p], week, rng, known_through=day) for p in unlocked]
                 )
                 outcome = evaluate_lock(
                     banked=sum(locked.values()),
@@ -662,9 +664,9 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
     conn.executemany(
         "INSERT INTO manager_scorecards"
         " (roster_id, decisions, squandered_share, mean_stake, mean_regret, right_rate,"
-        "  regret_lo, regret_hi, divergent, divergent_right_rate, upside_share,"
-        "  upside_decisions, rode_to_zero, computed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  regret_lo, regret_hi, share_lo, share_hi, divergent, divergent_right_rate,"
+        "  upside_share, upside_decisions, rode_to_zero, computed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 s.roster_id,
@@ -674,6 +676,7 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
                 s.mean_regret,
                 s.right_rate,
                 *bootstrap_regret(report, s.roster_id),
+                *bootstrap_squandered(report, s.roster_id),
                 s.divergent,
                 s.divergent_right_rate,
                 s.upside_share,
@@ -701,3 +704,33 @@ def bootstrap_regret(
     rng = np.random.default_rng(seed)
     means = [values[rng.integers(0, len(values), len(values))].mean() for _ in range(resamples)]
     return float(np.percentile(means, 5)), float(np.percentile(means, 95))
+
+
+def bootstrap_squandered(
+    report: ManagerReport, roster_id: int, *, resamples: int = 2000, seed: int = 2
+) -> tuple[float, float]:
+    """90% interval on the quantity the table is actually **sorted** by.
+
+    :func:`bootstrap_regret` bands mean regret, which was the ranking until §16
+    replaced it with the stake-normalised share. A dashboard that ordered rows by
+    the share while drawing error bars on raw regret would be showing uncertainty
+    about a different number from the one determining the order — which is worse
+    than showing none, because it looks rigorous.
+
+    Resampled as a ratio of sums, matching how the statistic is computed:
+    resampling numerator and denominator separately would break the pairing
+    between a decision's regret and the stake it was taken at, and that pairing
+    is the entire point of the normalisation.
+    """
+    pairs = [(d.regret, d.stake) for d in report.decisions if d.roster_id == roster_id]
+    if not pairs:
+        return 0.0, 0.0
+    regret = np.array([r for r, _ in pairs])
+    stake = np.array([s for _, s in pairs])
+    rng = np.random.default_rng(seed)
+    shares = []
+    for _ in range(resamples):
+        draw = rng.integers(0, len(pairs), len(pairs))
+        total = stake[draw].sum()
+        shares.append(regret[draw].sum() / total if total else 0.0)
+    return float(np.percentile(shares, 5)), float(np.percentile(shares, 95))

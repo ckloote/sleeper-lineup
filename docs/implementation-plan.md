@@ -338,11 +338,17 @@ binary search over hypothetical `S`.
 
 *Exit:* see §7.1 — the doc's stated criterion needs restating to be measurable.
 
-### Phase 6 — CLI, digest, deployment — DEFERRED
+### Phase 6 — CLI, digest, deployment — COMPLETE, see §20
 `ingest / digest / explain / backtest / verify`, push notification, cron via
 `uv run --frozen`.
 
 *Exit:* digest fires daily and thresholds render legibly on a phone.
+
+> Met in every part that does not need a live league. There is none — the 2026-27
+> league still returns `[]` — so `digest` is built **as-of** a date and smoke-tested
+> against the recorded season, which is what §7.3 prescribed. §20 records what that
+> turned up: §7.2's idle-nights rule was not expressible in the Phase 5 signature,
+> and §11's recommended lineup does not ship.
 
 **Dashboard requirement — manager decision quality (§16).** The league standings
 already tell you who won. What nobody can see is who *decided* well, and the
@@ -361,9 +367,22 @@ data lie:
   correct variance-taking decision as a blunder (§16). The column is stored for
   contrast; a dashboard that lets someone sort by it has published a wrong
   ranking.
+
+  > **Superseded in part — see §20.** The *first* half is stale: §16 replaced raw
+  > regret with `squandered_share`, because mean regret is P(wrong) × E[stake] and
+  > the second factor is circumstance. The shipped page sorts on the share, as
+  > `lockin managers` and the schema already did. The prohibition on
+  > `upside_share` stands and is enforced — the page carries no script, no sort
+  > control and no header link.
 - **Render `regret_lo`/`regret_hi`.** The bands overlap from about rank 2 to
   rank 8. A bare ordered list asserts a precision the data does not have; show
   it as groups, or show the bars.
+
+  > **Amended — see §20.** Right in substance, wrong in column, and for the same
+  > reason as above: `regret_lo`/`regret_hi` band raw regret, which is no longer
+  > what the table is ordered by. `share_lo`/`share_hi` were added so the bars
+  > express uncertainty about the number that actually sets the order. The
+  > overlap is worse than predicted — ranks 1-4 are one tie.
 - **Carry the §12 caveat on the page, not in a footnote.** This ranks how the
   rewritten data makes each manager look, not what they did.
 - **Do not put the engine on the same axis.** Greedy is graded by the model that
@@ -477,19 +496,32 @@ slot usage later, and is worth persisting rather than discarding.
 
 | Decision | Resolution | Effect |
 |---|---|---|
-| **Scope** | Phases 0-5 complete | Committed scope was 0-2. Phases 3, 4 and 5 were each taken on after reassessment and each closed its gate (§13, §14, §15). Only Phase 6 remains. |
+| **Scope** | Phases 0-6 complete | Committed scope was 0-2. Phases 3, 4, 5 and 6 were each taken on after reassessment and each closed its gate (§13, §14, §15, §20). |
 | **Phase 5 gate** | Replay all ten rosters | 105 matchups instead of 21. Lands on Phase 2 now as a gating requirement (§7.1). |
 | **Lock mechanic** | Must stay in a slot to lock | Stricter state definition; confirms the Phase 2 inference method (§7.6). |
-| **Deployment** | Develop here, deploy to Pi later | Hold the `uv` discipline and cron form; no Pi work in this build. |
-| **Notifications** | Deferred with Phase 6 | ntfy is the default when we get there — no account needed. |
+| **Deployment** | Develop here, deploy to Pi later | Hold the `uv` discipline and cron form; no Pi work in this build. Unchanged by Phase 6 — the cron form ships, the Pi does not (§20). |
+| **Notifications** | ntfy, opt-in | Shipped in Phase 6. No account and no key: the topic name *is* the secret, so it is read from the environment and off by default. A digest posting to a guessable public topic would publish the lineup. |
+| **Digest mode** | As-of a date, not live | There is no live league to be live against (§7.3, re-checked 2026-08-15). One code path, `--date` defaulting to today, so October changes nothing (§20). |
+| **Lineup advice** | Not shipped | §16 measured it at 20.4 points a week *worse* than the managers. Ships as a DNP warning instead of a recommendation (§20). |
 
 ### Still open
 
+Everything below is blocked on the 2026-27 season existing. Nothing is blocked on work.
+
 - **§7.5 — forward-looking stat rows.** Unverifiable until the season opens. Does not
   block Phases 0-2, but the NBA schedule ingest built in Phase 0 is what makes the
-  fallback free, so it gets built regardless.
+  fallback free, so it gets built regardless. **Check on day one**: the digest's tonight
+  section depends on it, and the fallback exists but has never been exercised.
 - **§7.3 — 2026-27 league.** Config resolves the league by season rather than hardcoding.
-  Nothing further needed until the commissioner rolls it over.
+  Nothing further needed until the commissioner rolls it over. Re-checked 2026-08-15:
+  still `[]`.
+- **§15/§20 — the polling loop.** `weekly_matchups` is append-only so a frozen
+  `players_points` can reveal an opponent's lock one game later. Nothing has been polled,
+  because there has been nothing to poll. Until then the digest's opponent model stands in
+  a base policy for the belief, and the banked state assumes you followed the engine.
+- **§17/§20 — availability history.** The daily capture into `player_status` is in place
+  and running; it simply has no history yet. It cannot be backfilled, and it is the
+  prerequisite for ever ranking start/sit decisions (§19).
 
 ---
 
@@ -1977,3 +2009,230 @@ The sequencing that follows:
 
 Shipping start/sit advice in week 1 on the strength of a backtest that could not have
 tested it would be exactly the failure this project has spent five phases avoiding.
+
+
+---
+
+## 20. Phase 6 — complete
+
+`digest`, `explain` and `dashboard` ship, with ntfy notification and a cron form. The
+exit criterion — *digest fires daily and thresholds render legibly on a phone* — is met
+in every part that can be met without a live league, and §7.3's fallback is what makes
+that a real test rather than an excuse.
+
+### The league still does not exist, and that shaped the whole phase
+
+Re-checked on 2026-08-15: `/user/1283460931447164928/leagues/nba/2026` returns `[]`, and
+the 2025-26 league is still `status: complete`. So nothing can be run "live" today.
+
+§7.3 already prescribed the answer — *live paths can only be smoke-tested against the
+completed season* — and the digest is built as an **as-of** command rather than a live one
+with a test mode bolted alongside. `--date` defaults to today; the same code path
+reconstructs the morning of any date in the recorded season. In October it will simply
+start landing on days whose games have not been played, and nothing about it changes.
+
+That decision is what made the next finding findable.
+
+### §7.2 is not a caption. It changes the computation, and Phase 5 could not express it
+
+The inherited `standing_thresholds` took one date, `day`, and used it for two different
+things: what is *known*, and what is *past banking*. In the backtest those coincide by
+construction — decisions are taken at the end of a day that has finished — so the
+conflation was invisible and correct for two phases.
+
+A **morning** digest separates them, and the separation is not cosmetic:
+
+| | backtest, end of day *d* | digest, morning of day *d* |
+|---|---|---|
+| Tonight's games | played, scores known | not tipped |
+| Teammate playing tonight | resolved | must be simulated |
+| Nights between now and a forward threshold | none | §7.2 says assume idle |
+
+Under the old signature a threshold for tonight would have read teammates' *unplayed*
+scores out of the season record, and a threshold for Thursday would have quietly assumed
+you acted on Tuesday and Wednesday — the exact failure §7.2 was written to forbid, in the
+exact function that cites it.
+
+`SimulationCache.contribution` now takes `known_through` (observed through here) and
+`act_from` (first night a lock may be taken). An idle night is expressed as a threshold no
+score can clear, which composes cleanly with the base policy: masking a night leaves every
+later threshold untouched, because each is a continuation value over strictly later
+columns.
+
+**The refactor is inert where the two coincide.** `lockin backtest --json` is byte-identical
+before and after, so the Phase 4-5 gates still measure the policy they were closed on.
+`test_backtest_cutoffs_are_unchanged` pins that against the raw base policy.
+
+### The asymmetry that makes a standing rule correct
+
+Within one night, the player being asked about is priced differently from everyone else,
+and this is the substance of the fix rather than an implementation detail:
+
+- **Teammates** get `act_from = night`. Their game that night is live and bankable, so the
+  base policy may take it.
+- **The player under the rule** gets `act_from = night + 1`. The threshold *is* the
+  question of whether to bank his game, so the pass branch must be his continuation from
+  the following day — a contribution that re-banked the score under test would be pricing
+  the option against itself.
+
+Same player, same cutoff, two different numbers. The digest uses both, and
+`test_the_asked_player_is_priced_differently_from_his_teammates` pins the direction:
+forfeiting a bankable game can never be worth more than keeping the option.
+
+### Leakage is a property of the data structure, not of the reader
+
+`lineup_as_of` blanks `score` and `played` on every game after the cutoff before anything
+else sees them. The schedule survives — which nights a player has a game is known in
+advance and the continuation value needs the horizon — but the outcomes do not.
+
+The test that matters is not a code review. `test_no_future_score_reaches_the_digest`
+overwrites every post-cutoff score with 999.0 and asserts the rendered digest is
+byte-identical. A break-even is a quantile of a deficit, so a single leaked 999 moves it
+visibly; the check would catch a leak reintroduced by an edit nobody re-reviews.
+
+### §11's second item does not ship, and the evidence was already ours
+
+The architecture doc asks the digest for "tonight's recommended slot assignment, including
+any bench promotions". §16 measured what that advice is worth: following the model's
+lineup would have made **nine of the ten teams worse**, by 20.4 points a week, because
+`player_status` is empty and the projection layer cannot read the injury report the manager
+reads.
+
+So the digest emits no `START`/`SIT` row. What ships instead is the same underlying
+quantity framed as a risk rather than an instruction: an unlocked starter whose **last**
+game of the week is still to come and who carries elevated DNP risk. That exposure is
+genuinely asymmetric — there is no later game to make it back, and the slot counts 0.0 —
+which is why it survives when the recommendation does not.
+
+Calibration of the warning, measured over the season on the population it fires against:
+
+```
+corrected P(DNP), unlocked starters facing their last game   n = 237
+  p50 0.059   p75 0.076   p90 0.120   p95 0.335   p99 0.454
+  share at or above the 0.25 threshold : 8.4%
+```
+
+The distribution is bimodal and 0.25 sits in the gap between p90 and p95, which is why it
+is not tuned. Two things to hold about it: the hazard still over-predicts absence for
+started players even after the `starter_dnp_scale` correction, so the warning is
+conservative by construction; and it is a probability, not a prediction — the first two
+occurrences in the season fired at 43% and 46% and both players played.
+
+### Correction to §6: the dashboard sorts on `squandered_share`, not `mean_regret`
+
+§6's Phase 6 requirement says "Sort on `mean_regret`, never on `upside_share`". The first
+half is stale — it predates §16, which replaced raw regret as the ranking precisely because
+`mean regret = P(wrong) × E[stake]` and the second factor is circumstance. `lockin managers`
+and the `manager_scorecards` comment both already rank on the normalised share. The
+dashboard follows them. **The second half stands unchanged**, and is enforced: the page
+carries no script, no sort control and no header link, so there is no way to reorder it by
+points capture at all.
+
+That correction had a consequence worth recording. `regret_lo`/`regret_hi` band *raw
+regret*, which is no longer the ranked quantity — drawing those bars beside a
+`squandered_share` ordering would express uncertainty about a different number from the one
+setting the order, which looks rigorous and is not. `bootstrap_squandered` and the
+`share_lo`/`share_hi` columns were added, resampling the ratio of sums so a decision's
+regret stays paired with the stake it was taken at.
+
+The bands are why the rule exists:
+
+```
+ 1  roster  3   6.78%  [ 4.06,  10.10]
+ 2  roster  4   9.23%  [ 4.03,  16.08]
+ 3  roster 10  10.04%  [ 6.39,  14.26]
+ 4  roster  7  12.81%  [ 8.09,  17.98]
+ 5  roster  5  15.83%  [11.22,  20.67]
+ 6  roster  1  16.60%  [11.30,  22.51]
+ 7  roster  6  19.89%  [14.33,  26.12]
+ 8  roster  8  21.26%  [15.89,  26.96]
+ 9  roster  2  22.60%  [16.90,  28.53]
+10  roster  9  31.08%  [22.72,  39.63]
+```
+
+Ranks 1-4 are a single tie, and only roster 9 is cleanly separated. §6 predicted overlap
+"from about rank 2 to rank 8" and it is worse than that. The page draws the intervals as
+bars on one shared axis so the overlap is the first thing seen rather than a caveat under
+the table.
+
+### The reconstructed banked state is the noisiest number here, and it is the one nobody needs
+
+Offline the digest does not know what you locked, so it reconstructs it by replaying the
+week under the rollout policy through yesterday. That reconstruction is a *chain* of
+lock/pass calls, most of them near-tied, and resampling flips enough of them to move the
+answer materially. Same date, same data, varying only the seed:
+
+```
+sims    locks reconstructed        P(win)
+ 200    [2, 3, 3, 2, 2]            0.470 - 0.567
+ 400    [1, 1, 2, 1, 2]            0.469 - 0.527
+ 800    [2, 2, 2, 2, 1]            0.499 - 0.547
+1600    [2, 2, 1, 2, 2]            0.492 - 0.529
+```
+
+It converges slowly and does not converge to a point. **Everything downstream of it is
+stable**, which is the finding that makes this manageable — fixing the state and varying
+only the seed:
+
+```
+sims   lock/pass calls identical    threshold sd    P(win) sd
+ 200   no                           1.8 - 4.6 pts   0.024
+ 400   yes, across 6 seeds          1.2 - 2.0 pts   0.017
+ 800   yes, across 6 seeds          1.0 - 2.7 pts   0.019
+```
+
+Three consequences, all shipped:
+
+- **`--locked` is a first-class option** on `digest` and `explain`. Live the state is
+  simply known, and supplying it removes the noise rather than averaging over it. It is
+  validated: an id that is not a starter that week is an error, because it would otherwise
+  add its score to the banked total *and* leave the player counted among the unlocked —
+  double-counting him, and moving every number in the flattering direction. Found by typing
+  a wrong id by hand.
+- **400 simulations is the floor, and it is the default.** At 200 the calls themselves
+  disagree across seeds, which would make the digest's headline advice a coin flip.
+- **Thresholds print as whole numbers.** A number carrying 1-3 points of Monte Carlo
+  standard deviation does not get a decimal place, particularly one the user applies from
+  memory on a phone.
+
+### A bug this phase surfaced, and the gap that let it through
+
+`evaluate_managers` broke on the `SimulationCache` signature change and **no test caught
+it** — it was the one entry point in the project reachable only by running the command.
+`test_evaluate_managers_runs_end_to_end` now calls it at 20 simulations: far too few for
+the numbers to mean anything, which is the point. It asserts the call graph holds together;
+the estimates are gated by `lockin backtest`.
+
+The `recommendations` table also needed its primary key widened. `(generated_at, week,
+sleeper_id)` was a placeholder from Phase 0, and one digest legitimately writes several
+rows for one player — a call on last night plus a standing rule for each of the next
+nights — which collided and were silently dropped by `INSERT OR REPLACE`. The rebuild is
+guarded on the table being empty: §12 makes this the only record of what was advised on a
+given day, and that is not recoverable by recomputation.
+
+### Deviations from the plan
+
+- **`START`/`SIT` actions are not emitted.** §16's evidence, above. The vocabulary stays in
+  the schema because the finding is about today's blind spot, not about the idea.
+- **Three forward nights, not two.** The marginal night is nearly free once the simulation
+  is cached, and the failure the output exists to survive is a check-in missed for longer
+  than expected.
+- **The digest reconstructs the banked state by replaying the week under rollout.** Live it
+  should come from the poll history §10 describes. Nothing has been polled, so the
+  assumption is "you followed this engine so far", stated in the output and overridable.
+- **No Pi deployment.** Per §8, the cron form is held and the deployment is not done here.
+
+### What is still live-only, and therefore still unverified
+
+Unchanged from §15, and none of it is closable before October:
+
+1. **Today's injury designations.** `lockin ingest` has written `player_status` daily since
+   §17, so the capture is in place; there is simply no history yet. `starter_dnp_scale` is
+   the seam the real feed replaces.
+2. **The polling loop.** `weekly_matchups` is append-only so that a frozen `players_points`
+   can reveal an opponent's lock one game later. That needs in-season polling, which needs
+   a season.
+3. **Forward-looking stat rows (§7.5).** Whether Sleeper publishes rows for *upcoming*
+   games is still unconfirmed. The digest reads the schedule from the panel, and the
+   `nba_api` schedule ingest exists as the fallback, so absorbing a "no" is cheap — but it
+   must be checked on day one.
