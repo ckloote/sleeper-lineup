@@ -445,6 +445,28 @@ probabilities, so a drill-down is a `WHERE` clause. Rendering guidance, includin
 column must never be sortable, is in
 [implementation-plan.md §6](docs/implementation-plan.md) under Phase 6.
 
+### `lockin advice`
+
+What the last digest said, as a page. Reads `recommendations` and `digest_runs`; it never
+recomputes.
+
+```bash
+uv run lockin advice          # writes advice.html
+```
+
+That distinction is a correctness rule here, not a performance one. Recomputing would give
+a *different* answer — the reconstructed banked state is a chain of near-tied calls and
+thresholds carry a few points of Monte Carlo noise — so a page that recomputed would
+quietly disagree with the notification you acted on. And §12 means the inputs are rewritten
+upstream, so "what did it say on the day" stops being rebuildable once the day passes.
+
+**Staleness is the banner, not a footnote.** The failure mode of a recommendations page is
+showing yesterday's calls as though they were today's, so age is measured from the morning
+the digest describes and stated in colour before any advice appears.
+
+It shows the latest run only. That is deliberate: the question is "what am I supposed to
+do", and a date picker invites reading a stale answer on purpose.
+
 ### `lockin dashboard`
 
 Renders that ranking as a self-contained HTML page — no server, no build step, opens over
@@ -578,9 +600,12 @@ unactivated venv silently falls back to system Python. Use absolute paths:
 # Post-game ingest, and the morning digest.
 30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
 0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
+5  9 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin advice >> logs/digest.log 2>&1
 ```
 
-The ingest runs first because the digest reads what it wrote. `--frozen` pins the lockfile
+The ingest runs first because the digest reads what it wrote, and `advice` runs last
+because it reads what the digest wrote — it re-renders the page without recomputing, so a
+missed notification is still readable. `--frozen` pins the lockfile
 so a cron run can never resolve a different dependency set from the one that was tested.
 Keep the topic in a file only your user can read rather than in the crontab, which is
 world-readable on some systems.

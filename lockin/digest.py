@@ -744,20 +744,55 @@ def render(digest: Digest, *, compact: bool = False) -> str:
 # ------------------------------------------------------------------- persistence
 
 
-def persist(conn: sqlite3.Connection, digest: Digest) -> int:
-    """Write the digest to `recommendations`.
+def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = False) -> int:
+    """Write the digest to `recommendations` and `digest_runs`.
 
     Keyed by ``generated_at``, so a re-run appends rather than overwrites and the
     record of what was advised at the time survives a model change. That matters
     here more than elsewhere: §12 established that the upstream data is rewritten
     under us, so "what did the engine say on the day" is not recoverable by
     recomputation.
+
+    Two tables, because a call means nothing without the state it was taken
+    against. `digest_runs` carries the win probability, the projected totals and
+    what was already banked, so `lockin advice` can render a past digest exactly
+    rather than approximately. It is written even when there are no calls to
+    make — "no matchup this week" is a real answer and a page that showed
+    nothing at all would be indistinguishable from a cron that never ran.
     """
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO digest_runs
+            (generated_at, roster_id, as_of, week, opponent_roster_id, p_win,
+             projected, opponent_projected, margin_p10, margin_p50, margin_p90,
+             banked_total, banked_slots, state_supplied, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            generated_at,
+            digest.roster_id,
+            digest.as_of,
+            digest.week,
+            digest.opponent_roster_id,
+            digest.p_win,
+            digest.my_total,
+            digest.opponent_total,
+            digest.margin.get("q10"),
+            digest.margin.get("q50"),
+            digest.margin.get("q90"),
+            sum(digest.banked.values()),
+            len(digest.banked),
+            int(state_supplied),
+            digest.note,
+        ),
+    )
+
     rows = [
         (
             generated_at,
             digest.week,
+            digest.roster_id,
             call.sleeper_id,
             "LOCK" if call.lock else "PASS",
             call.day,
@@ -773,6 +808,7 @@ def persist(conn: sqlite3.Connection, digest: Digest) -> int:
         (
             generated_at,
             digest.week,
+            digest.roster_id,
             rule.sleeper_id,
             "THRESHOLD",
             rule.night,
@@ -781,19 +817,18 @@ def persist(conn: sqlite3.Connection, digest: Digest) -> int:
             None,
             None,
             f"{rule.name}: lock on {date_of(rule.night)} if he clears"
-            f" {rule.threshold:.1f} ({rule.idle_nights} idle night(s) assumed, §7.2)",
+            f" {rule.threshold:.0f} ({rule.idle_nights} idle night(s) assumed, §7.2)",
         )
         for rule in digest.rules
     ]
-    if not rows:
-        return 0
-    conn.executemany(
-        """
-        INSERT OR REPLACE INTO recommendations
-            (generated_at, week, sleeper_id, action, for_day, threshold,
-             ev_lock, ev_pass, win_prob_delta, rationale)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
+    if rows:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO recommendations
+                (generated_at, week, roster_id, sleeper_id, action, for_day, threshold,
+                 ev_lock, ev_pass, win_prob_delta, rationale)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
     return len(rows)

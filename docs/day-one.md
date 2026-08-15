@@ -227,6 +227,15 @@ donor cohort; that is expected and self-correcting as own-history accumulates.
 Once a week of real state exists, pass `--locked` with what you actually banked. Live, that
 is simply known, and supplying it is strictly better than having it inferred.
 
+Then render the page, which is how a missed notification stays readable:
+
+```bash
+uv run lockin advice
+```
+
+**Pass:** a green banner saying the advice is for this morning. A red one means the digest
+did not run today — check `logs/digest.log` before trusting anything on the page.
+
 ---
 
 ## 8. What stays switched off

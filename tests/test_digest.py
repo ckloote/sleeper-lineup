@@ -397,25 +397,9 @@ def test_a_populated_old_table_is_never_dropped(tmp_path):
 
 
 # ---------------------------------------------------------------- notification
-
-
-def test_notifications_are_off_unless_a_topic_is_configured(monkeypatch):
-    """An ntfy topic is public. Defaulting one on would publish the lineup."""
-    from lockin import notify
-
-    monkeypatch.delenv("LOCKIN_NTFY_TOPIC", raising=False)
-    assert notify.topic() is None
-    assert notify.send("body", cfg).startswith("disabled")
-
-
-def test_a_failed_notification_does_not_raise(monkeypatch):
-    """Cron mailing a traceback every morning is how a working system gets
-    switched off. The digest has already printed and persisted by this point."""
-    from lockin import notify
-
-    monkeypatch.setenv("LOCKIN_NTFY_TOPIC", "lockin-test")
-    monkeypatch.setenv("LOCKIN_NTFY_SERVER", "http://127.0.0.1:1")
-    assert notify.send("body", cfg).startswith("failed")
+#
+# Moved to tests/test_notify.py, which covers the success path these two never
+# reached — and the header-encoding bug that lived there undetected.
 
 
 # ------------------------------------------------------------------ regression

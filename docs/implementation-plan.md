@@ -2248,6 +2248,75 @@ given day, and that is not recoverable by recomputation.
   assumption is "you followed this engine so far", stated in the output and overridable.
 - **No Pi deployment.** Per §8, the cron form is held and the deployment is not done here.
 
+### The notification had never been tested on its success path — and it was broken
+
+Asked, on 2026-08-15, how recommendations are actually delivered. The answer exposed that
+`notify.send` had exactly two tests, `disabled` and `failed`, so **the code that sends had
+never executed once**. The first real run would have been on a Raspberry Pi at 9am.
+
+A live round-trip against ntfy.sh — random throwaway topic, synthetic body — showed the
+happy path works and the body survives UTF-8 verbatim, em dash and section sign included.
+It also found a bug the negative tests were structurally incapable of finding:
+
+```
+UnicodeEncodeError: 'latin-1' codec can't encode character '—'
+  http/client.py, putheader  <- a *title* containing an em dash
+```
+
+`http.client` encodes header values as latin-1. `UnicodeEncodeError` is a `ValueError`, and
+the guard named `URLError` and `OSError`, so it **propagated** — out of the one function
+whose documented contract is that it never fails the digest, in the one deployment where
+failing means cron mails a traceback every morning until someone switches it off.
+
+Two fixes, and the second is the more interesting one:
+
+- Non-ASCII header values are RFC 2047 encoded-words. ntfy decodes them back to the
+  original; verified against the live service, title returned byte-identical.
+- **The guard is now deliberately broad.** Enumerating exception types is what caused the
+  bug, so the implementation stops enumerating and the *test* enumerates instead —
+  `URLError`, `OSError`, `UnicodeEncodeError`, `TimeoutError` and a plain `RuntimeError`,
+  all of which must come back as `failed: ...` rather than escape.
+
+The live round-trip is now a test, opt-in behind `LOCKIN_LIVE_NTFY=1`. A test that silently
+depends on a third party fails for reasons unrelated to the code; one that is never run
+proves nothing. Opt-in is the only version of it worth having.
+
+### `lockin advice`: the reader `recommendations` never had
+
+The same conversation turned up that `recommendations` was **written by `digest` and read
+by nothing**. The advice existed in two places — a push notification that scrolls away, and
+a table nothing surfaced. Re-running `digest` is not a substitute: it recomputes, and §20's
+Monte Carlo instability means it will not reproduce what you were told.
+
+There was an assumption worth correcting explicitly, because it is a natural one: the
+dashboard is *not* where recommendations live. It renders `manager_scorecards` — last
+season's decision quality — and would not change during a live week. Three surfaces, three
+questions:
+
+| command | question | delivery |
+|---|---|---|
+| `digest` | what do I do tonight | ntfy push, plus terminal |
+| `advice` | what did it say | static page, re-readable |
+| `dashboard` | who decided well last season | static page, retrospective |
+
+Designing the reader exposed two schema gaps. `recommendations` had no `roster_id`, so two
+rosters digested on the same day interleaved indistinguishably; it is now a nullable column,
+added additively so the rows written before it survive. And nothing stored the *state* the
+calls were taken against — P(win), projected totals, what was banked — without which a
+reader cannot render a past digest without recomputing it, which is the one thing it must
+not do. `digest_runs` holds that, one row per run, and is written even when there is
+nothing to decide: "no matchup this week" is a real answer, and a blank page would be
+indistinguishable from a cron that never ran.
+
+**Staleness is the loudest element on the page.** The failure mode of a recommendations
+page is showing yesterday's calls as today's, so age is measured from the morning the
+digest *describes* rather than from when the process ran — a run re-rendered at midnight
+for the previous morning is a day old whatever its timestamp says — and it appears as a
+coloured banner above the advice, not a footnote below it.
+
+Deliberately not a history browser. The question is "what am I supposed to do"; a date
+picker invites reading a stale answer on purpose.
+
 ### What is still live-only, and therefore still unverified
 
 Unchanged from §15, and none of it is closable before October:

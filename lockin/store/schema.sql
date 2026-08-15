@@ -392,6 +392,7 @@ CREATE TABLE IF NOT EXISTS roster_strength (
 CREATE TABLE IF NOT EXISTS recommendations (
     generated_at    TEXT NOT NULL,
     week            INTEGER NOT NULL,
+    roster_id       INTEGER,         -- nullable: rows written before this column
     sleeper_id      TEXT NOT NULL,
     action          TEXT NOT NULL,   -- LOCK / PASS / THRESHOLD
     for_day         INTEGER NOT NULL, -- proleptic Gregorian ordinal
@@ -401,6 +402,35 @@ CREATE TABLE IF NOT EXISTS recommendations (
     win_prob_delta  REAL,
     rationale       TEXT,
     PRIMARY KEY (generated_at, week, sleeper_id, action, for_day)
+);
+
+
+-- One row per `lockin digest` run: the state the per-player rows were decided
+-- against. Without it `recommendations` is a list of calls with no way to say
+-- what the matchup looked like when they were made, and `lockin advice` would
+-- have to recompute — which is the one thing a reader of this table must not do,
+-- because recomputing gives a different answer (Monte Carlo, §20) and because
+-- §12 means the inputs themselves are rewritten upstream.
+--
+-- Keyed by (generated_at, roster_id) rather than by date: re-running is a second
+-- opinion, not a correction, and both are kept.
+CREATE TABLE IF NOT EXISTS digest_runs (
+    generated_at        TEXT NOT NULL,
+    roster_id           INTEGER NOT NULL,
+    as_of               TEXT NOT NULL,   -- the morning being reconstructed
+    week                INTEGER NOT NULL,
+    opponent_roster_id  INTEGER,
+    p_win               REAL,
+    projected           REAL,
+    opponent_projected  REAL,
+    margin_p10          REAL,
+    margin_p50          REAL,
+    margin_p90          REAL,
+    banked_total        REAL,
+    banked_slots        INTEGER,
+    state_supplied      INTEGER,         -- 1 if --locked was given, 0 if inferred
+    note                TEXT,
+    PRIMARY KEY (generated_at, roster_id)
 );
 
 

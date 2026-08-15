@@ -47,6 +47,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "share_hi": "REAL",
     },
     "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
+    # Without it, two rosters digested on the same day interleave into one
+    # undistinguishable list. Nullable, so the rows written before it survive.
+    "recommendations": {"roster_id": "INTEGER"},
 }
 
 

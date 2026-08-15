@@ -3,8 +3,17 @@
 Read-only against Sleeper throughout: the API offers no way to act on your
 behalf, so every recommendation is executed by hand in the app. `digest` and
 `managers` are the two commands that write, and both write only to this
-project's own tables — `recommendations`, `manager_scorecards`,
+project's own tables — `recommendations`, `digest_runs`, `manager_scorecards`,
 `manager_decisions`, `roster_strength`.
+
+Three surfaces, three questions, and they are easy to confuse:
+
+    digest      what do I do tonight          -> push notification
+    advice      what did it say               -> a page you can re-read
+    dashboard   who decided well last season  -> a page, retrospective
+
+`advice` and `dashboard` are readers. Neither recomputes, and for `advice` that
+is a correctness rule rather than a performance one — see lockin/advice.py.
 
 The gates (`reconcile`, `verify`, `locks`, `calibrate`, `backtest`) live here
 rather than in the test suite because they need the ingested season and take
@@ -22,6 +31,7 @@ from pathlib import Path
 import click
 import numpy as np
 
+from lockin import advice as advice_mod
 from lockin import backtest as backtest_mod
 from lockin import calibrate as calibrate_mod
 from lockin import dashboard as dashboard_mod
@@ -547,7 +557,9 @@ def digest(
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from None
-        written = 0 if no_write else digest_mod.persist(conn, report)
+        written = (
+            0 if no_write else digest_mod.persist(conn, report, state_supplied=banked is not None)
+        )
 
     if as_json:
         click.echo(
@@ -648,6 +660,47 @@ def project(player: str, as_of: str, week: int, draws: int) -> None:
     click.echo(f"  mean         {dist.mean:.1f}")
     for q in (0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99):
         click.echo(f"  q{q:<11.2f} {float(dist.quantile(q)):.1f}")
+
+
+@main.command()
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("advice.html"),
+    show_default=True,
+    help="Where to write the page.",
+)
+@click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
+def advice(out: Path, roster: int | None) -> None:
+    """Render the last digest as a page: what to lock, and the standing rules.
+
+    Reads `recommendations` and `digest_runs`. It never recomputes, which here is
+    a correctness rule rather than a performance one — recomputing gives a
+    different answer (§20) and the upstream inputs are rewritten under us (§12),
+    so this is the only way to see what the engine actually said.
+    """
+    cfg = Config.from_env()
+    with session(cfg.db_path) as conn:
+        roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
+        if roster_id is None:
+            raise click.ClickException(f"no roster for user {cfg.user_id}")
+        run = advice_mod.latest_run(conn, roster_id)
+
+    if run is None:
+        raise click.ClickException(
+            f"no digest recorded for roster {roster_id}; run `lockin digest` first"
+        )
+
+    out.write_text(advice_mod.render(run))
+    age = run.age_days()
+    freshness = "for this morning" if age <= 0 else f"{age} day(s) old"
+    click.echo(f"wrote {out} — week {run.week}, {freshness} ({run.as_of})")
+    click.echo(
+        f"  {len(run.calls)} call(s), {len(run.rules)} standing rule(s),"
+        f" generated {run.generated_at}"
+    )
+    if age > 0:
+        click.echo("  the page says so in a red banner; re-run `lockin digest` to refresh.")
 
 
 @main.command()
