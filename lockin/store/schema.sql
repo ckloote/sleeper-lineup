@@ -40,6 +40,25 @@ CREATE TABLE IF NOT EXISTS rosters (
     PRIMARY KEY (league_id, roster_id, sleeper_id, observed_at)
 );
 
+-- Who each roster belongs to, by display name.
+--
+-- LIVE SNAPSHOT, replaced on every ingest rather than appended. A display name
+-- is an attribute the user can change at will and Sleeper serves it fresh from
+-- /league/{id}/users, so the newest is the only one worth keeping -- unlike
+-- `weekly_matchups`, where the history is the whole point.
+--
+-- Stored at all because `lockin serve` cannot fetch it: the server holds a
+-- read-only connection and rendering a page must not make network calls. Before
+-- this table the served dashboard could only say "roster 3".
+CREATE TABLE IF NOT EXISTS league_users (
+    league_id       TEXT NOT NULL,
+    roster_id       INTEGER NOT NULL,
+    owner_id        TEXT,
+    display_name    TEXT,
+    observed_at     TEXT NOT NULL,
+    PRIMARY KEY (league_id, roster_id)
+);
+
 
 -- ------------------------------------------------------------------ reference
 

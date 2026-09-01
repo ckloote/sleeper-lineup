@@ -191,6 +191,9 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
         n = sleeper_ingest.ingest_rosters(conn, client, cfg.league_id)
         click.echo(f"  rosters     {n} roster-player rows")
 
+        n = sleeper_ingest.ingest_users(conn, client, cfg.league_id)
+        click.echo(f"  managers    {n} display names")
+
         n = sleeper_ingest.ingest_players(conn, client)
         click.echo(f"  players     {n} (live snapshot)")
         days, status_rows = sleeper_ingest.status_coverage(conn)
@@ -462,30 +465,34 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
 
 
-def _manager_labels(cfg) -> dict[int, str]:
-    """Display names, which live only in the API — no table stores them."""
-    client = sleeper_ingest.SleeperClient()
-    users = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/users")
-    payload = client.get(f"{sleeper_ingest.V1}/league/{cfg.league_id}/rosters")
-    owner_to_roster = {r["owner_id"]: r["roster_id"] for r in payload}
-    return {
-        owner_to_roster[u["user_id"]]: u.get("display_name", "")
-        for u in users
-        if u["user_id"] in owner_to_roster
-    }
+def _manager_labels(cfg: Config, conn, *, refresh: bool) -> dict[int, str]:
+    """Display names for the roster columns, read from `league_users`.
+
+    `lockin ingest` stores them, so the normal case is a table read and
+    `--names` only forces a fresh fetch first. One writer, one reader: before
+    this, every caller fetched from the API itself, and `lockin serve` — which
+    cannot, holding a read-only connection — was left labelling rows "roster 3".
+    """
+    if refresh:
+        sleeper_ingest.ingest_users(conn, sleeper_ingest.SleeperClient(), cfg.league_id)
+    return dashboard_mod.labels(conn)
 
 
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
-@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+@click.option(
+    "--names",
+    is_flag=True,
+    help="Refresh display names from Sleeper first. Default: what `lockin ingest` stored.",
+)
 def teams(as_json: bool, names: bool) -> None:
     """Rank teams on roster quality — how good the side was, not how it was run."""
     cfg = Config.from_env()
     with _season(cfg) as conn:
         strengths = managers_mod.evaluate_rosters(conn, cfg.season)
         managers_mod.persist_rosters(conn, strengths)
+        labels = _manager_labels(cfg, conn, refresh=names)
 
-    labels = _manager_labels(cfg) if names else {}
     if as_json:
         click.echo(
             json.dumps(
@@ -540,7 +547,11 @@ def teams(as_json: bool, names: bool) -> None:
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
 @click.option("--sims", default=300, show_default=True, help="Simulations per decision.")
-@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+@click.option(
+    "--names",
+    is_flag=True,
+    help="Refresh display names from Sleeper first. Default: what `lockin ingest` stored.",
+)
 @click.option(
     "--competitive",
     is_flag=True,
@@ -556,8 +567,7 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
         n_decisions, n_cards = managers_mod.persist(conn, report)
         strengths = managers_mod.evaluate_rosters(conn, cfg.season)
         managers_mod.persist_rosters(conn, strengths)
-
-    labels = _manager_labels(cfg) if names else {}
+        labels = _manager_labels(cfg, conn, refresh=names)
 
     ranked = report.ranked()
     if as_json:
@@ -910,7 +920,11 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
     show_default=True,
     help="Where to write the page.",
 )
-@click.option("--names", is_flag=True, help="Fetch manager display names from Sleeper.")
+@click.option(
+    "--names",
+    is_flag=True,
+    help="Refresh display names from Sleeper first. Default: what `lockin ingest` stored.",
+)
 def dashboard(out: Path, names: bool) -> None:
     """Render the manager-quality page from what `lockin managers` stored.
 
@@ -920,7 +934,7 @@ def dashboard(out: Path, names: bool) -> None:
     """
     cfg = Config.from_env()
     with _season(cfg) as conn:
-        labels = _manager_labels(cfg) if names else {}
+        labels = _manager_labels(cfg, conn, refresh=names)
         rows = dashboard_mod.load(conn, labels)
         stamp = dashboard_mod.computed_at(conn)
 

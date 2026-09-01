@@ -121,6 +121,26 @@ def load(conn: sqlite3.Connection, labels: dict[int, str] | None = None) -> list
     ]
 
 
+def labels(conn: sqlite3.Connection) -> dict[int, str]:
+    """Roster id -> display name, for whichever league this database holds.
+
+    **Deliberately not filtered by league_id.** `--dashboard-db` points at last
+    season's database during the next one, and that season carries a different
+    league id — filtering on the current one would silently return nothing. One
+    database holds exactly one season by construction (day-one.md step 2), so
+    "every row here" is the right question.
+
+    Missing table is not an error: `connect_readonly` applies no schema, so a
+    database written before `league_users` existed simply has no names, and the
+    page falls back to roster numbers as it always did.
+    """
+    try:
+        rows = conn.execute("SELECT roster_id, display_name FROM league_users").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r["roster_id"]: r["display_name"] for r in rows if r["display_name"]}
+
+
 def computed_at(conn: sqlite3.Connection) -> str | None:
     row = conn.execute("SELECT MAX(computed_at) c FROM manager_scorecards").fetchone()
     return row["c"] if row else None

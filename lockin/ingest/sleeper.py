@@ -133,6 +133,42 @@ def current_weeks(league: dict) -> list[int]:
     return known
 
 
+def ingest_users(conn: sqlite3.Connection, client: SleeperClient, league_id: str) -> int:
+    """Display names for each roster, so a page can say who a manager is.
+
+    Sleeper publishes these live on /league/{id}/users and nowhere else, and no
+    other table carries them. They used to be fetched per render, which
+    `lockin serve` cannot do: it holds a read-only connection and a request
+    handler must not make network calls. So the served dashboard could only
+    label rows "roster 3".
+
+    Rows are replaced, not appended. A display name is a live attribute the user
+    can change and it is always refetchable, so only the newest is worth having.
+
+    Members without a roster are skipped: a league can carry a commissioner or a
+    co-owner who never owns one.
+    """
+    started = now_iso()
+    users = client.get(f"{V1}/league/{league_id}/users")
+    rosters = client.get(f"{V1}/league/{league_id}/rosters")
+    owner_to_roster = {r["owner_id"]: r["roster_id"] for r in rosters if r.get("owner_id")}
+
+    observed, n = now_iso(), 0
+    for user in users:
+        roster_id = owner_to_roster.get(user.get("user_id"))
+        if roster_id is None:
+            continue
+        conn.execute(
+            "INSERT OR REPLACE INTO league_users"
+            " (league_id, roster_id, owner_id, display_name, observed_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (league_id, roster_id, user.get("user_id"), user.get("display_name"), observed),
+        )
+        n += 1
+    log_ingest(conn, "sleeper", f"users:{league_id}", n, started)
+    return n
+
+
 def ingest_rosters(conn: sqlite3.Connection, client: SleeperClient, league_id: str) -> int:
     started, observed = now_iso(), now_iso()
     rows = client.rosters(league_id)

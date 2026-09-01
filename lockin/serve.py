@@ -87,7 +87,7 @@ def _advice_page(src: Sources) -> str:
 def _dashboard_page(src: Sources) -> str:
     conn = connect_readonly(src.dashboard_db)
     try:
-        rows = dashboard_mod.load(conn)
+        rows = dashboard_mod.load(conn, dashboard_mod.labels(conn))
         return dashboard_mod.render(rows, stamp=dashboard_mod.computed_at(conn))
     finally:
         conn.close()
