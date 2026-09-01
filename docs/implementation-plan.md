@@ -1105,6 +1105,37 @@ a different code path, a cache whose most recent entries are evicted first — a
 project cannot distinguish them from outside. It is recorded because it is measurable, and
 because the weekly sweep now makes it trackable.
 
+### Re-verifying the week-renumbering rebuttal — 2026-09-01
+
+Checked again before citing it externally, against today's payloads rather than August's.
+**The conclusion holds and the evidence for it is stronger; one supporting figure does
+not reproduce.**
+
+Comparing the earliest week-12 observation against today's response for all 25 weeks:
+
+| | week 12 | best of the other 24 |
+|---|---|---|
+| starter values agreeing | 43/60 | 2/46 (week 11) |
+| identical lineups | 10/10 | 4/10 (week 13) |
+
+Week 12 remains uniquely the match, by a wide margin, on the measure that carries the
+argument. The value agreement is *higher* than the 37/60 recorded above — consistent with
+the oscillation established earlier, since values that drifted away have drifted back.
+
+**The claim "0/10 lineups for every other week" is withdrawn.** Week 13 shares 4 of 10
+lineups with week 12 today. This is ordinary manager behaviour rather than evidence of
+anything: identical lineups between adjacent weeks average 2.4/10 across the season, and
+the playoff run is far higher — week 22 vs 23 is 7/10 and week 24 vs 25 is 10/10. Only 7
+of 300 week-pairs reach 4/10, so it is uncommon, but it is not the zero the section
+asserted, and "lineups genuinely vary week to week" is the defensible version of the
+point.
+
+A better fact replaces it, and it is the one to cite. Across all 11 weeks for which more
+than one observation exists, **the `starters` arrays are identical in every observation** —
+not one roster changed, in any week, at any time. Lineups are stable; only the points
+attached to unchanged players move. That is a cleaner statement of the same evidence and
+it does not depend on cross-week comparison at all.
+
 ---
 
 ## 13. Phase 3 — complete
