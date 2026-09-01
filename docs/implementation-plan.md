@@ -963,7 +963,12 @@ Three properties, each chosen against a specific way this went wrong:
   in-season daily polling does not churn. The directory listing *is* the mutation history.
 - **Earliest is preserved, never overwritten.** Drift is always measured against first
   observation, not against the last run, so a slow sequence of small changes cannot
-  accumulate unnoticed.
+  accumulate unnoticed. *(Aspirational until 2026-09-01: `save` wrote `{stamp}.json`
+  unconditionally, and the stamp resolves to the second, so two differing payloads inside
+  one second silently overwrote each other — the exact loss snapshots exist to prevent.
+  Surfaced by the `observe` suite, which reruns fast enough to collide. Names now
+  disambiguate to `{stamp}_2.json`, which sorts after the bare stamp and so keeps the
+  ordering `earliest` and `latest` rely on.)*
 
 `lockin reconcile` grew an advisory drift check that reports how many starter values have
 changed since first observation. Advisory rather than failing, since today's data is
@@ -972,6 +977,133 @@ season.
 
 Box scores are not snapshotted: they were byte-identical across the mutation and run ~2MB
 per week, so they are refetchable rather than irreplaceable.
+
+### Follow-up (2026-08-31): a third observation, and the compression hypothesis withdrawn
+
+The deployment's step 5 — "one live ingest, watching it" — re-fetched week 12 and the
+dedup wrote a third snapshot. It was an accident of testing, not a designed observation,
+and it invalidates this section's proposed mechanism.
+
+**What it confirms.** Independently re-derived: all 55 week-12 player-values that differ
+across the three observations are one of *that player's own game scores from that same
+week*, 55 of 55, none unexplained. Ivica Zubac reads 54.5 / 42.5 / 29.0, which are exactly
+his Jan 7, Jan 5 and Jan 10 games. The finding above stands — it is which game counts, not
+what the games were worth.
+
+**What it refutes.** This section concluded that the distribution was *compressed* — "mean
+rose from 286 to 293 while standard deviation fell from 39 to 24 … Extremes pulled toward
+the middle is what regeneration-toward-a-default looks like" — and from that inferred a
+one-time offseason migration. A third point does not fit that shape:
+
+```
+observation       mean     sd     min     max  spread
+20260806         285.9   39.0   221.5   346.5   125.0   the 2026-08-05 figures above
+20260808         292.9   23.7   242.5   331.0    88.5   the 2026-08-07 figures above
+20260901         282.0   45.0   201.5   345.5   144.0   new
+```
+
+Compression reversed and overshot. Dispersion is now *wider* than before the event this
+section was written to explain. Roster 7, the example used above — "221.5 disaster became
+289.0" — reads 201.5, below where it started. Roster 9 returned to 341.5 exactly.
+
+**Three claims the third observation supports.**
+
+- **It is ongoing, not a one-off.** 45 values changed between 2026-08-08 and 2026-09-01,
+  three and a half weeks after the mutation documented above, and five months after the
+  season went `status: complete`.
+- **It oscillates rather than converging.** 25 of the 55 moving values returned to a
+  previously observed value. A migration that lost stored state and regenerated it does
+  not revert.
+- **It is not resolved per read.** Six fetches of the same endpoint over ten seconds
+  returned byte-identical payloads. So this is not an unordered query answering differently
+  each time; something *writes* a new value periodically. A recurring write against a
+  completed season is a worse defect than a flaky read, not a better one.
+
+**Mechanism: still unresolved, one more hypothesis ruled out.** Per-read non-determinism
+joins week renumbering, mechanical fallback and DNP-zeroing on the ruled-out list.
+Regeneration-toward-a-default is withdrawn. What remains fits a periodic job rewriting the
+field, and — the dull possibility that is not strictly a bug — Lock-In leagues never
+persisting the lock choice at all, so every historical read is a regeneration that lands
+somewhere new. From this side those are indistinguishable, because Sleeper's matchup
+payload exposes no game id and no lock field. It publishes a number; the lock is our
+reconstruction of it, via `core/locks.py`.
+
+**What it costs, beyond what is above.** The decision of 2026-08-07 stands and is
+strengthened, but one sentence in it should be read more harshly. Calling the 2026-08-05
+values "the earliest available record" implies a later observation could be more or less
+authoritative. Three points say otherwise: **no observation is authoritative and none will
+be.** This is not fixable by choosing the right snapshot or fetching more carefully.
+
+The instability propagates into the recovered decisions, which is the concrete cost. The
+same box scores and the same inference rule, run against each observation:
+
+```
+20260806   locked_early= 44  rode_to_end= 15  unresolved= 1
+20260808   locked_early= 46  rode_to_end= 14  unresolved= 0
+20260901   locked_early= 39  rode_to_end= 20  unresolved= 1
+```
+
+Five starters who look like early lockers in August look like they rode to the end in
+September. So the manager profiles are not merely "how this manager's decisions look in
+the current data" — they are how they look *on the day the data was read*. Phases 0, 1 and
+the four box-score policies remain unaffected, for the reason already given.
+
+**Mitigation: sample on purpose.** Three observations exist by accident, over an interval
+nobody chose. `lockin observe` snapshots the matchup payload without touching the database
+and runs weekly from cron (deployment.md step 10). Dedup means a stable season costs
+nothing and a moving one records exactly when it moved — which is what would distinguish a
+scheduled batch job from cache eviction, and is the only way to characterize this further.
+
+### The mutation is concentrated at the end of the season — found 2026-09-01
+
+The first full `lockin observe` sweep, against snapshots last written in August, is the
+first time all 25 weeks have been compared at once. This section has only ever examined
+week 12, which turns out to be one of the quiet ones.
+
+```
+week  snaps  changed  starters moved   phase
+ 1-9      1        —               —   regular      quiet
+  10      2      yes               1   regular
+  11      1        —               —   regular      quiet
+  12      3        —               —   regular      quiet this sweep
+  13      2      yes               1   regular
+  14      2      yes               0   regular      payload moved, no starter value did
+  15      1        —               —   regular      quiet
+  16      2      yes               1   regular
+  17-18    1        —               —   regular      quiet
+  19      2      yes              18   regular
+  20      2      yes              23   regular
+  21      2      yes              23   regular
+  22      2      yes              28   playoffs
+  23      2      yes              32   playoffs
+  24      2      yes              13   playoffs
+  25      1        —               —   unscored     quiet
+```
+
+**137 of the 140 moved values are in weeks 19-24** — the last three regular-season weeks
+and all three playoff weeks. Weeks 1-18 contributed three values between them. Week 23 moved
+32 starter values, over half its 60.
+
+This reframes the section's central example. Week 12's 38% was not typical; it was a
+comparatively mild instance in a quiet part of the season, and the two 2026-08 observations
+that this section is built on caught it mid-wobble. The severity is far higher where the
+league's outcome was actually decided.
+
+Two consequences worth stating plainly:
+
+- **The manager-evaluation damage is worse than assessed above.** Phase 5 weights the
+  weeks that decided matchups, and those are exactly the mutated ones. "How this manager's
+  decisions look in the current data" is least trustworthy where it matters most.
+- **The `holdout_from=18` split in `calibrate` and `backtest` sits entirely inside the
+  mutated region.** Those gates read box scores, not `players_points`, so they are
+  unaffected in substance — but any future gate tempted to use the counted field on held-out
+  weeks would be reading the worst of it.
+
+No mechanism is proposed. A tail-weighted distribution is consistent with several dull
+explanations — a rebuild that walks the season and degrades, a playoff bracket rendered by
+a different code path, a cache whose most recent entries are evicted first — and this
+project cannot distinguish them from outside. It is recorded because it is measurable, and
+because the weekly sweep now makes it trackable.
 
 ---
 
