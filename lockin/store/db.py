@@ -11,6 +11,19 @@ from pathlib import Path
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
+class DatabaseMissing(Exception):
+    """The database named does not exist, and the caller did not ask to create one.
+
+    Its own type because the answer depends on which season you meant, and only
+    the caller knows: `lockin ingest` creates, everything else refuses. See
+    `connect`.
+    """
+
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = Path(db_path)
+        super().__init__(f"no database at {self.db_path}")
+
+
 def now_iso() -> str:
     """UTC timestamp for `observed_at` / `ingested_at` columns."""
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -30,14 +43,39 @@ def connect_readonly(db_path: Path) -> sqlite3.Connection:
 
     WAL means this coexists with the cron ingest writing at the same moment.
     """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        if not Path(db_path).exists():
+            raise DatabaseMissing(db_path) from exc
+        raise
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, isolation_level=None)
+def connect(db_path: Path, *, create: bool = True) -> sqlite3.Connection:
+    """Open for writing. With ``create=False``, refuse to invent the database.
+
+    Creating on demand is right for `lockin ingest`, which is how a season comes
+    into being, and wrong for everything else. A mistyped `LOCKIN_DB` used to
+    yield a valid, fully-schemed, *empty* database, so the gates reported
+    `0/25 weeks ingested` — a missing ingest — when the truth was a missing
+    setting. It also defeated the test suite's `db_path.exists()` skip guards,
+    which then errored instead of skipping.
+
+    `mode=rw` opens without creating, so SQLite enforces this rather than an
+    `exists()` check the caller could race against a concurrent ingest.
+    """
+    if create:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path, isolation_level=None)
+    else:
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True, isolation_level=None)
+        except sqlite3.OperationalError as exc:
+            if not Path(db_path).exists():
+                raise DatabaseMissing(db_path) from exc
+            raise
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -119,9 +157,13 @@ def apply_schema(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def session(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a connection with the schema applied, committing on clean exit."""
-    conn = connect(db_path)
+def session(db_path: Path, *, create: bool = True) -> Iterator[sqlite3.Connection]:
+    """Open a connection with the schema applied, committing on clean exit.
+
+    ``create=False`` raises `DatabaseMissing` rather than starting an empty
+    season; see `connect`.
+    """
+    conn = connect(db_path, create=create)
     try:
         apply_schema(conn)
         conn.execute("BEGIN")

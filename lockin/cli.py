@@ -25,7 +25,10 @@ checks.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -44,7 +47,7 @@ from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
 from lockin import serve as serve_mod
 from lockin import verify as verify_mod
-from lockin.config import ALL_STAT_WEEKS, Config
+from lockin.config import ALL_STAT_WEEKS, Config, load_env_file
 from lockin.core import projections as core_projections
 from lockin.ingest import nba as nba_ingest
 from lockin.ingest import sleeper as sleeper_ingest
@@ -92,7 +95,47 @@ def _parse_locked(spec: str | None) -> dict[str, float] | None:
 
 @click.group()
 def main() -> None:
-    """Sleeper NBA Lock-In lineup engine."""
+    """Sleeper NBA Lock-In lineup engine.
+
+    Configuration comes from the environment, and from `.env` in the working
+    directory for anything the environment does not already set — which is how
+    the cron entries and the systemd unit, neither of which sources a shell
+    profile, get `LOCKIN_DB`. See `lockin.config.load_env_file`.
+    """
+    try:
+        load_env_file()
+    except ValueError as exc:
+        # Cron mails tracebacks. This one is a hand-edited config file, so say
+        # which line and stop, rather than running against the default paths.
+        raise click.ClickException(str(exc)) from None
+
+
+def _missing_db(path: Path) -> click.ClickException:
+    return click.ClickException(
+        f"no database at {path}\n\n"
+        "Nothing but `lockin ingest` creates one, deliberately: a database made on\n"
+        "demand is an empty season, and every gate then reports `0/25 weeks\n"
+        "ingested` — a missing ingest, when the truth is a missing setting.\n\n"
+        "  wrong path   check LOCKIN_DB in .env, and that you are in the project\n"
+        f"               directory (this is {Path.cwd()})\n"
+        "  new host     copy last season across      (deployment.md step 3)\n"
+        "  new season   `lockin ingest` creates it   (day-one.md step 2)"
+    )
+
+
+@contextmanager
+def _season(cfg: Config) -> Iterator[sqlite3.Connection]:
+    """`session`, but a database that is not there is an error, not an empty season.
+
+    `ingest` is the one command that creates; see `lockin.store.db.connect`.
+    Every other command is asking a question about a season, and there is no
+    honest answer to give without one.
+    """
+    try:
+        with session(cfg.db_path, create=False) as conn:
+            yield conn
+    except db.DatabaseMissing as exc:
+        raise _missing_db(exc.db_path) from None
 
 
 @main.command()
@@ -111,7 +154,9 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
     week_list = _parse_weeks(weeks)
     client = sleeper_ingest.SleeperClient()
 
-    with session(cfg.db_path) as conn:
+    # The one command that may bring a database into being: this is how a season
+    # starts, on a fresh clone and on day one of the next one.
+    with session(cfg.db_path, create=True) as conn:
         click.echo(f"league {cfg.league_id} season {cfg.season} -> {cfg.db_path}")
 
         league = sleeper_ingest.ingest_league(conn, client, cfg.league_id)
@@ -181,7 +226,7 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
 def reconcile(as_json: bool) -> None:
     """Report on ingest completeness. Exits nonzero if a gate fails."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         checks = reconcile_mod.run(conn, cfg.season, cfg.snapshot_root)
 
     _render(checks, "Phase 0 reconciliation", as_json)
@@ -192,7 +237,7 @@ def reconcile(as_json: bool) -> None:
 def verify(as_json: bool) -> None:
     """Prove the scoring engine against the recorded season. Nonzero on failure."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         checks = verify_mod.run(conn, cfg.season)
 
     _render(checks, "Phase 1 scoring verification", as_json)
@@ -204,7 +249,7 @@ def verify(as_json: bool) -> None:
 def locks(as_json: bool, profiles: bool) -> None:
     """Recover every manager's lock decisions from the recorded season."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         rows, resolved = locks_mod.run_inference(conn, cfg.season)
         built = locks_mod.build_profiles(conn)
         checks = locks_mod.run(conn, cfg.season)
@@ -244,7 +289,7 @@ def locks(as_json: bool, profiles: bool) -> None:
 def calibrate(as_json: bool, draws: int, holdout_from: int) -> None:
     """Check the projection layer's quantiles against what happened. Nonzero on failure."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         checks, sample = calibrate_mod.run(
             conn, cfg.season, n_draws=draws, holdout_from=holdout_from
         )
@@ -274,7 +319,7 @@ def calibrate(as_json: bool, draws: int, holdout_from: int) -> None:
 def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
     """Replay every roster under each stopping policy. Nonzero on failure."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         checks, result = backtest_mod.run(
             conn, cfg.season, n_paths=paths, holdout_from=holdout_from
         )
@@ -348,7 +393,7 @@ def _manager_labels(cfg) -> dict[int, str]:
 def teams(as_json: bool, names: bool) -> None:
     """Rank teams on roster quality — how good the side was, not how it was run."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         strengths = managers_mod.evaluate_rosters(conn, cfg.season)
         managers_mod.persist_rosters(conn, strengths)
 
@@ -416,7 +461,7 @@ def teams(as_json: bool, names: bool) -> None:
 def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
     """Rank the managers on decision quality, holding roster talent constant."""
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         report = managers_mod.evaluate_managers(
             conn, cfg.season, n_sims=sims, competitive_only=competitive
         )
@@ -550,7 +595,7 @@ def digest(
     as_of = as_of or clock.today_iso(cfg.timezone)
     banked = _parse_locked(locked)
 
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
         if roster_id is None:
             raise click.ClickException(
@@ -649,7 +694,7 @@ def project(player: str, as_of: str, week: int, draws: int) -> None:
     import numpy as np
 
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         panel = projections_mod.load_panel(conn, cfg.season)
         source = core_projections.EWMAProjectionSource(panel, verify_mod.scoring_settings(conn))
         dist = source.project(
@@ -686,7 +731,7 @@ def advice(out: Path, roster: int | None) -> None:
     so this is the only way to see what the engine actually said.
     """
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
         if roster_id is None:
             raise click.ClickException(f"no roster for user {cfg.user_id}")
@@ -733,7 +778,12 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
     boundary, so do not port-forward it.
     """
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    # Checked here rather than on the first request: this runs under systemd, and
+    # a typo in `--dashboard-db` should fail the unit at start, not surface as a
+    # 500 the next time someone opens /dashboard on their phone.
+    if dashboard_db is not None and not dashboard_db.exists():
+        raise _missing_db(dashboard_db)
+    with _season(cfg) as conn:
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
     if roster_id is None:
         raise click.ClickException(f"no roster for user {cfg.user_id}; pass --roster")
@@ -781,7 +831,7 @@ def dashboard(out: Path, names: bool) -> None:
     load.
     """
     cfg = Config.from_env()
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         labels = _manager_labels(cfg) if names else {}
         rows = dashboard_mod.load(conn, labels)
         stamp = dashboard_mod.computed_at(conn)
@@ -825,7 +875,7 @@ def explain(
     as_of = as_of or clock.today_iso(cfg.timezone)
     banked = _parse_locked(locked)
 
-    with session(cfg.db_path) as conn:
+    with _season(cfg) as conn:
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
         if roster_id is None:
             raise click.ClickException(f"no roster for user {cfg.user_id}")

@@ -56,11 +56,19 @@ replay strangers.
 
 **Set `LOCKIN_DB` to a new file.** Do not ingest 2026-27 into `data/lockin.db`.
 
+`lockin ingest` is the one command that creates a database, which is what makes this step
+work on a path that does not exist yet. Every other command refuses a missing file, so if
+you set `LOCKIN_DB` and reach for `lockin digest` first, it will tell you to ingest.
+
 ```bash
 export LOCKIN_DB=data/lockin-2026.db
 export LOCKIN_LEAGUE_ID=<the id from step 1>
 export LOCKIN_SEASON=2026
 ```
+
+These outrank `.env`, so they hold for this shell even though deployment.md §3 left
+`LOCKIN_DB=data/lockin-2025.db` in the file. Once you are satisfied, edit `.env` to match —
+otherwise the cron and the systemd unit, which have only `.env`, keep last season's path.
 
 `box_scores`, `nba_schedule` and `league_settings` carry a season and would coexist safely.
 **`weekly_matchups` and `weekly_matchup_teams` do not**, and they are the tables every

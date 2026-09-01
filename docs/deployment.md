@@ -43,9 +43,26 @@ sudo timedatectl set-timezone America/New_York   # the host
 ```
 
 ```bash
-# /home/pi/lockin/.env  (or wherever your cron reads environment from)
+# /home/pi/lockin/.env
 LOCKIN_TZ=America/New_York
 ```
+
+`.env` is read by `lockin.config.load_env_file`, which every command runs before
+dispatching. That is the point of it being in code rather than in your shell profile:
+**cron and systemd do not source a profile**, so an `export` in `.bashrc` would fix the
+terminal and leave both scheduled paths on the defaults. It is `KEY=value` per line, `#`
+comments allowed, nothing expanded — `$(cat ...)` is literal text here and belongs in the
+crontab, where a shell runs it. A line that is not `KEY=value` stops the command with the
+line number rather than falling back silently.
+
+**Anything already in the environment wins**, which is what keeps day-one.md's `export
+LOCKIN_DB=data/lockin-2026.db` authoritative next season.
+
+It is read from the *working directory*, like `data/lockin-2025.db` itself. That is why
+every cron entry starts with `cd /home/pi/lockin` and the systemd unit sets
+`WorkingDirectory` — those lines are load-bearing, not decoration. `.env` is gitignored: it
+names this host's database, and may carry `LOCKIN_NTFY_TOPIC`, where the topic name is the
+whole of the secret.
 
 These are not redundant. The host timezone affects logs and cron scheduling; `LOCKIN_TZ`
 tells the *engine* what timezone NBA game dates are filed under, and it defaults to
@@ -83,9 +100,27 @@ Name it for its season from the start. Two seasons must never share a database:
 ones — see [day-one.md](day-one.md) step 2, which is where the second database appears.
 
 ```bash
-# /home/pi/lockin/.env
+# /home/pi/lockin/.env  — read by every command; see step 2
 LOCKIN_DB=data/lockin-2025.db
 ```
+
+**A wrong path here fails immediately, and says so.** Only `lockin ingest` creates a
+database; every other command refuses:
+
+```
+Error: no database at data/lockin-2025.bd
+
+  wrong path   check LOCKIN_DB in .env, and that you are in the project directory
+  new host     copy last season across      (deployment.md step 3)
+  new season   `lockin ingest` creates it   (day-one.md step 2)
+```
+
+This is deliberate, and it is the deployment's own scar tissue. `store.db.connect` used to
+create whatever it was pointed at and apply the schema to it, so a mistyped or unread
+`LOCKIN_DB` produced a valid, fully-schemed, *empty* database — and all five gates in step
+4 then reported `0/25 weeks ingested`. Every symptom named the ingest; the fault was the
+setting. `connect(create=False)` now opens with SQLite's `mode=rw`, so the refusal is
+enforced by SQLite rather than by an `exists()` check that a concurrent ingest could race.
 
 **What this does and does not buy you.**
 
@@ -212,6 +247,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/
 
 Then from the phone, on the LAN: `http://<pi>:8080/`. Over Tailscale it is the same URL
 with the tailnet address — the server binds all interfaces, so nothing further is needed.
+
+A bad `--dashboard-db` fails the unit at start rather than on the first request, so
+`systemctl status` tells you, instead of a phone showing a 500 in November.
 
 `--dashboard-db` is what makes the two-database split usable. Scorecards are retrospective:
 the only ones that exist during 2026-27 describe 2025-26, and they live in that season's

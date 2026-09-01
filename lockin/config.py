@@ -59,3 +59,62 @@ class Config:
             db_path=Path(db).expanduser(),
             snapshot_root=Path(snaps).expanduser(),
         )
+
+
+ENV_FILE = ".env"
+
+
+def load_env_file(path: Path | None = None) -> Path | None:
+    """Read ``.env`` into the process environment. Returns the file, or None.
+
+    The deployment runbook configures the Pi by writing ``LOCKIN_DB`` to
+    ``/home/pi/lockin/.env`` (deployment.md §2, §3), and nothing used to read
+    it: cron and systemd both start a process whose environment has never seen
+    that file, so the setting silently did nothing and the gates ran against
+    the default path. That failed as `0/25 weeks ingested` rather than as a
+    missing database, because `store.db.connect` creates what it cannot open.
+
+    Every command goes through ``lockin.cli.main``, which calls this before
+    dispatching, so the runbook's instruction is now true wherever it is
+    followed from.
+
+    **An existing variable always wins.** Values already in the environment are
+    left alone, so ``LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) lockin digest``
+    and day-one.md's ``export LOCKIN_DB=data/lockin-2026.db`` still override
+    the file. A ``.env`` that outranked an explicit export would reintroduce
+    this same bug pointing the other way — next season's ingest quietly writing
+    into last season's database, which `weekly_matchups` has no season column
+    to keep apart.
+
+    Resolved against the working directory, like ``data/lockin-2025.db``
+    itself; the cron entries and the systemd unit both enter the project first.
+
+    The format is ``KEY=value``, one per line, ``#`` comments and blank lines
+    ignored, an ``export`` prefix allowed so lines paste between here and a
+    shell, and one layer of matching quotes stripped. Nothing is expanded:
+    ``$HOME`` and ``$(cat ...)`` are literal text here, and belong in the
+    crontab, where a shell runs them.
+    """
+    env_path = Path(ENV_FILE) if path is None else path
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        # Loud, not lenient. A typo here is a misconfigured host, and this file
+        # exists because a setting that quietly did nothing cost a deployment.
+        if not sep or not key:
+            raise ValueError(f"{env_path}:{lineno}: expected KEY=value, got {raw.strip()!r}")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+    return env_path

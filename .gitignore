@@ -7,6 +7,11 @@ __pycache__/
 # uv-managed virtualenv (uv.lock IS committed)
 .venv/
 
+# Host configuration, read by lockin.config.load_env_file. Never committed: it
+# names this host's database, and may carry LOCKIN_NTFY_TOPIC — ntfy topics are
+# unauthenticated, so the topic name is the whole of the secret.
+.env
+
 # Local data — regenerable via `lockin ingest`
 *.db
 *.db-wal
