@@ -1136,6 +1136,12 @@ not one roster changed, in any week, at any time. Lineups are stable; only the p
 attached to unchanged players move. That is a cleaner statement of the same evidence and
 it does not depend on cross-week comparison at all.
 
+The report itself is [sleeper-bug-report.md](sleeper-bug-report.md), with every figure
+sourced back to `snapshots/`. `support@sleeper.com` is the only channel Sleeper offers —
+there is no developer contact anywhere in their API documentation. The open question there
+is the one this section cannot answer from outside: whether lock state is persisted for
+completed seasons at all.
+
 ---
 
 ## 13. Phase 3 — complete
