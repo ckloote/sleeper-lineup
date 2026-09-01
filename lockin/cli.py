@@ -51,7 +51,7 @@ from lockin.config import ALL_STAT_WEEKS, Config, load_env_file
 from lockin.core import projections as core_projections
 from lockin.ingest import nba as nba_ingest
 from lockin.ingest import sleeper as sleeper_ingest
-from lockin.store import db
+from lockin.store import db, snapshots
 from lockin.store.db import session
 
 CURRENT_WEEKS = "current"
@@ -244,6 +244,69 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
             click.echo(f"  game links  {linked} linked, {unlinked} unlinked")
 
     click.echo("done. run `lockin reconcile` to check the Phase 0 gates.")
+
+
+@main.command()
+@click.option("--weeks", default=None, help="Weeks: '1-25' or '12,13'. Default: all.")
+def observe(weeks: str | None) -> None:
+    """Snapshot the matchup payloads. Watches upstream; writes no database.
+
+    Sleeper keeps rewriting the completed 2025-26 season — which game counts for
+    a player-week, not what the games were worth (implementation-plan.md §12).
+    Three observations exist, all of them accidents of other work, spread over an
+    interval nobody chose. This is the deliberate version.
+
+    **It does not open the database, by design.** The mutation is upstream, and
+    the point is to record it without re-ingesting: a full `lockin ingest`
+    overwrites `box_scores`, moves `weekly_matchups` on, and would refetch a
+    completed season into the file that preserves it. Snapshots dedup on
+    content, so a stable week costs nothing and a moving one is written with the
+    time it moved — which is what tells a scheduled batch job apart from cache
+    eviction.
+
+    Safe to run against any season, including one in progress; it only ever adds
+    files under `snapshots/`.
+    """
+    cfg = Config.from_env()
+    try:
+        week_list = _parse_weeks(weeks)
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"{exc}. `observe` watches weeks that already happened, so name them."
+        ) from None
+
+    client = sleeper_ingest.SleeperClient()
+    stamp = sleeper_ingest.snapshot_stamp()
+    click.echo(f"league {cfg.league_id} season {cfg.season} -> {cfg.snapshot_root}")
+
+    changed = 0
+    for week in week_list:
+        before = snapshots.latest(cfg.snapshot_root, snapshots.MATCHUPS, cfg.season, week)
+        payload = client.matchups(cfg.league_id, week)
+        written = snapshots.save(
+            cfg.snapshot_root,
+            snapshots.MATCHUPS,
+            cfg.season,
+            week,
+            payload,
+            stamp=stamp,
+        )
+        if written is None:
+            click.echo(f"  week {week:>2}     unchanged")
+            continue
+
+        changed += 1
+        moved = snapshots.diff_counted(before, payload) if before is not None else []
+        note = f"{len(moved)} starter values" if before is not None else "first observation"
+        click.echo(f"  week {week:>2}     CHANGED  {note}  -> {written}")
+        for roster_id, sleeper_id, was, now in moved[:3]:
+            click.echo(f"               roster {roster_id} player {sleeper_id}  {was} -> {now}")
+        if len(moved) > 3:
+            click.echo(f"               ... and {len(moved) - 3} more")
+
+    click.echo(f"  observed    {len(week_list)} weeks, {changed} changed")
+    if changed:
+        click.echo("commit the new snapshots — they cannot be refetched.")
 
 
 @main.command()

@@ -338,6 +338,42 @@ Then open the page. It reports its own health:
 
 ---
 
+## 10. Watch upstream for rewrites
+
+Sleeper is still rewriting the completed 2025-26 season — not stat corrections, but which
+game counts for a player-week (implementation-plan.md §12). It is ongoing, it oscillates,
+and it is worst in weeks 19-24, where the league was actually decided. There is no
+historical endpoint, so an unobserved change is gone.
+
+```bash
+uv run --frozen lockin observe
+```
+
+**It does not open the database.** That is the point: a full `lockin ingest` would refetch
+a completed season into the file that preserves it, which is what step 3 forbids. `observe`
+only ever adds files under `snapshots/`, deduplicated on content, so a stable week costs
+nothing.
+
+```
+  week 12     unchanged
+  week 23     CHANGED  32 starter values  -> snapshots/matchups/2025/wk23/20260901T020226Z.json
+               roster 1 player 2449  0.0 -> 47.0
+  observed    25 weeks, 9 changed
+```
+
+Weekly is enough — the observed interval between rewrites is weeks, not hours:
+
+```cron
+15 5 * * 0  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin observe >> logs/observe.log 2>&1
+```
+
+Sunday 05:15, deliberately clear of the 06:30 ingest and the 09:00 digest; it needs no
+database, so an overlap would be harmless anyway.
+
+**Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
+and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot
+commit for you — check `git status snapshots/` when you see a changed week in the log.
+
 ## What this deployment does not include
 
 - **Nothing runs against a live league**, because there is not one until the commissioner

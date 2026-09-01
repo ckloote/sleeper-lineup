@@ -81,6 +81,17 @@ def save(
     d = week_dir(root, kind, season, week)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{stamp}.json"
+
+    # Never overwrite. `stamp` resolves to the second, and two differing payloads
+    # can land inside one — a rerun, or one run's own retry — in which case the
+    # earlier observation is the irreplaceable one. `_2` sorts after `.json`
+    # (0x5F > 0x2E), so disambiguated names keep the time ordering that
+    # `earliest` and `latest` depend on.
+    n = 2
+    while path.exists():
+        path = d / f"{stamp}_{n}.json"
+        n += 1
+
     path.write_text(json.dumps(payload, sort_keys=True, indent=None))
     return path
 
