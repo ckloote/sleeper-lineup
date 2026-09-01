@@ -17,6 +17,7 @@ from typing import Any
 
 import requests
 
+from lockin.config import ALL_STAT_WEEKS
 from lockin.ingest.validate import (
     check_shot_consistency,
     validate_league,
@@ -89,6 +90,47 @@ def ingest_league(conn: sqlite3.Connection, client: SleeperClient, league_id: st
     )
     log_ingest(conn, "sleeper", f"league:{league_id}", 1, started)
     return league
+
+
+def current_weeks(league: dict) -> list[int]:
+    """Which weeks are still moving, from Sleeper's own view of its calendar.
+
+    The cron used to pass ``$(date +%V)``, the ISO calendar week. Fantasy weeks
+    are 1-25 and nothing maps between the two: in October that asked for week 40
+    and got nothing, and in January it asked for week 3 and cheerfully
+    re-ingested October every morning. Sleeper publishes the answer, so ask it.
+
+    ``settings.leg`` is the week being played now; ``settings.last_scored_leg``
+    is the last one it has finished scoring. Usually the same week, and this
+    returns one. Around a week boundary they differ — ``leg`` has rolled over
+    while the week just gone is still being settled — and both come back, so the
+    finished week gets its final numbers instead of keeping whatever the last
+    run happened to see.
+
+    Two weeks at most, by construction. This runs unattended every morning, and
+    a job whose cost depends on the calendar is one that surprises somebody in
+    March.
+    """
+    settings = league.get("settings") or {}
+    leg = settings.get("leg")
+    if not isinstance(leg, int):
+        raise ValueError(
+            "league.settings.leg is missing or not a number, so there is no way to "
+            "tell which fantasy week it is; pass --weeks explicitly"
+        )
+    weeks = {leg}
+    last_scored = settings.get("last_scored_leg")
+    if isinstance(last_scored, int):
+        weeks.add(last_scored)
+
+    known = sorted(w for w in weeks if w in ALL_STAT_WEEKS)
+    if not known:
+        raise ValueError(
+            f"Sleeper reports leg={leg}, outside the {min(ALL_STAT_WEEKS)}-"
+            f"{max(ALL_STAT_WEEKS)} weeks this league scores; if the season has not "
+            "started there is nothing to ingest yet"
+        )
+    return known
 
 
 def ingest_rosters(conn: sqlite3.Connection, client: SleeperClient, league_id: str) -> int:

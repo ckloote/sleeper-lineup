@@ -54,17 +54,27 @@ from lockin.ingest import sleeper as sleeper_ingest
 from lockin.store import db
 from lockin.store.db import session
 
+CURRENT_WEEKS = "current"
+
 
 def _parse_weeks(spec: str | None) -> list[int]:
+    """Weeks named literally. `current` is resolved later; see `ingest`."""
     if not spec:
         return list(ALL_STAT_WEEKS)
+    if spec.strip().lower() == CURRENT_WEEKS:
+        raise ValueError(f"{CURRENT_WEEKS!r} is resolved from the league, not parsed here")
     out: list[int] = []
-    for part in spec.split(","):
-        if "-" in part:
-            lo, hi = part.split("-", 1)
-            out.extend(range(int(lo), int(hi) + 1))
-        else:
-            out.append(int(part))
+    try:
+        for part in spec.split(","):
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                out.extend(range(int(lo), int(hi) + 1))
+            else:
+                out.append(int(part))
+    except ValueError:
+        raise click.BadParameter(
+            f"{spec!r} is not a week list: expected '12', '12,13', '1-25', or {CURRENT_WEEKS!r}"
+        ) from None
     return out
 
 
@@ -139,7 +149,11 @@ def _season(cfg: Config) -> Iterator[sqlite3.Connection]:
 
 
 @main.command()
-@click.option("--weeks", default=None, help="Week range, e.g. '1-25' or '12,13'. Default: all.")
+@click.option(
+    "--weeks",
+    default=None,
+    help="Weeks: '1-25', '12,13', or 'current' for the week Sleeper is playing. Default: all.",
+)
 @click.option("--skip-nba", is_flag=True, help="Skip the NBA schedule ingest.")
 @click.option("--skip-tipoffs", is_flag=True, help="Skip the per-date tipoff sweep (slow).")
 def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
@@ -151,7 +165,10 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
     depend on remembering a flag. See `lockin.ingest.sleeper.ingest_players`.
     """
     cfg = Config.from_env()
-    week_list = _parse_weeks(weeks)
+    # `current` needs the league payload, which the ingest fetches below anyway —
+    # so it costs no extra call, and cannot disagree with the run it belongs to.
+    from_league = (weeks or "").strip().lower() == CURRENT_WEEKS
+    week_list = [] if from_league else _parse_weeks(weeks)
     client = sleeper_ingest.SleeperClient()
 
     # The one command that may bring a database into being: this is how a season
@@ -162,6 +179,14 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
         league = sleeper_ingest.ingest_league(conn, client, cfg.league_id)
         roster_positions = league["roster_positions"]
         click.echo(f"  league      slots={' '.join(roster_positions[:6])}")
+
+        if from_league:
+            try:
+                week_list = sleeper_ingest.current_weeks(league)
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from None
+            named = ", ".join(str(w) for w in week_list)
+            click.echo(f"  weeks       current -> {named}")
 
         n = sleeper_ingest.ingest_rosters(conn, client, cfg.league_id)
         click.echo(f"  rosters     {n} roster-player rows")

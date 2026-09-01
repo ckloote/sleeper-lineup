@@ -202,12 +202,30 @@ tested deliberately, and testing it found a crash (§20).
 ## 7. Install the cron
 
 ```cron
-30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks $(date +\%V) >> logs/ingest.log 2>&1
+30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks current >> logs/ingest.log 2>&1
 0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
 5  9 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin advice >> logs/digest.log 2>&1
 ```
 
 `mkdir -p logs` first, and add a logrotate rule — nothing here truncates them.
+
+**`--weeks current` asks Sleeper, not the calendar.** It reads `settings.leg` from the
+league payload the ingest already fetches, so it costs no extra request and cannot disagree
+with the run it belongs to. It returns the week being played, plus the previous one while
+that is still being scored — two weeks at most, never the whole season. The run prints what
+it resolved:
+
+```
+  weeks       current -> 12
+```
+
+This replaced `--weeks $(date +\%V)`, the ISO calendar week, which was wrong every day it
+ran. Fantasy weeks are 1-25 and nothing maps between them: in October that asked for week
+40 and ingested nothing, and in January it asked for week 3 and re-ingested October every
+morning. Nothing announced it — `--weeks` takes any integer, the availability capture runs
+regardless, and the digest still finds box scores — so the season would have quietly
+stopped advancing with only `lockin reconcile` to say so. It also takes the last `\%`
+out of the crontab, where an unescaped `%` silently truncates the command.
 
 Ordering matters: ingest writes what the digest reads, and `advice` re-renders the page
 from what the digest wrote.
