@@ -231,19 +231,45 @@ After=network-online.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/lockin
-ExecStart=/home/pi/.local/bin/uv run --frozen lockin serve --quiet \\
-  --dashboard-db data/lockin-2025.db
+ExecStart=/home/pi/.local/bin/uv run --frozen lockin serve --quiet --dashboard-db data/lockin-2025.db
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+sudo systemctl daemon-reload
 sudo systemctl enable --now lockin-serve
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/
 ```
 
 **Pass:** `200`.
+
+**`ExecStart` is one line, and must stay one line.** It is long and the temptation is to wrap
+it. systemd's line continuation is a *single* trailing backslash, and the heredoc above is
+quoted (`<<'EOF'`), so whatever you type lands in the file verbatim — no shell escaping. A
+`\\` there is an escaped backslash, not a continuation: systemd ends the directive, passes a
+literal `\` to `lockin serve`, and silently drops the next line. That fails as
+
+```
+Error: Got unexpected extra argument (\)
+```
+
+with `--dashboard-db` quietly gone, which is the harder half to notice.
+
+**Check what systemd parsed, not what you wrote**, because those are different questions:
+
+```bash
+systemctl show lockin-serve -p ExecStart | tr ';' '\n' | grep argv
+```
+
+Every flag you intended should be on that line. If a restart loop has already tripped the
+rate limiter — `Start request repeated too quickly` — clear it with `sudo systemctl
+reset-failed lockin-serve` before starting again, or systemd will refuse without retrying.
+
+Adapt `User`, `WorkingDirectory` and the `uv` path to the account you deployed under; the
+`/home/pi` values here are illustrative. `WorkingDirectory` is the one that must be right
+regardless: it is where `.env` is read from (step 2).
 
 Then from the phone, on the LAN: `http://<pi>:8080/`. Over Tailscale it is the same URL
 with the tailnet address — the server binds all interfaces, so nothing further is needed.
