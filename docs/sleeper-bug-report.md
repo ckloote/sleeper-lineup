@@ -1,10 +1,20 @@
 # Reporting the upstream mutation to Sleeper
 
-The finding is [implementation-plan.md §12](implementation-plan.md) and its two follow-ups:
-Sleeper is still rewriting the completed 2025-26 season, five months on, and it is worst in
-weeks 19-24 where the league was decided. This file is the report itself, kept in the repo
-because every figure in it is reproducible from `snapshots/` and will need restating if
-they reply.
+The finding is [implementation-plan.md §12](implementation-plan.md) and its follow-ups:
+Sleeper is still rewriting the completed 2025-26 season, five months on. This file is the
+report itself, kept in the repo because every figure in it is reproducible from
+`snapshots/` and will need restating if they reply.
+
+> **Status: Part 1 sent 2026-09-01. One of its claims was withdrawn on 2026-09-02.**
+>
+> The next day's observation moved 497 starter values across 24 of 25 weeks, putting only
+> 27% of them in weeks 19-24. The concentration Part 1 leads on was true of one 24-day
+> window and is not a property of the mutation. **Parts 1 and 2 below are left exactly as
+> sent** — rewriting a report already in someone's inbox would only make this file disagree
+> with what they are holding. Part 3 is the correction to send.
+>
+> Everything else in it survives and is strengthened: ongoing, oscillating, not per-read,
+> box scores and lineups stable.
 
 **Where it goes: `support@sleeper.com`.** That is the only channel Sleeper offers for this.
 Their [contact page](https://support.sleeper.com/en/articles/8017487-general-contact-information)
@@ -28,7 +38,7 @@ Send **Part 1**. Send Part 2 if they engage.
 
 ---
 
-## Part 1 — first contact
+## Part 1 — first contact (sent 2026-09-01)
 
 ```text
 To: support@sleeper.com
@@ -68,7 +78,7 @@ Thanks,
 
 ---
 
-## Part 2 — the full report
+## Part 2 — the full report (not sent)
 
 ```text
 To: support@sleeper.com
@@ -186,6 +196,55 @@ Thanks,
 
 ---
 
+## Part 3 — the correction, to send
+
+Unprompted, and worth sending even without a reply. The retraction costs nothing — the
+replacement figure is a stronger headline than the one it withdraws, and an engineer who
+finds the first claim unreproducible will discard the whole report.
+
+```text
+To: support@sleeper.com
+Subject: Re: Completed NBA season's results still changing months later (league 1283214955830575104)
+
+Hi,
+
+Correcting one thing in my message of 1 September, and adding a much larger
+number.
+
+I said 137 of 140 changed values fell in weeks 19-24. That was true of the one
+24-day window I had measured, but it is not a property of the problem, and I
+would not want you chasing the playoff weeks on the strength of it.
+
+I have since started sampling daily. Between 2026-09-01 02:02 UTC and
+2026-09-02 03:16 UTC — 25 hours, no games played — 497 starter values changed
+across 24 of the 25 weeks. Only 132 of those were in weeks 19-24, which is 27%,
+about what six weeks out of twenty-four gives you by chance. So the rewriting is
+season-wide, and far faster than I could see when I was sampling by accident.
+
+The rate is also not constant: 140 values in the preceding 24 days, then 497 in
+a single day. Something either changed at your end in that window, or the
+earlier period was unusually quiet.
+
+One player as an illustration. Ivica Zubac (1697), roster 1, week 12, across
+four observations of that same finished week:
+
+  2026-08-06   54.5   (his Jan 7 game)
+  2026-08-08   42.5   (Jan 5)
+  2026-09-01   29.0   (Jan 10)
+  2026-09-02   54.5   (Jan 7 again)
+
+Four reads, four different games, back where it started. His stat lines and his
+lineup slot never changed.
+
+Everything else in my original message stands, and the daily series will keep
+accumulating. Happy to share it.
+
+Thanks,
+[your name]
+```
+
+---
+
 ## Reproducing the figures
 
 All of it runs off the committed archive; none of it needs the network or the database.
@@ -207,7 +266,8 @@ their own and are about 5 KB each.
 The most useful outcome is a yes/no on whether lock state is persisted for completed
 seasons. A "yes, expected" closes §12's open mechanism question and means the archive is
 the only route to a stable record — which is what `lockin observe` already assumes. A "no,
-that's a bug" makes the weeks 19-24 concentration the thing to hand over next.
+that's a bug" makes the daily series the thing to hand over next — particularly if the
+elevated rate turns out to be a burst rather than the norm.
 
 Either way the project's decision does not change: today's data stays canonical, `Actual`
 stays ungated, and the four box-score policies are unaffected.

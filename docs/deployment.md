@@ -360,8 +360,8 @@ Then open the page. It reports its own health:
 
 Sleeper is still rewriting the completed 2025-26 season — not stat corrections, but which
 game counts for a player-week (implementation-plan.md §12). It is ongoing, it oscillates,
-and it is worst in weeks 19-24, where the league was actually decided. There is no
-historical endpoint, so an unobserved change is gone.
+and it moves faster than anyone guessed: 497 starter values across 24 of 25 weeks in a
+single day. There is no historical endpoint, so an unobserved change is gone.
 
 ```bash
 uv run --frozen lockin observe
@@ -373,24 +373,35 @@ only ever adds files under `snapshots/`, deduplicated on content, so a stable we
 nothing.
 
 ```
-  week 12     unchanged
-  week 23     CHANGED  32 starter values  -> snapshots/matchups/2025/wk23/20260901T020226Z.json
-               roster 1 player 2449  0.0 -> 47.0
-  observed    25 weeks, 9 changed
+  week 11     CHANGED  20 starter values  -> snapshots/matchups/2025/wk11/20260902T031645Z.json
+               roster 2 player 1924  46.0 -> 15.0
+               ... and 17 more
+  week 25     unchanged
+  observed    25 weeks, 24 changed
 ```
 
-Weekly is enough — the observed interval between rewrites is weeks, not hours:
+**Daily.** Weekly was the first setting and it lasted exactly one run: that run found 497
+starter values moved across 24 of 25 weeks in the 25 hours since the previous sweep. A
+series whose interval is longer than the thing it measures records that something changed
+and loses when, which is the only question it exists to answer.
 
 ```cron
-15 5 * * 0  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin observe >> logs/observe.log 2>&1
+15 5 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin observe >> logs/observe.log 2>&1
 ```
 
-Sunday 05:15, deliberately clear of the 06:30 ingest and the 09:00 digest; it needs no
-database, so an overlap would be harmless anyway.
+05:15, deliberately clear of the 06:30 ingest and the 09:00 digest; it needs no database,
+so an overlap would be harmless anyway. 25 requests against a documented ceiling of 1000
+a minute, and dedup means a quiet season writes nothing at all.
+
+Revisit the interval once the cadence is known — a fortnight of daily observations should
+settle whether this runs on a clock or in bursts. Until then, err dense: the samples cannot
+be taken retrospectively.
 
 **Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
 and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot
-commit for you — check `git status snapshots/` when you see a changed week in the log.
+commit for you — check `git status snapshots/` when you see a changed week in the log. At
+daily cadence on a moving season that is up to 25 small files a day, so make it a habit
+rather than an occasional sweep.
 
 ## What this deployment does not include
 

@@ -1050,11 +1050,13 @@ the four box-score policies remain unaffected, for the reason already given.
 
 **Mitigation: sample on purpose.** Three observations exist by accident, over an interval
 nobody chose. `lockin observe` snapshots the matchup payload without touching the database
-and runs weekly from cron (deployment.md step 10). Dedup means a stable season costs
+and runs daily from cron (deployment.md step 10). Dedup means a stable season costs
 nothing and a moving one records exactly when it moved — which is what would distinguish a
 scheduled batch job from cache eviction, and is the only way to characterize this further.
+Weekly was the first setting and it was too coarse: the very first run showed the field
+moving faster than the sampling interval, which is the one thing a series must not do.
 
-### The mutation is concentrated at the end of the season — found 2026-09-01
+### An apparent end-of-season concentration — found 2026-09-01, withdrawn 2026-09-02
 
 The first full `lockin observe` sweep, against snapshots last written in August, is the
 first time all 25 weeks have been compared at once. This section has only ever examined
@@ -1102,8 +1104,39 @@ Two consequences worth stating plainly:
 No mechanism is proposed. A tail-weighted distribution is consistent with several dull
 explanations — a rebuild that walks the season and degrades, a playoff bracket rendered by
 a different code path, a cache whose most recent entries are evicted first — and this
-project cannot distinguish them from outside. It is recorded because it is measurable, and
-because the weekly sweep now makes it trackable.
+project cannot distinguish them from outside.
+
+**Withdrawn the next day.** The first unattended `observe` run, 25 hours later, moved 497
+starter values across 24 of 25 weeks. Weeks 19-24 took 132 of them — 27%, which is what
+six weeks in twenty-four gets by chance:
+
+| | 2026-08-08 → 09-01 (24 days) | 2026-09-01 → 09-02 (25 hours) |
+|---|---|---|
+| weeks moved | 10 | 24 of 25 |
+| starter values moved | 140 | 497 |
+| share in weeks 19-24 | 137/140 (98%) | 132/497 (27%) |
+
+So the concentration is not a property of the mutation. It was true of that window and
+nothing more, and the paragraphs above that reason from it — the manager-evaluation
+damage being worst where the league was decided, the `holdout_from=18` remark — do not
+follow. The season-wide rate is what the second window shows.
+
+**What the two windows do establish is that the rate is not constant.** 140 values in 24
+days and 497 in one are not one process running steadily. Either something happened
+upstream in that 25 hours, or the earlier window was unusually quiet. One transition
+cannot say which, and this is exactly the question daily sampling answers — which is why
+`observe` moved from weekly to daily on 2026-09-02.
+
+One confound worth recording, because it will not be visible later. The report in
+[sleeper-bug-report.md](sleeper-bug-report.md) was sent to Sleeper during that same 25-hour
+window. If the burst is someone acting on it, the elevated rate should subside once they
+stop; if it is routine, it should persist. Stated as a hypothesis with a test, not as a
+belief — the prior should be low, the window is wide, and a support queue does not usually
+turn into a backfill job overnight.
+
+Zubac's week 12, meanwhile, has closed a full circle: 54.5 → 42.5 → 29.0 → 54.5 across four
+observations — his Jan 7, Jan 5, Jan 10 and Jan 7 games. Four reads of one finished week,
+ending where they started. The oscillation established above is not drift with a direction.
 
 ### Re-verifying the week-renumbering rebuttal — 2026-09-01
 
