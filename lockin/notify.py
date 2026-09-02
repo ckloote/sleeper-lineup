@@ -55,6 +55,24 @@ def topic() -> str | None:
     return value or None
 
 
+def redacted(name: str, *, keep: int = 6) -> str:
+    """Enough of the topic to tell which one it is, not enough to subscribe.
+
+    The status line below goes straight into a cron log — a file on disk, and
+    not the secret store a topic deserves. deployment.md §6 generates the topic
+    from /dev/urandom and chmod 600s the file, and then the digest wrote it out
+    in full every morning into a log nothing protects.
+
+    An ntfy topic is the whole of the authentication: anyone who knows it reads
+    the lineup, and anyone who guesses it can write to it. A six-character
+    prefix of a 24-byte random name confirms you are looking at the right topic
+    while leaving it unguessable.
+    """
+    if len(name) <= keep:
+        return "…"
+    return f"{name[:keep]}…"
+
+
 def send(body: str, cfg: Config, *, title: str = "Lock-in digest") -> str:
     """Publish the digest. Returns a human-readable outcome, never raises.
 
@@ -85,7 +103,7 @@ def send(body: str, cfg: Config, *, title: str = "Lock-in digest") -> str:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             if 200 <= response.status < 300:
-                return f"sent to {server}/{name}"
+                return f"sent to {server}/{redacted(name)}"
             return f"failed: HTTP {response.status}"
     except Exception as exc:  # noqa: BLE001
         # Deliberately broad, and the module docstring is the specification:

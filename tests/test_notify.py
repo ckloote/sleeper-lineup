@@ -87,9 +87,35 @@ def test_a_blank_topic_counts_as_off(monkeypatch):
 # --------------------------------------------------------------- success path
 
 
-def test_a_2xx_reports_sent_and_says_where(sent):
+def test_a_2xx_reports_sent_and_says_where_without_leaking_the_topic(sent):
+    """The status line lands in a cron log; the topic is the whole secret.
+
+    deployment.md §6 generates it from /dev/urandom and chmod 600s the file it
+    lives in — and this line then wrote it, in full, into logs/digest.log every
+    morning at 09:00.
+    """
     result = notify.send(BODY, cfg)
-    assert result == "sent to https://ntfy.sh/unit-test-topic"
+
+    assert result == "sent to https://ntfy.sh/unit-t…"
+    assert "unit-test-topic" not in result
+
+
+@pytest.mark.parametrize("name", ["", "a", "short", "sixchr"])
+def test_a_short_topic_is_withheld_entirely(name):
+    """Below the prefix length there is nothing safe to show."""
+    assert notify.redacted(name) == "…"
+    assert name not in notify.redacted(name) or name == ""
+
+
+def test_redaction_leaves_the_topic_unguessable():
+    """24 random bytes, base64, minus the non-alphanumerics — as §6 generates it."""
+    topic = "6lKgDfMwMBTEqYLfNAN5XI6S"
+
+    shown = notify.redacted(topic)
+
+    assert shown == "6lKgDf…"
+    assert topic not in shown
+    assert len(shown) < len(topic)
 
 
 def test_the_request_is_shaped_the_way_ntfy_expects(sent):
@@ -110,7 +136,7 @@ def test_the_body_carries_utf_8_not_a_mangled_approximation(sent):
 
 def test_a_self_hosted_server_is_honoured_without_a_double_slash(monkeypatch, sent):
     monkeypatch.setenv("LOCKIN_NTFY_SERVER", "http://pi.local:8080/")
-    assert notify.send(BODY, cfg) == "sent to http://pi.local:8080/unit-test-topic"
+    assert notify.send(BODY, cfg) == "sent to http://pi.local:8080/unit-t…"
     assert sent["request"].full_url == "http://pi.local:8080/unit-test-topic"
 
 

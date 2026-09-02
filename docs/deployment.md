@@ -191,8 +191,15 @@ LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) \
   uv run --frozen lockin digest --date 2026-01-08 --locked 1000:46.0,1787:47.5 --notify
 ```
 
-**Pass:** the last line reads `notification: sent to https://ntfy.sh/<topic>`, and it
-arrives on the phone with the column alignment intact.
+**Pass:** the last line reads `notification: sent to https://ntfy.sh/<first six chars>…`,
+and it arrives on the phone with the column alignment intact.
+
+**The topic is truncated on purpose.** This line is redirected into `logs/digest.log` by
+the cron below, so printing it whole would write the secret into an unprotected file every
+morning — having just generated it from `/dev/urandom` and `chmod 600`'d it. Six characters
+of a 24-byte random name confirm you are looking at the right topic and leave it
+unguessable. If you need the whole thing, it is in `~/.lockin-topic`, which is where it
+should be.
 
 This is worth doing by hand because the send path had never executed once until it was
 tested deliberately, and testing it found a crash (§20).
@@ -207,7 +214,9 @@ tested deliberately, and testing it found a crash (§20).
 5  9 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin advice >> logs/digest.log 2>&1
 ```
 
-`mkdir -p logs` first, and add a logrotate rule — nothing here truncates them.
+`mkdir -p logs && chmod 700 logs` first, and add a logrotate rule — nothing here truncates
+them. The mode matters: these logs record what the digest decided about your lineup every
+morning, and the ntfy status line names the topic they were sent to.
 
 **`--weeks current` asks Sleeper, not the calendar.** It reads `settings.leg` from the
 league payload the ingest already fetches, so it costs no extra request and cannot disagree
