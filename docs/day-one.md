@@ -107,8 +107,11 @@ publishes the real numbers, and a different playoff format would move them:
 
 ```bash
 uv run python -c "
-import json, sqlite3, os
-c=sqlite3.connect(os.environ['LOCKIN_DB']); c.row_factory=sqlite3.Row
+import json
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file()
+c=connect_readonly(Config.from_env().db_path)
 s=json.loads(c.execute('SELECT payload_json FROM league_settings LIMIT 1').fetchone()['payload_json'])['settings']
 print({k:s[k] for k in ('start_week','playoff_week_start','last_scored_leg','playoff_teams')})
 "
@@ -160,9 +163,13 @@ Run this on a day with games scheduled, **before tip**:
 
 ```bash
 uv run python -c "
-import os, sqlite3, datetime as dt
-c=sqlite3.connect(os.environ['LOCKIN_DB']); c.row_factory=sqlite3.Row
-today=dt.date.today().isoformat()
+from lockin import clock
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file()
+cfg=Config.from_env()
+c=connect_readonly(cfg.db_path)
+today=clock.today_iso(cfg.timezone)
 r=c.execute('SELECT COUNT(*) n, SUM(played) p FROM box_scores WHERE game_date=?',(today,)).fetchone()
 print(f'{today}: {r[\"n\"]} rows, {r[\"p\"] or 0} marked played')
 "
@@ -188,8 +195,10 @@ that silently fails looks exactly like a quiet season.
 
 ```bash
 uv run python -c "
-import os, sqlite3
-c=sqlite3.connect(os.environ['LOCKIN_DB']); c.row_factory=sqlite3.Row
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file()
+c=connect_readonly(Config.from_env().db_path)
 for r in c.execute('SELECT as_of, COUNT(*) n FROM player_status GROUP BY as_of ORDER BY as_of DESC LIMIT 7'):
     print(r['as_of'], r['n'])
 "
@@ -204,8 +213,10 @@ unconditionally, and prints the day count as it goes, so the check is that the n
 
 ```bash
 uv run python -c "
-import os, sqlite3
-c=sqlite3.connect(os.environ['LOCKIN_DB']); c.row_factory=sqlite3.Row
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file()
+c=connect_readonly(Config.from_env().db_path)
 for r in c.execute('SELECT week, COUNT(DISTINCT observed_at) polls FROM weekly_matchups GROUP BY week ORDER BY week DESC LIMIT 5'):
     print('week', r['week'], r['polls'], 'observations')
 "

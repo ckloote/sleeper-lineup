@@ -316,12 +316,21 @@ ones.
 cd /home/pi/lockin
 tail -20 logs/ingest.log logs/digest.log
 uv run --frozen python -c "
-import os, sqlite3
-c = sqlite3.connect('data/lockin.db'); c.row_factory = sqlite3.Row
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file()
+c = connect_readonly(Config.from_env().db_path)
 for r in c.execute('SELECT as_of, COUNT(*) n FROM player_status GROUP BY as_of ORDER BY as_of DESC LIMIT 3'):
     print(r['as_of'], r['n'])
 "
 ```
+
+**This resolves `LOCKIN_DB` rather than naming a file**, and opens read-only. An earlier
+version hardcoded `data/lockin.db` and used a bare `sqlite3.connect`, which on a host
+following step 3 pointed at the wrong path — and, since `sqlite3.connect` creates what it
+cannot find, answered with `no such table: player_status` against a 0-byte database it had
+just made. The same trap as step 3, reached from outside the CLI, so `lockin`'s own guard
+does not apply. `connect_readonly` cannot create, so a wrong path here says so.
 
 **Pass:** a new `as_of` row for today. That number climbing daily is the single most
 important signal in this deployment — it cannot be backfilled, and it is the prerequisite
