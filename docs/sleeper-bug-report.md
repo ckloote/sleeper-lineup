@@ -5,7 +5,8 @@ Sleeper is still rewriting the completed 2025-26 season, five months on. This fi
 report itself, kept in the repo because every figure in it is reproducible from
 `snapshots/` and will need restating if they reply.
 
-> **Status: Part 1 sent 2026-09-01. Two of its claims are now withdrawn. Send Part 4.**
+> **Status: Part 1 sent 2026-09-01, no reply. Part 4 drafted 2026-09-20 and NOT sent.**
+> Two of Part 1's claims are withdrawn below.
 >
 > 1. *The weeks 19-24 concentration* — withdrawn 2026-09-02. The next day's observation
 >    moved 497 starter values across 24 of 25 weeks, putting only 27% of them in weeks
@@ -41,9 +42,10 @@ committed snapshot archive. Nothing is inherited from the August analysis — §
 `0/10 lineups` claim did not reproduce and has been withdrawn, which is why the
 renumbering paragraph reads differently from the one in that section.
 
-**Send Part 4.** Send Part 2 if they engage — its evidence still stands, but read its
-"WHAT I RULED OUT" section against Part 4 first: the mechanism it proposes in point 1
-is the one Part 4 withdraws.
+**Nothing more is queued to send.** Part 4 is written and ready in case that changes; the
+decision on 2026-09-20 was to leave it. If it ever goes out, send Part 2 only if they
+engage — its evidence still stands, but read its "WHAT I RULED OUT" section against Part 4
+first, because the mechanism it proposes in point 1 is the one Part 4 withdraws.
 
 ---
 
@@ -256,17 +258,27 @@ Thanks,
 
 ---
 
-## Part 4 — the correction to send (supersedes Part 3)
+## Part 4 — written, not sent (supersedes Part 3)
 
-Part 3 was never sent, and is now superseded. It withdrew one claim; the daily series has
-since overturned Part 1's proposed *mechanism* as well. Sending both would mean two
-corrections in a row, the second revising the first. Send this instead — it carries Part
+**Held on 2026-09-20.** Part 1 went out on 1 September and drew no reply in nineteen days,
+and by the time this correction was ready the project no longer needed one: `lockin repair`
+recovers the original locks from the committed archive without Sleeper's involvement, and
+`lockin observe` keeps that archive growing whether or not anyone there ever reads this.
+The dependency ran the other way when Part 1 was sent. That is what changed.
+
+It is kept ready rather than deleted, because the reason to send has not gone away — only
+the urgency. If they ever reply, this is the message to send first, and the evidence behind
+it will be stronger by then, not weaker.
+
+It also supersedes Part 3, which was drafted and never sent. Part 3 withdrew one claim; the
+daily series then overturned Part 1's proposed *mechanism* as well, and sending both would
+have meant two corrections in a row with the second revising the first. Part 4 carries Part
 3's retraction in its opening paragraph.
 
-The substance is better than what it replaces. Part 1 guessed the locks had been lost.
-They have not been: they are intact, and the wrong values revert to them. That is a far
-more tractable bug for whoever picks it up, and it means the ask changes from "is this
-expected?" to "what recomputes locks for a completed season?"
+The substance is better than what it replaces. Part 1 guessed the locks had been lost. They
+have not been: they are intact, and the wrong values revert to them. That is a far more
+tractable bug for whoever picks it up, and it changes the ask from "is this expected?" to
+"what recomputes locks for a completed season?"
 
 ```text
 To: support@sleeper.com
