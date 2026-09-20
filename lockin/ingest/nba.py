@@ -8,19 +8,49 @@ Tipoff times do not matter for the backtest — a player never plays twice in on
 day, so date ordering fully determines his game sequence. They matter for the
 live digest, which has to say when tonight's lock window closes.
 
-Two-step on purpose: the skeleton comes from one LeagueGameFinder call so the
-schedule is complete even if the per-date tipoff sweep is interrupted.
+**A schedule, not a results feed.** Fixtures come from ScheduleLeagueV2, which
+lists games that have not been played yet and carries their tipoff times. The
+per-date ScoreboardV3 sweep is a backstop for whatever that misses, not the
+source. `ingest_schedule` explains what the distinction cost before it was
+noticed.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 import time
+from typing import NamedTuple
 
 from lockin.ingest.validate import SchemaDriftError
 from lockin.store.db import log_ingest, now_iso
 
 PAUSE_SECONDS = 0.6  # nba_api is the fragile upstream; be gentle
+
+# The NBA encodes the game type in the first three characters of a game id.
+PRESEASON, REGULAR_SEASON, ALL_STAR = "001", "002", "003"
+
+# Not the competition Sleeper scores, and actively harmful if ingested — both
+# bring non-NBA tricodes into the table `mark_exhibitions` reads. See
+# `ingest_schedule`.
+SKIPPED_GAME_TYPES = frozenset({PRESEASON, ALL_STAR})
+
+# ScheduleLeagueV2's gameStatus: 1 scheduled, 2 in progress, 3 final.
+GAME_STATUS_SCHEDULED = 1
+
+
+class ScheduleIngest(NamedTuple):
+    """What one schedule fetch did.
+
+    `unplayed` is the number that makes the forward-looking property visible in
+    the ingest log. A schedule feed that has quietly reverted to a results feed
+    reports zero here on a season in progress, which is the symptom that was
+    invisible for the whole of the project's life.
+    """
+
+    written: int
+    unplayed: int
+    undecided: int
 
 
 def _season_label(season: str) -> str:
@@ -29,73 +59,118 @@ def _season_label(season: str) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
-def parse_matchup(matchup: str, game_id: str = "?") -> tuple[str, str]:
-    """Parse a LeagueGameFinder MATCHUP string into (home, away).
+def ingest_schedule(conn: sqlite3.Connection, season: str) -> ScheduleIngest:
+    """Fetch the season's fixtures, including games that have not been played.
 
-    BOTH teams come from the string. Taking one side from TEAM_ABBREVIATION
-    instead looks equivalent but is not: a handful of games (0022500147,
-    0022500578, 0022500602 in 2025-26) carry the SAME away-perspective string
-    on both of their rows. Trusting TEAM_ABBREVIATION for the away side then
-    lets the home team's row overwrite away with itself, yielding a nonsense
-    "DET @ DET" fixture that silently fails to link.
+    **This used to read LeagueGameFinder, which is a results feed wearing a
+    schedule's name.** It returns games that have been *played*, and because
+    this project had only ever run against a finished season, three
+    consequences went unnoticed until the 2026-27 rollover was planned:
+
+    1. **It raises on a season with no results.** `lockin ingest` would have
+       failed on day one with `SchemaDriftError: LeagueGameFinder returned no
+       rows for 2026-27` — reproduced against the live endpoint on 2026-09-20,
+       a month before opening night.
+    2. **`nba_schedule` could never hold tonight's fixture.** So the §7.5
+       fallback in day-one.md step 5 — "tonight's slate must come from the NBA
+       schedule instead" — had nothing to read. The contingency the project
+       budgeted an afternoon for was resting on a table that is empty for every
+       date that matters.
+    3. Tipoffs had to be swept per-date from ScoreboardV3, which is why
+       `--skip-tipoffs` exists at all.
+
+    ScheduleLeagueV2 answers all three in one request, and it is already in the
+    pinned `nba_api` — 174 dates and 1,274 games for 2026-27, published weeks
+    ahead, tipoff included. Validated against the season this project was built
+    on: every one of the 1,231 rows LeagueGameFinder produced for 2025-26 comes
+    back with an identical date, home/away pair and tipoff, and nothing it had
+    is missing.
+
+    **Preseason and All-Star games are skipped, and that filter is load-bearing
+    rather than tidiness.** `mark_exhibitions` decides what counts as a real
+    fixture by asking which tricodes appear in this table. 2025-26's preseason
+    brings in GUA, HAP, MEL and SEM; All-Star weekend brings in STP and STR —
+    which are *precisely* the two tricodes `mark_exhibitions` exists to catch.
+    Ingest them and the All-Star game reads as a real game, the engine believes
+    an All-Star's week ends on a low exhibition score, and it banks far too
+    eagerly before the break.
+
+    Playoff and play-in games are kept. They are real games between real teams,
+    and their absence before was an artifact of LeagueGameFinder's
+    ``season_type_nullable="Regular Season"`` rather than a decision.
+
+    **A fixture with no teams yet is skipped, not fatal.** The 2026-27 NBA Cup
+    final is already on the calendar with both tricodes empty, and the previous
+    implementation raised `SchemaDriftError` on exactly that shape. It gets
+    written on a later run, once the bracket resolves.
+
+    Postponements need no handling here: the feed reflects the schedule as it
+    now stands rather than annotating the old one. All three of 2025-26's
+    postponed fixtures appear only on the date they were replayed, never on the
+    date Sleeper still lists — which is what keeps `reconcile`'s postponement
+    check meaningful.
     """
-    if " vs. " in matchup:
-        home, away = (s.strip() for s in matchup.split(" vs. ", 1))
-    elif " @ " in matchup:
-        away, home = (s.strip() for s in matchup.split(" @ ", 1))
-    else:
-        raise SchemaDriftError(f"unparseable MATCHUP {matchup!r} for game {game_id}")
-    if not home or not away or home == away:
-        raise SchemaDriftError(f"MATCHUP {matchup!r} for game {game_id} -> home={home} away={away}")
-    return home, away
-
-
-def ingest_schedule(conn: sqlite3.Connection, season: str) -> int:
-    """Fetch the season's game list. One request, one row per game."""
-    from nba_api.stats.endpoints import leaguegamefinder
+    from nba_api.stats.endpoints import scheduleleaguev2
 
     started = now_iso()
     label = _season_label(season)
-    frames = leaguegamefinder.LeagueGameFinder(
-        season_nullable=label, league_id_nullable="00", season_type_nullable="Regular Season"
-    ).get_data_frames()
-    if not frames or frames[0].empty:
-        raise SchemaDriftError(f"LeagueGameFinder returned no rows for {label}")
+    payload = scheduleleaguev2.ScheduleLeagueV2(season=label, league_id="00").get_dict()
 
-    df = frames[0]
-    for col in ("GAME_ID", "GAME_DATE", "MATCHUP", "TEAM_ABBREVIATION"):
-        if col not in df.columns:
-            raise SchemaDriftError(f"LeagueGameFinder missing column {col}; got {list(df.columns)}")
-
-    games: dict[str, dict] = {}
-    for row in df.itertuples(index=False):
-        gid, date, matchup = row.GAME_ID, row.GAME_DATE, row.MATCHUP
-        home, away = parse_matchup(matchup, gid)
-
-        prior = games.get(gid)
-        if prior and (prior["home"], prior["away"]) != (home, away):
-            raise SchemaDriftError(
-                f"game {gid}: rows disagree, {prior['away']}@{prior['home']} vs {away}@{home}"
-            )
-        games[gid] = {"date": date, "home": home, "away": away}
-
-    n = 0
-    for gid, g in games.items():
-        if not (g["home"] and g["away"]):
-            raise SchemaDriftError(f"game {gid} resolved to home={g['home']} away={g['away']}")
-        conn.execute(
-            "INSERT INTO nba_schedule"
-            " (nba_game_id, season, game_date, tipoff_utc, home_team, away_team)"
-            " VALUES (?, ?, ?, NULL, ?, ?)"
-            " ON CONFLICT(nba_game_id) DO UPDATE SET"
-            "   season=excluded.season, game_date=excluded.game_date,"
-            "   home_team=excluded.home_team, away_team=excluded.away_team",
-            (gid, season, g["date"], g["home"], g["away"]),
+    game_dates = (payload.get("leagueSchedule") or {}).get("gameDates")
+    if game_dates is None:
+        raise SchemaDriftError(
+            f"ScheduleLeagueV2 has no leagueSchedule.gameDates for {label};"
+            f" got top-level keys {sorted(payload)}"
         )
-        n += 1
 
-    log_ingest(conn, "nba", f"schedule:{label}", n, started)
-    return n
+    written = unplayed = undecided = 0
+    for day in game_dates:
+        for game in day.get("games") or []:
+            gid = game.get("gameId")
+            if not gid:
+                raise SchemaDriftError(
+                    f"ScheduleLeagueV2 returned a game with no gameId on {day.get('gameDate')!r}"
+                )
+            if gid[:3] in SKIPPED_GAME_TYPES:
+                continue
+
+            home = (game.get("homeTeam") or {}).get("teamTricode")
+            away = (game.get("awayTeam") or {}).get("teamTricode")
+            if not (home and away):
+                undecided += 1
+                continue
+            if home == away:
+                raise SchemaDriftError(f"game {gid} has {home} playing itself")
+
+            date = (game.get("gameDateEst") or "")[:10]
+            try:
+                # Parsed rather than length-checked: "next Tuesday"[:10] is ten
+                # characters long and would have sailed through.
+                dt.date.fromisoformat(date)
+            except ValueError as exc:
+                raise SchemaDriftError(
+                    f"game {gid}: gameDateEst is {game.get('gameDateEst')!r}, expected a date"
+                ) from exc
+
+            conn.execute(
+                "INSERT INTO nba_schedule"
+                " (nba_game_id, season, game_date, tipoff_utc, home_team, away_team)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(nba_game_id) DO UPDATE SET"
+                "   season=excluded.season, game_date=excluded.game_date,"
+                "   home_team=excluded.home_team, away_team=excluded.away_team,"
+                # Never let a re-fetch blank out a tipoff we already know. A
+                # rescheduled game briefly carries no time, and the digest needs
+                # one to say when tonight's lock window closes.
+                "   tipoff_utc=COALESCE(excluded.tipoff_utc, nba_schedule.tipoff_utc)",
+                (gid, season, date, game.get("gameDateTimeUTC") or None, home, away),
+            )
+            written += 1
+            if game.get("gameStatus") == GAME_STATUS_SCHEDULED:
+                unplayed += 1
+
+    log_ingest(conn, "nba", f"schedule:{label}", written, started)
+    return ScheduleIngest(written=written, unplayed=unplayed, undecided=undecided)
 
 
 def ingest_scoreboard(
@@ -103,11 +178,18 @@ def ingest_scoreboard(
 ) -> tuple[int, int]:
     """Sweep ScoreboardV3 by date to fill tipoff times and backfill missing games.
 
-    Driven off SLEEPER's fixture dates, not the NBA schedule's, because
-    LeagueGameFinder returns only regular-season games and some real, countable
-    games are not regular-season games. The NBA Cup championship is the case in
-    point: game 0062500001 (SAS @ NYK, 2025-12-16) is the sole game on its date,
-    so a sweep driven off nba_schedule would never visit that date at all.
+    **A backstop, not the source.** `ingest_schedule` now returns tipoff times
+    with the fixtures, so on a healthy run `only_missing` leaves this with
+    almost nothing to visit. It stays because it is driven off SLEEPER's fixture
+    dates rather than the NBA's, and so can still reach a game the NBA feed
+    does not list under this season at all.
+
+    That mattered more when the schedule came from LeagueGameFinder, which
+    returns only regular-season games: the NBA Cup championship — game
+    0062500001, SAS @ NYK, 2025-12-16 — is the sole game on its date, so a sweep
+    driven off `nba_schedule` would never have visited that date. The schedule
+    feed carries the Cup final now, but the asymmetry it exposed is real and
+    cheap to keep covered.
 
     That game counts. Karl-Anthony Towns and Josh Hart both locked on it in week
     9 of 2025-26, which is only possible for a real scoring game — so unlike the
@@ -235,9 +317,11 @@ def link_games(conn: sqlite3.Connection, season: str) -> tuple[int, int]:
            )
         """
     )
-    # Only fixtures that actually happened can link: LeagueGameFinder returns
-    # played games, not the schedule, so a postponed fixture has no NBA row by
-    # construction. Counting it as an unlinked failure would be wrong.
+    # A postponed fixture has no NBA row to link to, and that is not a failure.
+    # The schedule feed reflects the calendar as it now stands rather than
+    # annotating the old one, so a game Sleeper still lists on its original date
+    # appears only on the date it was replayed — checked against all three of
+    # 2025-26's postponements. Counting those as unlinked would be wrong.
     linked = conn.execute(
         "SELECT COUNT(*) c FROM game_links WHERE nba_game_id IS NOT NULL"
     ).fetchone()["c"]

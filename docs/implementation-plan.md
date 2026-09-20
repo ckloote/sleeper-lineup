@@ -2911,3 +2911,31 @@ Unchanged from §15, and none of it is closable before October:
    games is still unconfirmed. The digest reads the schedule from the panel, and the
    `nba_api` schedule ingest exists as the fallback, so absorbing a "no" is cheap — but it
    must be checked on day one.
+
+   **Corrected 2026-09-20, while planning the rollover. The fallback did not exist.**
+   `ingest_schedule` read LeagueGameFinder, which returns games that have been *played* —
+   a results feed wearing a schedule's name. So `nba_schedule` could not hold a fixture
+   until after it was over, and "fall back to the NBA schedule for tonight's slate" had
+   nothing to read on any date that mattered. Worse, the same call raises on a season with
+   no results: reproduced against the live endpoint, `lockin ingest` would have failed
+   every run from the rollover until the first game finished, with
+   `SchemaDriftError: LeagueGameFinder returned no rows for 2026-27`.
+
+   Both are fixed by reading `ScheduleLeagueV2` instead, which was already in the pinned
+   `nba_api` and needed no new dependency. It publishes the full season ahead of time —
+   1,200 fixtures for 2026-27 with tipoff times, a month before opening night — so the
+   fallback is now real, and the per-date `ScoreboardV3` sweep becomes a backstop rather
+   than the source of tipoffs.
+
+   Validated by replaying it over the season this project was built on: of the 1,231 rows
+   LeagueGameFinder produced for 2025-26, **none is lost and not one field changes**. It
+   adds 91 playoff and play-in games, whose absence was an artifact of the old call's
+   `season_type_nullable="Regular Season"` default. Preseason and All-Star games are
+   filtered, and that filter is load-bearing rather than tidiness: `mark_exhibitions` reads
+   its notion of a real NBA team out of this table, 2025-26's preseason brings in GUA, HAP,
+   MEL and SEM, and All-Star weekend brings in **STP and STR** — the exact pair
+   `mark_exhibitions` exists to catch.
+
+   §7.5 itself is *not* closed by this. Whether Sleeper publishes forward-looking stat rows
+   is still a day-one question; what changed is that a "no" is now genuinely cheap to
+   absorb, which is what this entry always claimed and could not have delivered.

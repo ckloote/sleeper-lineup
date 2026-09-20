@@ -239,8 +239,11 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
         click.echo(f"  fixtures    {occurred} played, {postponed} postponed")
 
         if not skip_nba:
-            n = nba_ingest.ingest_schedule(conn, cfg.season)
-            click.echo(f"  schedule    {n} NBA games")
+            sched = nba_ingest.ingest_schedule(conn, cfg.season)
+            note = f"{sched.written} NBA games, {sched.unplayed} not yet played"
+            if sched.undecided:
+                note += f", {sched.undecided} without teams yet"
+            click.echo(f"  schedule    {note}")
             exhibitions = nba_ingest.mark_exhibitions(conn, cfg.season)
             click.echo(f"  exhibitions {exhibitions} non-NBA fixture(s) excluded")
 

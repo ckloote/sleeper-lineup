@@ -12,10 +12,14 @@ skipped.
 
 ## 0. Before the season opens
 
-**Deploy to the Pi.** The only piece of Phase 6 not done, deferred by decision rather than
-blocked (§8). The crontab entries are in the README; `uv sync --frozen` reproducibility was
-Phase 0's exit criterion, so this is execution rather than design. Doing it in advance
-matters because day one is the wrong time to discover that cron cannot find `uv`.
+**Deploy to the Pi.** ✅ Done 2026-09-20 — see deployment.md, which is the runbook that
+came out of doing it. Every cron line runs under `scripts/cron-guard`, so a failure pushes
+a notification instead of dying into a log nobody reads, and `logs/` rotates rather than
+growing forever.
+
+It was worth doing in advance for exactly the reason given here — day one is the wrong
+time to discover that cron cannot find `uv` — and deploying early is also what surfaced the
+LeagueGameFinder problem in step 5 below, a month before it would have bitten.
 
 Verify the deployment by running a gate, not by running the digest:
 
@@ -135,6 +139,18 @@ uv run lockin reconcile
 uv run lockin verify
 ```
 
+The ingest reports the schedule as it goes, and the second number is the one to read:
+
+```
+  schedule    1200 NBA games, 1200 not yet played
+```
+
+**A season in progress that reports `0 not yet played` means the schedule source has
+reverted to a results feed** — the failure this line exists to make visible, and the one
+that went unnoticed for the project's whole life because it had only ever run against a
+finished season. A trailing `N without teams yet` is normal: the NBA Cup bracket is on the
+calendar before its teams are known, and those fixtures land on a later run.
+
 This also writes the first `player_status` rows of the season (step 6). That happens on
 every ingest and cannot be skipped — it used to sit behind a `--full` flag, which is exactly
 how a season of it nearly went uncaptured.
@@ -178,11 +194,29 @@ print(f'{today}: {r[\"n\"]} rows, {r[\"p\"] or 0} marked played')
 **Pass:** a nonzero row count with zero (or few) marked played. That is the forward-looking
 feed working.
 
-**Fail — zero rows:** tonight's slate must come from the NBA schedule instead. The fallback
-is already ingested (`nba_schedule`, populated by `lockin ingest`), so the work is rerouting
-`lockin/digest.py`'s `lineup_as_of` to build `Game` days from `nba_schedule` joined through
-`game_links` rather than from the box-score panel. Cheap, but it has never been exercised —
-budget an afternoon, not five minutes.
+**Fail — zero rows:** tonight's slate must come from the NBA schedule instead. The work is
+rerouting `lockin/digest.py`'s `lineup_as_of` to build `Game` days from `nba_schedule`
+joined through `game_links` rather than from the box-score panel. Cheap, but it has never
+been exercised — budget an afternoon, not five minutes.
+
+> **This fallback did not exist until 2026-09-20, and the line above used to assert it
+> did.** `ingest_schedule` read LeagueGameFinder, which returns games that have been
+> *played*, so `nba_schedule` could not hold a fixture until after it was over — there was
+> nothing to fall back to on any date that mattered. It now reads `ScheduleLeagueV2`, which
+> publishes the whole season ahead of time with tipoff times (implementation-plan.md §20).
+> Confirm before relying on it:
+>
+> ```bash
+> uv run python -c "
+> from lockin.config import Config, load_env_file
+> from lockin.store.db import connect_readonly
+> load_env_file(); c=connect_readonly(Config.from_env().db_path)
+> r=c.execute('SELECT COUNT(*) n, MIN(game_date) a, MAX(game_date) b FROM nba_schedule').fetchone()
+> print(f'{r[\"n\"]} fixtures, {r[\"a\"]} .. {r[\"b\"]}')
+> "
+> ```
+>
+> **Pass:** a range ending in April of next year, not yesterday.
 
 ---
 
