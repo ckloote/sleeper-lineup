@@ -1227,6 +1227,17 @@ of the tied leaders — so first-seen is a sound tiebreak. Tied slots are counte
 archive but excluded from the reversion figures: with no majority there is nothing to be
 on or off.
 
+**An independent corroboration, from outside the archive.** `tests/golden/` holds a raw
+week-12 response captured 2026-08-05, before this project existed and a day before the
+first snapshot — so it contributes no votes and cannot have shaped the majority. It
+disagrees with the majority value on 15 of 60 starters, which at first looks like a
+problem for calling the majority original. It is the opposite: **in all 15, the 2026-08-05
+value reappears later in the archive as a minority value.** None is a value the archive
+never sees again. The golden capture was itself taken mid-excursion for those slots, which
+is what a 25% excursion rate predicts, and nothing changed permanently between 08-05 and
+08-06. Repairing week 12 moved its agreement with that capture from 43/60 to 45/60 — up,
+but not to 60/60, and the 15 explain exactly why it should not be.
+
 #### It is not only which game counts
 
 The closed-menu property now holds at a sample size that settles it: **9,385 of 9,385
@@ -1307,6 +1318,18 @@ The database figure is the one that matters here. `weekly_matchups` is frozen at
 09-01 — and those two landed on days when weeks 12 and 19-24 happened to be in excursion.
 Everything derived from them is wrong by that much: `lock_inferences`, `manager_decisions`,
 the scorecards, the grades on the served dashboard.
+
+**Applied 2026-09-20.** 48 starter rows and 26 team totals appended; `lockin repair`
+re-plans clean, all 250 roster-weeks still have `points` equal to the sum of their six
+starters, and the three gates pass. One change worth naming: `locks` resolution went
+1476/1500 to 1475/1500. Week 20, roster 10, player 4740 played four games of which two
+scored 23.5, and the repaired value is 23.5 — so the value is right and the *game* is
+genuinely ambiguous. That is the inference reporting honestly, not a regression.
+
+The scorecards moved for all ten managers, and the ranking with them. Largest gains
++4.4pp and +3.3pp on right-rate, largest losses -2.7pp and -2.1pp; last place changes
+hands. Manager evaluation was the thing §12 warned had become unreliable, and this is the
+size of the error it was carrying.
 
 A falsifiable prediction, recorded before the fact: **week 14 should revert at its next
 rewrite.** It was rewritten on 09-20, it holds 27 of the 62 currently-wrong starters, and
