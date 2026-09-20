@@ -209,14 +209,63 @@ tested deliberately, and testing it found a crash (§20).
 ## 7. Install the cron
 
 ```cron
-30 6 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin ingest --weeks current >> logs/ingest.log 2>&1
-0  9 * * *  cd /home/pi/lockin && LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic) /home/pi/.local/bin/uv run --frozen lockin digest --notify >> logs/digest.log 2>&1
-5  9 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin advice >> logs/digest.log 2>&1
+30 6 * * *  cd /home/pi/lockin && scripts/cron-guard ingest /home/pi/.local/bin/uv run --frozen lockin ingest --weeks current
+0  9 * * *  cd /home/pi/lockin && scripts/cron-guard digest /home/pi/.local/bin/uv run --frozen lockin digest --notify
+5  9 * * *  cd /home/pi/lockin && scripts/cron-guard advice /home/pi/.local/bin/uv run --frozen lockin advice
 ```
 
 `mkdir -p logs && chmod 700 logs` first, and add a logrotate rule — nothing here truncates
 them. The mode matters: these logs record what the digest decided about your lineup every
-morning, and the ntfy status line names the topic they were sent to.
+morning, and the ntfy status line names the topic they were sent to. The guard creates its
+own files 600 and the directory 700, but it cannot fix a log that already exists.
+
+### The guard, and why the redirect was not enough
+
+`scripts/cron-guard <job-name> <command...>` appends to `logs/<job-name>.log` with a
+timestamped header, and pushes an ntfy alert when the command exits nonzero. It exits with
+the command's own status, so cron still sees a failure as a failure.
+
+The first version of this section ended each line with `>> logs/x.log 2>&1` and stopped
+there. On 2026-09-10 the observe and ingest jobs began failing with `Temporary failure in
+name resolution` and kept failing for four days. Nothing reported it. The only symptom was
+the next successful run reporting five days of upstream drift as though it were one, which
+briefly looked like a finding about Sleeper rather than a finding about this Pi.
+
+Three things follow from that, and the guard is shaped by them:
+
+- **It is shell, not a `lockin` subcommand.** The failures worth catching include a broken
+  venv, a missing `uv` and a corrupt lockfile. A Python entry point does not survive any of
+  those long enough to report them.
+- **A network outage suppresses its own alert.** The DNS failure that breaks the job also
+  breaks the POST to ntfy, so those four days would still have been silent *while they were
+  happening*. Every successful run therefore stamps `logs/.cron-guard/<job>.ok`, and a run
+  that finds its stamp more than 36 hours old sends a **recovered** alert naming the gap.
+  An outage is announced late rather than never. Everything local — bad lockfile, missing
+  database, full disk, schema error — alerts immediately.
+- **The topic comes from the file, not the cron line.** The digest line used to carry
+  `LOCKIN_NTFY_TOPIC=$(cat ~/.lockin-topic)`. An ntfy topic is unauthenticated, so the name
+  is the whole of the secret, and `ps` shows a command line to every user on the box. The
+  guard reads `~/.lockin-topic` itself and exports it for the child, so `--notify` still
+  works and the crontab no longer names it.
+
+Two smaller consequences. `advice` now writes `logs/advice.log` rather than sharing
+`logs/digest.log`, because the guard names the log after the job. And the crontab lost its
+last `date` call, which is where the `%`-escaping trap of the previous version lived — the
+timestamps are produced inside the script now, where `%` means nothing.
+
+To prove it works, before you depend on it — the same rule as §6:
+
+```bash
+scripts/cron-guard alert-test sh -c 'echo pretending to fail; exit 1'
+```
+
+That should exit 1, append to `logs/alert-test.log`, and put a **lockin alert-test failed**
+notification on your phone carrying the last lines of the output. Delete the log and
+`logs/.cron-guard/alert-test.ok` afterwards.
+
+In-band, the digest records `last_ingest_at` with every run for the same reason: a digest
+running on data a failed ingest never refreshed is otherwise indistinguishable from a
+healthy one.
 
 **`--weeks current` asks Sleeper, not the calendar.** It reads `settings.leg` from the
 league payload the ingest already fetches, so it costs no extra request and cannot disagree
@@ -386,7 +435,7 @@ series whose interval is longer than the thing it measures records that somethin
 and loses when, which is the only question it exists to answer.
 
 ```cron
-15 5 * * *  cd /home/pi/lockin && /home/pi/.local/bin/uv run --frozen lockin observe >> logs/observe.log 2>&1
+15 5 * * *  cd /home/pi/lockin && scripts/cron-guard observe /home/pi/.local/bin/uv run --frozen lockin observe
 ```
 
 05:15, deliberately clear of the 06:30 ingest and the 09:00 digest; it needs no database,
@@ -401,12 +450,13 @@ Whole-season sweeps landed on 2, 3, 14, 16 and 18 September. No period fits all 
 **keep it daily**: a longer interval would have merged the alternation and the four-day
 run into the same undifferentiated "it changed".
 
-**Nothing tells you when this job fails.** It died four days running, 10 to 13 September,
-with `Temporary failure in name resolution`, and the only symptom was the next successful
-run reporting five days of drift as though it were one. Both cron lines redirect stderr to
-a log nobody reads. If you add one thing to this runbook, make it a failure notification on
-the observe and ingest lines — the digest already has ntfy wired up. The logrotate rule
-from step 7 is still not installed either, and at daily cadence that now matters more.
+**This job used to fail silently.** It died four days running, 10 to 13 September, with
+`Temporary failure in name resolution`, and the only symptom was the next successful run
+reporting five days of drift as though it were one. Both cron lines redirected stderr to a
+log nobody reads. That is what `scripts/cron-guard` in step 7 now fixes, and the recovery
+stamp is there specifically for this shape of outage: a DNS failure takes the alert down
+with the job, so the run that recovers is the one that reports the gap. The logrotate rule
+from step 7 is still not installed, and at daily cadence that matters more than it did.
 
 **Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
 and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot

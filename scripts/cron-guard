@@ -1,0 +1,119 @@
+#!/bin/sh
+# Run a scheduled lockin job, and say something when it breaks.
+#
+# The four cron lines redirected stderr into a log nobody reads. On 2026-09-10
+# both the observe and ingest jobs began failing with `Temporary failure in name
+# resolution` and kept failing for four days. Nothing reported it. The only
+# symptom was the next successful run reporting five days of upstream drift as
+# though it were one, which briefly looked like a finding about Sleeper rather
+# than a finding about this Pi (implementation-plan.md §12).
+#
+#     scripts/cron-guard <job-name> <command> [args...]
+#
+# Appends to logs/<job-name>.log with a timestamped header, and pushes an ntfy
+# alert when the command exits nonzero. Exits with the command's own status, so
+# cron still sees a failure as a failure.
+#
+# It is shell rather than a `lockin` subcommand on purpose. The failures worth
+# catching include a broken venv, a missing uv and a corrupt lockfile — none of
+# which a Python entry point would survive long enough to report.
+#
+# **A network outage suppresses its own alert.** The same DNS failure that
+# breaks the job breaks the POST to ntfy, so the four silent days above would
+# still have been silent while they were happening. That is why success is
+# stamped: the first run that recovers compares against the stamp and reports
+# the gap, so an outage is announced late rather than never. Anything local —
+# bad lockfile, missing database, full disk, schema error — alerts immediately.
+#
+# The topic is read from a file rather than passed on the cron line. An ntfy
+# topic is unauthenticated, so the name is the whole of the secret; the crontab
+# is world-readable on some systems and `ps` shows a command line to everyone.
+# Exported for the child so `lockin digest --notify` inherits it.
+
+set -u
+
+# logs/digest.log carries the lineup and logs/*.log can carry a traceback with
+# paths in it. The directory is 700 already; this makes the files 600 rather
+# than whatever the cron umask happens to be, which was 644.
+umask 077
+
+JOB=${1:-}
+if [ -z "$JOB" ] || [ $# -lt 2 ]; then
+    echo "usage: cron-guard <job-name> <command> [args...]" >&2
+    exit 64
+fi
+shift
+
+LOG_DIR=$(pwd)/logs
+LOG="$LOG_DIR/$JOB.log"
+STATE="$LOG_DIR/.cron-guard"
+STAMP="$STATE/$JOB.ok"
+TOPIC_FILE=${LOCKIN_TOPIC_FILE:-$HOME/.lockin-topic}
+SERVER=${LOCKIN_NTFY_SERVER:-https://ntfy.sh}
+MAX_GAP_HOURS=${CRON_GUARD_MAX_GAP_HOURS:-36}
+TAIL_LINES=${CRON_GUARD_TAIL_LINES:-15}
+
+mkdir -p "$STATE" || exit 70
+chmod 700 "$LOG_DIR" "$STATE" 2>/dev/null || true
+
+if [ -z "${LOCKIN_NTFY_TOPIC:-}" ] && [ -r "$TOPIC_FILE" ]; then
+    LOCKIN_NTFY_TOPIC=$(cat "$TOPIC_FILE")
+    export LOCKIN_NTFY_TOPIC
+fi
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# alert <title> <priority> <tags>, body on stdin.
+# Never fails the run: a notification that could take the job down with it would
+# be worse than no notification, and lockin/notify.py holds the same contract.
+alert() {
+    if [ -z "${LOCKIN_NTFY_TOPIC:-}" ]; then
+        cat >/dev/null
+        return 0
+    fi
+    curl --silent --show-error --max-time 10 \
+         --header "Title: $1" \
+         --header "Priority: $2" \
+         --header "Tags: $3" \
+         --header "Content-Type: text/plain; charset=utf-8" \
+         --data-binary @- \
+         "$SERVER/$LOCKIN_NTFY_TOPIC" >/dev/null 2>&1 || true
+}
+
+OUT=$(mktemp) || exit 70
+trap 'rm -f "$OUT"' EXIT HUP INT TERM
+
+STARTED=$(now_iso)
+"$@" >"$OUT" 2>&1
+STATUS=$?
+
+{
+    printf '===== %s  %s  exit %s =====\n' "$JOB" "$STARTED" "$STATUS"
+    cat "$OUT"
+} >>"$LOG"
+
+if [ "$STATUS" -ne 0 ]; then
+    {
+        printf 'exit %s at %s\n' "$STATUS" "$(now_iso)"
+        printf 'command: %s\n\n' "$*"
+        tail -n "$TAIL_LINES" "$OUT"
+    } | alert "lockin $JOB failed" high "rotating_light"
+    exit "$STATUS"
+fi
+
+NOW=$(date +%s)
+if [ -r "$STAMP" ]; then
+    LAST=$(cat "$STAMP" 2>/dev/null || echo 0)
+    case $LAST in
+        ''|*[!0-9]*) LAST=0 ;;
+    esac
+    if [ "$LAST" -gt 0 ]; then
+        GAP=$(( (NOW - LAST) / 3600 ))
+        if [ "$GAP" -gt "$MAX_GAP_HOURS" ]; then
+            printf 'ran clean at %s, but the previous success was %s hours ago.\nRuns were missed and their alerts could not be delivered.\nCheck %s.\n' \
+                "$(now_iso)" "$GAP" "$LOG" | alert "lockin $JOB recovered" default "white_check_mark"
+        fi
+    fi
+fi
+printf '%s\n' "$NOW" >"$STAMP"
+exit 0
