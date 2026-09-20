@@ -36,10 +36,14 @@ class Collector(http.server.BaseHTTPRequestHandler):
                 "topic": self.path.lstrip("/"),
                 "title": self.headers.get("Title", ""),
                 "priority": self.headers.get("Priority", ""),
+                "tags": self.headers.get("Tags", ""),
                 "body": self.rfile.read(length).decode(),
             }
         )
-        self.send_response(200)
+        # A job named for the failure it should produce, so the refused-send
+        # path can be tested without taking the server down. Keyed on the title
+        # rather than the path, because the path is the topic, not the job.
+        self.send_response(500 if "refuse" in self.headers.get("Title", "") else 200)
         self.end_headers()
 
     def log_message(self, *args) -> None:
@@ -221,3 +225,66 @@ def test_the_log_file_is_not_world_readable(run, tmp_path):
     run("digest", "sh", "-c", "echo lineup")
 
     assert (tmp_path / "logs" / "digest.log").stat().st_mode & 0o077 == 0
+
+
+# --- the guard reporting on itself ---------------------------------------
+#
+# Added after a test alert did not reach the operator's phone and the log could
+# not say whether it had even left the Pi. Finding that out meant polling ntfy
+# by hand — the silent-failure pattern this script exists to remove, reproduced
+# inside the thing removing it.
+
+
+def test_a_sent_alert_says_so_in_the_log(run, tmp_path):
+    run("ingest", "sh", "-c", "exit 1")
+
+    assert "alert: sent to" in (tmp_path / "logs" / "ingest.log").read_text()
+
+
+def test_the_log_does_not_carry_the_whole_topic(run, tmp_path):
+    """An ntfy topic is unauthenticated: the name is the whole of the secret,
+    and this line lands in a file. Same six characters as notify.redacted()."""
+    log = tmp_path / "logs" / "ingest.log"
+    run("ingest", "sh", "-c", "exit 1")
+
+    assert "test-topic-abcdef" not in log.read_text()
+    assert "test-t..." in log.read_text()
+
+
+def test_a_refused_alert_is_recorded_as_failed(run, tmp_path):
+    """HTTP 500 from ntfy must not read the same as a delivered alert."""
+    run("refuse", "sh", "-c", "exit 1")
+
+    log = (tmp_path / "logs" / "refuse.log").read_text()
+    assert "alert: FAILED, HTTP 500" in log
+
+
+def test_an_unreachable_server_is_recorded_as_failed(run, tmp_path):
+    run("observe", "sh", "-c", "exit 1", env={"LOCKIN_NTFY_SERVER": "http://127.0.0.1:1"})
+
+    assert "alert: FAILED, no response" in (tmp_path / "logs" / "observe.log").read_text()
+
+
+def test_alerting_being_off_is_distinguishable_from_alerting_failing(run, tmp_path):
+    """ "disabled", "sent" and "failed" are three different problems."""
+    run("observe", "sh", "-c", "exit 1", topic=False)
+
+    log = (tmp_path / "logs" / "observe.log").read_text()
+    assert "alert: disabled" in log
+    assert "FAILED" not in log
+
+
+def test_the_priority_and_tag_can_be_overridden(run, ntfy):
+    """Which priority a given phone will actually surface is a property of that
+    phone, so it is configuration rather than a constant."""
+    _, posts = ntfy
+    run(
+        "observe",
+        "sh",
+        "-c",
+        "exit 1",
+        env={"CRON_GUARD_PRIORITY": "default", "CRON_GUARD_TAG": "basketball"},
+    )
+
+    assert posts[0]["priority"] == "default"
+    assert posts[0]["tags"] == "basketball"

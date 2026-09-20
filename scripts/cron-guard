@@ -53,6 +53,11 @@ SERVER=${LOCKIN_NTFY_SERVER:-https://ntfy.sh}
 MAX_GAP_HOURS=${CRON_GUARD_MAX_GAP_HOURS:-36}
 TAIL_LINES=${CRON_GUARD_TAIL_LINES:-15}
 
+# Overridable because a notification nobody sees is worth nothing, and which
+# priority a given phone will actually surface is a property of that phone.
+ALERT_PRIORITY=${CRON_GUARD_PRIORITY:-high}
+ALERT_TAG=${CRON_GUARD_TAG:-rotating_light}
+
 mkdir -p "$STATE" || exit 70
 chmod 700 "$LOG_DIR" "$STATE" 2>/dev/null || true
 
@@ -63,21 +68,44 @@ fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# alert <title> <priority> <tags>, body on stdin.
+# alert <title> <priority> <tags>, body on stdin, one status line on stdout.
+#
 # Never fails the run: a notification that could take the job down with it would
 # be worse than no notification, and lockin/notify.py holds the same contract.
+#
+# But "never fails" is not "never says". The first version discarded curl's
+# result entirely, so the log could not tell an alert that was sent from one
+# that was refused — and when a test alert did not arrive, the only way to find
+# out whether it had even left the Pi was to poll ntfy by hand. That is the
+# silent-failure pattern this whole script exists to remove, reproduced inside
+# the thing removing it. The status line is the fix, and it is the same three
+# outcomes lockin/notify.py prints for the same reason: "disabled", "sent" and
+# "failed" are different problems.
+#
+# The topic is truncated to six characters, matching notify.redacted(). This
+# line lands in a log file, and an ntfy topic is unauthenticated — the name is
+# the whole of the secret.
 alert() {
     if [ -z "${LOCKIN_NTFY_TOPIC:-}" ]; then
         cat >/dev/null
+        printf 'alert: disabled (no topic configured) -- %s\n' "$1"
         return 0
     fi
-    curl --silent --show-error --max-time 10 \
+    code=$(curl --silent --max-time 10 \
          --header "Title: $1" \
          --header "Priority: $2" \
          --header "Tags: $3" \
          --header "Content-Type: text/plain; charset=utf-8" \
          --data-binary @- \
-         "$SERVER/$LOCKIN_NTFY_TOPIC" >/dev/null 2>&1 || true
+         --output /dev/null \
+         --write-out '%{http_code}' \
+         "$SERVER/$LOCKIN_NTFY_TOPIC" 2>/dev/null) || code=000
+    case $code in
+        2*) printf 'alert: sent to %s/%.6s... -- %s\n' "$SERVER" "$LOCKIN_NTFY_TOPIC" "$1" ;;
+        000) printf 'alert: FAILED, no response from %s -- %s\n' "$SERVER" "$1" ;;
+        *) printf 'alert: FAILED, HTTP %s from %s -- %s\n' "$code" "$SERVER" "$1" ;;
+    esac
+    return 0
 }
 
 OUT=$(mktemp) || exit 70
@@ -97,7 +125,7 @@ if [ "$STATUS" -ne 0 ]; then
         printf 'exit %s at %s\n' "$STATUS" "$(now_iso)"
         printf 'command: %s\n\n' "$*"
         tail -n "$TAIL_LINES" "$OUT"
-    } | alert "lockin $JOB failed" high "rotating_light"
+    } | alert "lockin $JOB failed" "$ALERT_PRIORITY" "$ALERT_TAG" >>"$LOG"
     exit "$STATUS"
 fi
 
@@ -111,7 +139,8 @@ if [ -r "$STAMP" ]; then
         GAP=$(( (NOW - LAST) / 3600 ))
         if [ "$GAP" -gt "$MAX_GAP_HOURS" ]; then
             printf 'ran clean at %s, but the previous success was %s hours ago.\nRuns were missed and their alerts could not be delivered.\nCheck %s.\n' \
-                "$(now_iso)" "$GAP" "$LOG" | alert "lockin $JOB recovered" default "white_check_mark"
+                "$(now_iso)" "$GAP" "$LOG" \
+                | alert "lockin $JOB recovered" default "$ALERT_TAG" >>"$LOG"
         fi
     fi
 fi

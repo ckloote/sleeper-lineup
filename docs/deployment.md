@@ -204,6 +204,30 @@ should be.
 This is worth doing by hand because the send path had never executed once until it was
 tested deliberately, and testing it found a crash (§20).
 
+**"Arrives" has two halves, and they fail separately.** A message can be accepted by ntfy,
+be visible in the app's topic list when you open it, and still never have raised a
+notification on the lock screen — which is indistinguishable from "the alert never fired"
+at the moment you need it. That happened here on 2026-09-20 with a deliberate test alert,
+and it cost a round of investigation on the Pi before the phone turned out to be the half
+at fault.
+
+The two halves have separate checks. What ntfy holds, which is entirely independent of the
+phone:
+
+```bash
+curl -s "https://ntfy.sh/$(cat ~/.lockin-topic)/json?poll=1&since=24h" | jq -r '.title'
+```
+
+If the message is listed there, this project's side of the job is done — and from
+`lockin digest` or `scripts/cron-guard`, the local log says so too: `notification: sent`
+and `alert: sent to ...` respectively. Anything after that is the app and the phone's OS:
+notification permissions, a muted channel, a Focus or Do Not Disturb rule, or — the usual
+one on Android — battery optimisation killing ntfy's foreground service, which is exactly
+the state where messages appear the instant you open the app and never before.
+
+So confirm the **banner**, not the list, when you do the check above. A digest you read by
+opening the app every morning is a digest that has been failing quietly.
+
 ---
 
 ## 7. Install the cron
@@ -248,6 +272,23 @@ Three things follow from that, and the guard is shaped by them:
   is the whole of the secret, and `ps` shows a command line to every user on the box. The
   guard reads `~/.lockin-topic` itself and exports it for the child, so `--notify` still
   works and the crontab no longer names it.
+
+Each alert appends its own outcome to the log, in the same three flavours
+`lockin/notify.py` prints and for the same reason — `disabled`, `sent` and `failed` are
+different problems:
+
+```
+===== ingest  2026-09-20T15:19:26Z  exit 1 =====
+socket.gaierror: [Errno -3] Temporary failure in name resolution
+alert: sent to https://ntfy.sh/6lKgDf... -- lockin ingest failed
+```
+
+The first version discarded curl's result, so when a test alert did not arrive there was no
+way to tell from the log whether it had even left the Pi; answering that took a manual poll
+of ntfy. That is the silent-failure pattern this script exists to remove, reproduced inside
+the thing removing it. `CRON_GUARD_PRIORITY` and `CRON_GUARD_TAG` override the ntfy
+priority and tag, because which priority a given phone will actually surface is a property
+of that phone — see §6 on the two halves of "arrives".
 
 Two smaller consequences. `advice` now writes `logs/advice.log` rather than sharing
 `logs/digest.log`, because the guard names the log after the job. And the crontab lost its
