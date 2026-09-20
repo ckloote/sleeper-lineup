@@ -214,10 +214,11 @@ tested deliberately, and testing it found a crash (§20).
 5  9 * * *  cd /home/pi/lockin && scripts/cron-guard advice /home/pi/.local/bin/uv run --frozen lockin advice
 ```
 
-`mkdir -p logs && chmod 700 logs` first, and add a logrotate rule — nothing here truncates
-them. The mode matters: these logs record what the digest decided about your lineup every
-morning, and the ntfy status line names the topic they were sent to. The guard creates its
-own files 600 and the directory 700, but it cannot fix a log that already exists.
+`mkdir -p logs && chmod 700 logs` first. The mode matters: these logs record what the
+digest decided about your lineup every morning, and the ntfy status line names the topic
+they were sent to. The guard creates its own files 600 and the directory 700, but it cannot
+fix a log that already exists — `chmod 600 logs/*.log` once if you set this up before the
+guard existed.
 
 ### The guard, and why the redirect was not enough
 
@@ -266,6 +267,51 @@ notification on your phone carrying the last lines of the output. Delete the log
 In-band, the digest records `last_ingest_at` with every run for the same reason: a digest
 running on data a failed ingest never refreshed is otherwise indistinguishable from a
 healthy one.
+
+### Rotation
+
+```cron
+45 4 * * *  cd /home/pi/lockin && scripts/cron-guard logrotate /usr/sbin/logrotate --state logs/.logrotate.state scripts/logrotate.conf
+```
+
+Fifth line, and the first of the day — 04:45, half an hour ahead of `observe`, so nothing
+rotates a file mid-write. Nothing else truncates these logs, and the daily observe cadence
+means they only grow from here.
+
+**Not an `/etc/logrotate.d` entry.** That needs root to install and root to edit, while
+everything else here runs as the unprivileged user out of the repo, and a rule living
+somewhere the repo does not know about goes stale the moment the checkout moves.
+`scripts/logrotate.conf` is committed, `--state` keeps its bookkeeping in `logs/`, and
+running it under the guard means a broken rotation alerts like any other failed job.
+
+The policy is deliberately generous: **monthly, 24 archives, compressed, dated names.**
+`logs/observe.log` is not an ordinary service log — it is the only record of *when* Sleeper
+rewrites the completed season, and the 48-hour alternation and sweep dates in
+implementation-plan.md §12 were read straight out of it. None of that is reconstructable
+after the fact. Two years of a file growing ~70 KB a month costs nothing worth counting.
+`maxsize 5M` rotates early if something floods; four days of tracebacks put 38 KB into
+`logs/ingest.log` in September and a tighter loop could do much worse.
+
+Archives are named `observe.log-20260920.gz` rather than `observe.log.1.gz`, so a reader
+can tell which window a file covers without unpacking it — and so an archived name does not
+come to mean something different after the next rotation.
+
+One trap, called out in the config because nobody would guess it: **the quotes around the
+path are load-bearing.** logrotate parses a bare relative path as a keyword, so
+
+```
+logs/*.log { ... }        # error: keyword 'logs' not properly separated, found 0x2f
+"logs/*.log" { ... }      # globs against the working directory, which the cron `cd` fixes
+```
+
+Check it without waiting a month:
+
+```bash
+cd /home/pi/lockin && /usr/sbin/logrotate --force --state logs/.logrotate.state scripts/logrotate.conf
+```
+
+`--force` rotates everything immediately; drop it and the command is the daily no-op, which
+should exit 0 and seed `logs/.logrotate.state` with a line per log.
 
 **`--weeks current` asks Sleeper, not the calendar.** It reads `settings.leg` from the
 league payload the ingest already fetches, so it costs no extra request and cannot disagree
@@ -455,8 +501,9 @@ run into the same undifferentiated "it changed".
 reporting five days of drift as though it were one. Both cron lines redirected stderr to a
 log nobody reads. That is what `scripts/cron-guard` in step 7 now fixes, and the recovery
 stamp is there specifically for this shape of outage: a DNS failure takes the alert down
-with the job, so the run that recovers is the one that reports the gap. The logrotate rule
-from step 7 is still not installed, and at daily cadence that matters more than it did.
+with the job, so the run that recovers is the one that reports the gap. Step 7's rotation
+rule keeps this log bounded without losing it — it is the record the §12 timing analysis was
+read out of, so it rotates into dated archives rather than being truncated.
 
 **Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
 and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot
