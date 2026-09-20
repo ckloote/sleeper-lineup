@@ -5,16 +5,23 @@ Sleeper is still rewriting the completed 2025-26 season, five months on. This fi
 report itself, kept in the repo because every figure in it is reproducible from
 `snapshots/` and will need restating if they reply.
 
-> **Status: Part 1 sent 2026-09-01. One of its claims was withdrawn on 2026-09-02.**
+> **Status: Part 1 sent 2026-09-01. Two of its claims are now withdrawn. Send Part 4.**
 >
-> The next day's observation moved 497 starter values across 24 of 25 weeks, putting only
-> 27% of them in weeks 19-24. The concentration Part 1 leads on was true of one 24-day
-> window and is not a property of the mutation. **Parts 1 and 2 below are left exactly as
-> sent** — rewriting a report already in someone's inbox would only make this file disagree
-> with what they are holding. Part 3 is the correction to send.
+> 1. *The weeks 19-24 concentration* — withdrawn 2026-09-02. The next day's observation
+>    moved 497 starter values across 24 of 25 weeks, putting only 27% of them in weeks
+>    19-24. It was true of one 24-day window and is not a property of the mutation.
+> 2. *The proposed mechanism* — withdrawn 2026-09-20. Part 1 offers "if lock selections
+>    aren't persisted for completed seasons and each read regenerates them" as the
+>    explanation. Nineteen days of daily sampling show the opposite: the correct locks
+>    **are** persisted, and a wrong value reverts to the stored one at the next rewrite
+>    (implementation-plan.md §12, "The locks are intact").
 >
-> Everything else in it survives and is strengthened: ongoing, oscillating, not per-read,
-> box scores and lineups stable.
+> **Parts 1 and 2 below are left exactly as sent** — rewriting a report already in
+> someone's inbox would only make this file disagree with what they are holding. Part 3
+> was drafted but never sent and is **superseded by Part 4**, which carries its retraction.
+>
+> What survives from Part 1 and is strengthened: ongoing, oscillating, not per-read, every
+> value one of that player's own games, box scores and lineups stable.
 
 **Where it goes: `support@sleeper.com`.** That is the only channel Sleeper offers for this.
 Their [contact page](https://support.sleeper.com/en/articles/8017487-general-contact-information)
@@ -29,12 +36,14 @@ read-only, with no stated guarantee of accuracy or historical availability. They
 promised that past results are stable. Hence the ask below is "is this expected?" rather
 than "this is broken".
 
-**Every figure here was measured on 2026-09-01** against the committed snapshot archive.
-Nothing is inherited from the August analysis — §12's `0/10 lineups` claim did not
-reproduce and has been withdrawn, which is why the renumbering paragraph reads differently
-from the one in that section.
+**Parts 1-3 were measured on 2026-09-01; Part 4 on 2026-09-20**, both against the
+committed snapshot archive. Nothing is inherited from the August analysis — §12's
+`0/10 lineups` claim did not reproduce and has been withdrawn, which is why the
+renumbering paragraph reads differently from the one in that section.
 
-Send **Part 1**. Send Part 2 if they engage.
+**Send Part 4.** Send Part 2 if they engage — its evidence still stands, but read its
+"WHAT I RULED OUT" section against Part 4 first: the mechanism it proposes in point 1
+is the one Part 4 withdraws.
 
 ---
 
@@ -196,11 +205,13 @@ Thanks,
 
 ---
 
-## Part 3 — the correction, to send
+## Part 3 — superseded, not sent
 
-Unprompted, and worth sending even without a reply. The retraction costs nothing — the
-replacement figure is a stronger headline than the one it withdraws, and an engineer who
-finds the first claim unreproducible will discard the whole report.
+Drafted 2026-09-02 and overtaken on 2026-09-20 before it went out. Its retraction of the
+weeks 19-24 claim is correct and is carried forward verbatim into Part 4's opening
+paragraph; its closing line — "everything else in my original message stands" — is not,
+since Part 1's mechanism has since been falsified. **Do not send this.** Kept only so the
+record shows what was drafted when.
 
 ```text
 To: support@sleeper.com
@@ -245,29 +256,164 @@ Thanks,
 
 ---
 
+## Part 4 — the correction to send (supersedes Part 3)
+
+Part 3 was never sent, and is now superseded. It withdrew one claim; the daily series has
+since overturned Part 1's proposed *mechanism* as well. Sending both would mean two
+corrections in a row, the second revising the first. Send this instead — it carries Part
+3's retraction in its opening paragraph.
+
+The substance is better than what it replaces. Part 1 guessed the locks had been lost.
+They have not been: they are intact, and the wrong values revert to them. That is a far
+more tractable bug for whoever picks it up, and it means the ask changes from "is this
+expected?" to "what recomputes locks for a completed season?"
+
+```text
+To: support@sleeper.com
+Subject: Re: Completed NBA season's results still changing months later (league 1283214955830575104)
+
+Hi,
+
+I've been sampling daily since I wrote on 1 September. Two corrections, and a
+finding that I think makes this much more tractable than I first described it.
+
+FIRST CORRECTION
+
+I said 137 of 140 changed values fell in weeks 19-24. That was true of the one
+24-day window I had measured and is not a property of the problem. Between
+1 September 02:02 and 2 September 03:16 UTC — 25 hours, no games played — 497
+starter values changed across 24 of the 25 weeks, only 27% of them in weeks
+19-24. The rewriting is season-wide. Please don't chase the playoff weeks on
+the strength of my first message.
+
+SECOND CORRECTION, AND THE USEFUL PART
+
+I suggested lock selections might not be persisted for completed seasons, so
+that each read regenerates them. That is wrong, and I can now show it is
+wrong. The correct locks are still stored. The wrong values revert to them.
+
+From 163 archived responses covering all 25 weeks, 6 August to 20 September,
+sampled daily since 2 September:
+
+- Each starter has one value it keeps returning to. My oldest snapshot, taken
+  6-8 August, matches that value for 97% of 1,382 starter slots. The original
+  results are still recoverable, and still what you serve most of the time.
+
+- When a value is currently wrong, the next rewrite restores it 85-88% of the
+  time. When it is currently right, it survives the next rewrite 69-80% of the
+  time. Something that regenerated the lock on each pass would give the same
+  number from both states. A HIGHER rate of return-to-correct than
+  stay-correct means something in the system knows the right answer.
+
+- 84% of wrong values are corrected at the very next rewrite, and the rest at
+  the one after. They are transient blips, not a drift away from the truth.
+
+That reads to me like an intermittent write or cache-fill putting a
+wrong-but-plausible value in front of the stored one, with a later pass
+restoring it. Not data loss.
+
+WHAT THE WRONG VALUE LOOKS LIKE
+
+Still always one of that player's own games from that same week — 9,385 of
+9,385 non-zero values I have ever recorded, no exceptions. Box scores and
+lineups are unchanged throughout: across 138 follow-up observations, not one
+"starters" array has ever differed.
+
+But it is not only which game counts. A lock can appear and disappear
+entirely. Kristaps Porzingis (player 1590), roster 6, week 1 — he played
+exactly one game that week, worth 41.5:
+
+  08-08  41.5        09-14  41.5
+  09-02   0.0        09-16   0.0
+  09-03  41.5        09-18  41.5
+
+There is no second game to choose between. The value is simply absent on some
+reads and present on others, and it comes back every time. Across the archive
+I have 106 transitions from 0.0 to a real score and 104 the other way. In a
+Lock-In league a 0.0 means the manager never locked that player, so these
+reads are inventing and erasing manager decisions, not just reattributing
+points between games.
+
+The wrong values are also not random. A real lock lands on that player's best
+game of the week 53-74% of the time, depending on how many games he played —
+managers pick well. The wrong values are much flatter but still tilted toward
+the better games. That is presumably why this has gone unnoticed: nothing on
+the page ever looks absurd.
+
+HOW MUCH IT MOVES
+
+Across every response I hold, 13% of completed head-to-head matchups are
+reported with the wrong winner — 101 of 791. When a team total is wrong it is
+off by a median of 24.5 points, and by as much as 155. As I write, 3 of 118
+matchups are wrong. One of them is week 14, rewritten this morning, which on
+the pattern above I expect to correct itself on the next pass.
+
+TIMING
+
+Week 24 I sample twice a day. It changed on 2, 4, 6 and 8 September and not on
+the 3rd, 5th, 7th or 9th — a clean 48-hour alternation. Then it changed on
+four consecutive days, 14 to 17 September, and has not changed since.
+Whole-season sweeps touching 20-24 weeks at once landed on 2, 3, 14, 16 and
+18 September. Single weeks moved alone on the 6th, 7th, 9th and 20th, and
+weeks 18 and 23 moved together on both the 7th and the 9th. So it runs in
+bursts rather than on a fixed schedule.
+
+THE QUESTION, REVISED
+
+Not "are the locks gone" — they aren't. What I'd like to know is what
+recomputes or re-serves lock selections for a completed season, and why it
+sometimes yields a different game than the stored one. Something that ran on
+2, 3, 14, 16 and 18 September, and that touched weeks 18 and 23 together on
+the 7th and the 9th, would be the thing to look at.
+
+I have all 163 raw responses with timestamps and can send any of them, or the
+lot. Happy to answer questions.
+
+Thanks,
+[your name]
+```
+
+---
+
 ## Reproducing the figures
 
 All of it runs off the committed archive; none of it needs the network or the database.
 
 | claim | where it comes from |
 |---|---|
-| the three week-12 observations | `snapshots/matchups/2025/wk12/` — three files |
+| the three week-12 observations | `snapshots/matchups/2025/wk12/` — the first three files |
 | the 24-day sweep | `lockin observe`, which wrote the `20260901T0202*` snapshots |
-| every changed value is one of that player's own games | `box_scores` scored through `core.scoring.score_recorded` |
-| lineups never change | `starters` arrays across all 11 multi-observation weeks |
+| every value is one of that player's own games | `box_scores` scored through `core.scoring.score_recorded` |
+| lineups never change | `starters` arrays across all 138 follow-up observations |
 | renumbering ruled out | earliest wk12 payload vs `snapshots.latest` for all 25 weeks |
 | six identical reads | six calls to `SleeperClient.matchups` over ten seconds |
+| reversion rates, 97% agreement with August, excursion lengths | `lockin repair --stats` |
+| 13% wrong winners, 24.5-point median error | `lockin repair --stats` |
+| the majority value for any given slot | `lockin repair --json`, field `consensus` |
+| the timing table | `logs/observe.log` plus the `wk24` snapshot filenames |
 
-If they ask for raw data, send the three `wk12` files first — they carry the argument on
-their own and are about 5 KB each.
+If they ask for raw data, send the six `wk01` files first. Porzingis is in every one of
+them, they are about 5 KB each, and a player with one game whose value blinks on and off
+needs no explanation from me. The `wk12` files are the better follow-up if they want to
+see the which-game-counts version.
 
 ## If they reply
 
-The most useful outcome is a yes/no on whether lock state is persisted for completed
-seasons. A "yes, expected" closes §12's open mechanism question and means the archive is
-the only route to a stable record — which is what `lockin observe` already assumes. A "no,
-that's a bug" makes the daily series the thing to hand over next — particularly if the
-elevated rate turns out to be a burst rather than the norm.
+The question worth an answer is now narrower than it was: **what recomputes or re-serves
+lock selections for a completed season?** Persistence is no longer in doubt — the archive
+settles it — so a "that's expected" answer would have to explain why a stored value is
+intermittently not the one served, which is a harder thing to call expected.
 
-Either way the project's decision does not change: today's data stays canonical, `Actual`
-stays ungated, and the four box-score policies are unaffected.
+Two outcomes are worth preparing for:
+
+- **They can identify the job.** Then the timing table is the thing to hand over next: the
+  sweep dates, the 48-hour alternation on week 24, and weeks 18 and 23 moving together
+  twice. That is the shape of a scheduled task, and they can match it against their own.
+- **They cannot reproduce it.** Offer the archive. 163 timestamped responses for one league
+  over 45 days is probably more than they have retained themselves, since there is no
+  historical endpoint.
+
+What does **not** depend on their answer: the project can already repair itself. `lockin
+repair` recovers the original values from the archive by majority vote and needs nothing
+from Sleeper. That was not true when Part 1 was sent, and it is the reason the tone here
+can stay unhurried.

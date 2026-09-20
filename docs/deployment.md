@@ -393,15 +393,87 @@ and loses when, which is the only question it exists to answer.
 so an overlap would be harmless anyway. 25 requests against a documented ceiling of 1000
 a minute, and dedup means a quiet season writes nothing at all.
 
-Revisit the interval once the cadence is known — a fortnight of daily observations should
-settle whether this runs on a clock or in bursts. Until then, err dense: the samples cannot
-be taken retrospectively.
+**The fortnight is in, and the answer is bursts.** Week 24 is sampled twice daily, by
+`observe` at 09:15Z and the ingest cron at 10:30Z, so it has the finest resolution:
+it changed on 2, 4, 6 and 8 September and not on the 3rd, 5th, 7th or 9th — a clean
+48-hour alternation — then on four consecutive days, 14 to 17 September, then not since.
+Whole-season sweeps landed on 2, 3, 14, 16 and 18 September. No period fits all of it, so
+**keep it daily**: a longer interval would have merged the alternation and the four-day
+run into the same undifferentiated "it changed".
+
+**Nothing tells you when this job fails.** It died four days running, 10 to 13 September,
+with `Temporary failure in name resolution`, and the only symptom was the next successful
+run reporting five days of drift as though it were one. Both cron lines redirect stderr to
+a log nobody reads. If you add one thing to this runbook, make it a failure notification on
+the observe and ingest lines — the digest already has ntfy wired up. The logrotate rule
+from step 7 is still not installed either, and at daily cadence that now matters more.
 
 **Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
 and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot
 commit for you — check `git status snapshots/` when you see a changed week in the log. At
 daily cadence on a moving season that is up to 25 small files a day, so make it a habit
 rather than an occasional sweep.
+
+## 11. Repair the season from the archive
+
+The archive is not only evidence. It is a better copy of the season than any single read,
+and `lockin repair` puts it back.
+
+Nineteen days of daily sampling established that Sleeper has **not** lost the lock
+selections: a corrupted value reverts to the stored one at the next rewrite, 84% of the
+time at the very next one, and the value a slot keeps returning to agrees with the oldest
+snapshot in 97% of cases (implementation-plan.md §12, "The locks are intact"). So the
+original is recoverable by counting, and needs nothing from Sleeper.
+
+```bash
+uv run --frozen lockin repair            # what it would change
+uv run --frozen lockin repair --apply    # change it
+```
+
+This matters because the database was ingested on particular days, and those days were not
+special. `weekly_matchups` is frozen at the first full ingest for every week except the
+current one, with two partial re-ingests — and both landed while some weeks happened to be
+in excursion. On this deployment that is **48 starter values across 6 weeks** holding a
+value Sleeper itself no longer serves. Everything derived from them is wrong by that much:
+`lock_inferences`, `manager_decisions`, the scorecards, the grades on the served dashboard.
+
+```
+  week 12     21 starter values
+               roster 1 player 1809  57.5 -> 49.5  (5/8)
+               roster 1 player 2133  23.0 -> 45.0  (4/8)
+               ... and 19 more
+  planned     48 values across 6 weeks
+nothing written. re-run with --apply to restore these values.
+```
+
+`(5/8)` is the vote: five of eight observations agree on 49.5. A slot marked `TIED` has no
+majority and falls back to the earliest observation — 58 slots in the 2025 archive, and in
+57 of them the earliest value is one of the tied leaders anyway.
+
+**It appends, it does not update.** The corrupted rows stay in `weekly_matchups` as
+history, readers all go through `weekly_matchups_latest`, and deleting one `observed_at` is
+the whole undo. Provenance lands in `ingest_log` under source `repair`:
+
+```sql
+SELECT target, rows, started_at FROM ingest_log WHERE source = 'repair';
+```
+
+After applying, re-run the two commands that cache derived results — nothing else reads
+stale state:
+
+```bash
+uv run --frozen lockin managers
+uv run --frozen lockin dashboard
+```
+
+**Run it after a sweep, not on a schedule.** A repair is only as good as the votes behind
+it, and a week rewritten this morning has one fresh observation arguing against five or six
+older ones — which is the right answer, but it means there is nothing to gain from repairing
+faster than the archive grows. It is not in the cron for that reason.
+
+`lockin repair --stats` measures the archive against itself and opens no database at all:
+the reversion rates, the excursion lengths, and how many completed matchups a given read
+reports backwards (12.8%, as of 2026-09-20).
 
 ## What this deployment does not include
 

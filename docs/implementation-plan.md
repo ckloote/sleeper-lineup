@@ -899,6 +899,11 @@ function need no changes.
 
 ### Open question
 
+> **Answered 2026-09-20 — see "The locks are intact" at the end of this section.**
+> The results *are* recoverable: the archive's majority value agrees with the August
+> baseline in 97% of slots, and `lockin repair` restores it. Option 3 below was still
+> the right call with one observation per week; it is no longer the best available.
+
 Whether the season's results are recoverable at all. Sleeper publishes no historical
 endpoint, so absent a snapshot the original values are simply gone. Options, in rough
 order of how much they salvage:
@@ -916,6 +921,10 @@ Option 3 preserves the most: architecture doc §12 lists five policies and only 
 depends on the mutated field.
 
 ### Decision (2026-08-07): today's data is canonical
+
+> **Superseded 2026-09-20 by "Decision (2026-09-20): the majority value is canonical"**
+> at the end of this section. Kept as the record of what was decided on what evidence.
+> In particular the `Actual` row of the table below is no longer accurate.
 
 Option 3 adopted. The backtest measures **policy against policy**, not policy against the
 human baseline.
@@ -1174,6 +1183,170 @@ sourced back to `snapshots/`. `support@sleeper.com` is the only channel Sleeper 
 there is no developer contact anywhere in their API documentation. The open question there
 is the one this section cannot answer from outside: whether lock state is persisted for
 completed seasons at all.
+
+### The locks are intact — the corruption reverts, 2026-09-20
+
+Nineteen days of daily `observe` runs, 163 snapshots covering all 25 weeks. The analysis
+below runs over the 24 weeks holding three or more observations — 1,440 starter slots,
+9,720 observations; week 25 has a single snapshot and abstains. **This overturns the
+mechanism this section has assumed since 2026-08-07, and supersedes the decision taken
+then.** Every figure is reproducible with `lockin repair --stats`.
+
+Sleeper has not lost the lock selections. They are stored, they are correct, and a wrong
+value reverts to them.
+
+#### The reversion asymmetry
+
+Each slot has a value it keeps returning to. Call it the *majority value*. Measured per
+rewrite event — a pair of consecutive snapshots of one week where at least one value moved:
+
+| the player's games that week | P(stays on the majority value) | P(returns to it when currently off it) |
+|---|---|---|
+| 2 | 80.4% | **87.6%** |
+| 3 | 75.3% | **84.8%** |
+| 4 | 68.5% | **85.6%** |
+| *all, ungrouped* | *75.4%* | ***85.7%*** |
+
+A process regenerating the lock on each pass makes these two columns equal — the next
+draw cannot know where it came from. Observing a *higher* rate of return-to-correct than
+stay-correct means something in the system is holding the right answer and putting it
+back. The gap widens with the number of games, which is what a single stored value plus
+scattered departures predicts and what an unbiased redraw does not.
+
+Two corroborations:
+
+- **84% of excursions end at the very next rewrite event.** A value goes wrong, then comes
+  straight back. The remaining 16% survive one further rewrite; none survives two.
+- **The earliest snapshot, 2026-08-06/08, matches the majority value in 97.0% of slots**
+  (1,341 of the 1,382 with an untied majority). The August archive is very nearly ground
+  truth, which is what "the 2026-08-05 values are the earliest we have" above hoped for
+  without being able to test.
+
+Only 58 of 1,440 slots have a tied mode, and in 57 of them the earliest observation is one
+of the tied leaders — so first-seen is a sound tiebreak. Tied slots are counted in the
+archive but excluded from the reversion figures: with no majority there is nothing to be
+on or off.
+
+#### It is not only which game counts
+
+The closed-menu property now holds at a sample size that settles it: **9,385 of 9,385
+non-zero values ever recorded are one of that player's own game scores from that same
+week.** No exceptions. That also proves the box scores have not moved in 45 days — a
+rewritten box score would leave an old observation unable to match today's menu.
+
+Lineups likewise: **138 follow-up observations, not one `starters` array has ever
+differed.** The 11-week figure cited above is superseded by the full-season one.
+
+But the mutation also **invents and erases locks outright**: 106 transitions from `0.0` to
+a real score, and 104 the other way. Since `0.0` means the manager never locked that
+player, these are fabricated and deleted decisions, not just reattributed points.
+
+The cleanest case in the archive needs no interpretation. Kristaps Porziņģis (1590),
+roster 6, week 1 — one game that week, worth 41.5:
+
+```
+  08-08  41.5     09-02   0.0     09-03  41.5
+  09-14  41.5     09-16   0.0     09-18  41.5
+```
+
+There is no second game to choose between, so "which game counts" cannot describe this.
+The value is present, absent, present — and it returns every time.
+
+#### The wrong value is plausible, which is why nobody noticed
+
+Selection by score rank, 1 being that player's best game of the week:
+
+| | best | 2nd | 3rd | 4th |
+|---|---|---|---|---|
+| majority value, 4-game players | 53.0% | 23.9% | 14.6% | 8.5% |
+| the corrupt value | 32.0% | 29.0% | 22.4% | 16.6% |
+
+Real locks skew hard toward the best game — that is managers picking well, and it is a
+useful independent check that the majority value really is the human decision rather than
+an artifact of how it was computed. The corruption is much flatter but still tilted
+upward, so a wrong result never looks absurd on the page.
+
+Per rewrite event, 40.7% of eligible starters move against 66.9% for an independent
+uniform redraw — 29.0/39.2/48.2% observed against 50/66.7/75% predicted for 2/3/4-game
+players. The ratio sits near 0.6 at every game count, consistent with roughly three
+starters in five being redrawn per event and the rest left untouched.
+
+#### Timing: bursts, not a clock
+
+Week 24 is sampled twice daily — `observe` at 09:15Z and the `ingest --weeks current`
+cron at 10:30Z — so it carries the finest resolution available:
+
+```
+  09-02 ✓   09-03 ·   09-04 ✓   09-05 ·   09-06 ✓   09-07 ·   09-08 ✓   09-09 ·
+  09-10 ·· 09-13   no data
+  09-14 ✓   09-15 ✓   09-16 ✓   09-17 ✓   09-18 ·   09-19 ·   09-20 ·
+```
+
+A clean 48-hour alternation for a week, then four consecutive days, then silence.
+League-wide: full sweeps of 20-24 weeks on 09-02, 09-03, 09-14, 09-16 and 09-18; single
+weeks alone on 09-06 (wk24), 09-20 (wk14); weeks 18 and 23 moving together on both 09-07
+and 09-09. No period fits all of it.
+
+**The 09-10 to 09-13 gap was local, not upstream.** Both cron jobs died four days running
+with `Temporary failure in name resolution` and nothing said so, which is why the 09-14
+run reports 686 changed values over five days rather than one. See deployment.md §10 —
+the jobs still have no failure alerting, and this is what that costs.
+
+#### What it costs, measured
+
+| | |
+|---|---|
+| matchup-observations reporting the wrong winner | 101 of 791 (12.8%) |
+| team total error when wrong | median 24.5 pts, max 155.0 |
+| wrong winners in today's snapshots | 3 of 118 — weeks 12, 14 and 19 |
+| starters currently off the majority value | 62 of 1,440 — wk14 alone holds 27 |
+| **starters wrong in `data/lockin-2025.db`** | **48 across 6 weeks** — 21 in wk12, 27 in wk19-23 |
+
+The database figure is the one that matters here. `weekly_matchups` is frozen at the
+2026-08-08 full ingest for every week except 24, with two partial re-ingests on 08-15 and
+09-01 — and those two landed on days when weeks 12 and 19-24 happened to be in excursion.
+Everything derived from them is wrong by that much: `lock_inferences`, `manager_decisions`,
+the scorecards, the grades on the served dashboard.
+
+A falsifiable prediction, recorded before the fact: **week 14 should revert at its next
+rewrite.** It was rewritten on 09-20, it holds 27 of the 62 currently-wrong starters, and
+its roster 4 vs roster 9 result is one of the three matchups currently reported backwards
+(239.5-278.0 served, 288.0-255.0 by majority). If it does not revert, the majority-value
+model is wrong and this subsection needs reopening.
+
+#### Decision (2026-09-20): the majority value is canonical, not today's data
+
+Supersedes "Decision (2026-08-07): today's data is canonical" above. That decision was
+correct given what was known — with one observation per week there was nothing better to
+be canonical than the latest read. With six to ten, there is.
+
+The archive votes. `lockin repair` recovers the majority value per starter slot, falling
+back to first-seen on a tie, and appends the result to `weekly_matchups` as a fresh
+observation — which every reader picks up automatically, since they all read through
+`weekly_matchups_latest`.
+
+What this recovers, against the table in the 2026-08-07 decision:
+
+- **`Actual` is no longer unreliable.** It was the one policy of five that depended on the
+  mutated field. At 97% agreement with the August baseline and an untied majority in 96%
+  of slots, the human baseline is back, with a stated error bar rather than a disclaimer.
+  The corroboration that it really is the human decision: majority values land on the
+  player's best game of the week far more often than chance, which is what a manager
+  choosing looks like and not what a regeneration bug looks like.
+- **Manager profiles are a behavioural record again**, not "how this manager's decisions
+  look in the current data". The wording in §16 should be revisited.
+- **Phase 5's gate is unaffected** either way, as recorded above.
+
+What it does not recover: the 58 tied slots, and any week whose corruption predates the
+first snapshot. Neither is measurable from inside the archive, so the honest form of the
+claim is "the majority of 6-10 observations, 97% concordant with the earliest", not
+"ground truth".
+
+The open question this section has carried since August — whether lock state is persisted
+for completed seasons — **is answered: yes.** What replaces it is narrower and is now the
+only thing the report asks: what recomputes or re-serves that state, and why does it
+sometimes disagree with what is stored.
+
 
 ---
 

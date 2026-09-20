@@ -20,6 +20,12 @@ The gates (`reconcile`, `verify`, `locks`, `calibrate`, `backtest`) live here
 rather than in the test suite because they need the ingested season and take
 seconds to minutes. Each exits nonzero on failure, so cron can treat them as
 checks.
+
+`observe` and `repair` are a pair, and both exist because Sleeper rewrites
+completed seasons (implementation-plan.md §12). `observe` grows the snapshot
+archive without opening the database; `repair` reads the archive back and
+restores the values the database holds wrong. Neither is in the cron — the first
+is, the second deliberately is not.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from lockin import managers as managers_mod
 from lockin import notify as notify_mod
 from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
+from lockin import repair as repair_mod
 from lockin import serve as serve_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config, load_env_file
@@ -310,6 +317,146 @@ def observe(weeks: str | None) -> None:
     click.echo(f"  observed    {len(week_list)} weeks, {changed} changed")
     if changed:
         click.echo("commit the new snapshots — they cannot be refetched.")
+
+
+@main.command()
+@click.option("--weeks", default=None, help="Weeks: '1-25' or '12,13'. Default: all.")
+@click.option("--apply", "do_apply", is_flag=True, help="Write the recovered values.")
+@click.option("--stats", "show_stats", is_flag=True, help="Measure the archive; plan nothing.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
+@click.option(
+    "--min-observations",
+    default=repair_mod.MIN_OBSERVATIONS,
+    show_default=True,
+    help="Weeks with fewer snapshots than this are left alone.",
+)
+def repair(
+    weeks: str | None, do_apply: bool, show_stats: bool, as_json: bool, min_observations: int
+) -> None:
+    """Restore the original lock selections from the snapshot archive.
+
+    Sleeper rewrites completed seasons, but it does not lose them: a corrupted
+    starter value reverts to the stored one at the next rewrite, and the value a
+    slot keeps returning to agrees with the oldest snapshot 97% of the time
+    (implementation-plan.md §12, "The locks are intact"). So with enough
+    observations the original is recoverable by counting, and needs nothing from
+    Sleeper.
+
+    Reports by default and writes only under `--apply`. The write is an append:
+    corrupted rows stay in `weekly_matchups` as history, readers go through
+    `weekly_matchups_latest`, and one `observed_at` is the whole undo.
+
+    `--stats` skips the database entirely and measures the archive against
+    itself — the reversion rates, the excursion lengths, and how many completed
+    matchups a given read gets backwards.
+    """
+    cfg = Config.from_env()
+    try:
+        week_list = _parse_weeks(weeks)
+    except ValueError as exc:
+        raise click.BadParameter(f"{exc}. `repair` works on weeks already observed.") from None
+
+    if show_stats:
+        st = repair_mod.stats(
+            cfg.snapshot_root, cfg.season, week_list, min_observations=min_observations
+        )
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "weeks": st.weeks,
+                        "slots": st.slots,
+                        "observations": st.observations,
+                        "earliest_agrees": [st.earliest_agrees, st.earliest_total],
+                        "tied_slots": st.tied_slots,
+                        "stays_on_majority": [st.stay_on, st.stay_on_total],
+                        "returns_to_majority": [st.return_to, st.return_to_total],
+                        "excursion_lengths": dict(sorted(st.excursions.items())),
+                        "currently_off": st.currently_off,
+                        "wrong_winners": [st.matchups_wrong, st.matchups_total],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            for line in st.lines:
+                click.echo(line)
+        return
+
+    with _season(cfg) as conn:
+        repairs, skipped = repair_mod.plan(
+            conn,
+            cfg.snapshot_root,
+            cfg.season,
+            week_list,
+            min_observations=min_observations,
+        )
+
+        if as_json:
+            click.echo(
+                json.dumps(
+                    {
+                        "applied": do_apply,
+                        "skipped_weeks": skipped,
+                        "consensus": [
+                            {
+                                "week": r.consensus.week,
+                                "roster_id": r.consensus.roster_id,
+                                "sleeper_id": r.consensus.sleeper_id,
+                                "database": r.db_value,
+                                "archive": r.consensus.value,
+                                "votes": r.consensus.votes,
+                                "observations": r.consensus.observations,
+                                "tied": r.consensus.tied,
+                            }
+                            for r in repairs
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            click.echo(f"league {cfg.league_id} season {cfg.season} <- {cfg.snapshot_root}")
+            if skipped:
+                click.echo(
+                    f"  skipped     weeks {skipped} — fewer than {min_observations} observations"
+                )
+            by_week: dict[int, list[repair_mod.Repair]] = {}
+            for r in repairs:
+                by_week.setdefault(r.consensus.week, []).append(r)
+            for week, items in sorted(by_week.items()):
+                click.echo(f"  week {week:>2}     {len(items)} starter values")
+                for r in items[:3]:
+                    c = r.consensus
+                    flag = "  TIED" if c.tied else ""
+                    click.echo(
+                        f"               roster {c.roster_id} player {c.sleeper_id}"
+                        f"  {r.db_value} -> {c.value}"
+                        f"  ({c.votes}/{c.observations}){flag}"
+                    )
+                if len(items) > 3:
+                    click.echo(f"               ... and {len(items) - 3} more")
+            click.echo(f"  planned     {len(repairs)} values across {len(by_week)} weeks")
+
+        if not repairs:
+            return
+        if not do_apply:
+            if not as_json:
+                click.echo("nothing written. re-run with --apply to restore these values.")
+            return
+
+        rows, teams = repair_mod.apply(
+            conn,
+            cfg.snapshot_root,
+            cfg.season,
+            repairs,
+            observed_at=db.now_iso(),
+            min_observations=min_observations,
+        )
+        db.checkpoint(conn)
+        if not as_json:
+            click.echo(f"  applied     {rows} starter rows, {teams} team totals")
+            click.echo("re-run `lockin managers` and `lockin dashboard` — their inputs moved.")
 
 
 @main.command()
