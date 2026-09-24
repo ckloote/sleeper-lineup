@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,8 +26,19 @@ class DatabaseMissing(Exception):
 
 
 def now_iso() -> str:
-    """UTC timestamp for `observed_at` / `ingested_at` columns."""
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """UTC timestamp for `observed_at` / `ingested_at` columns, to the microsecond.
+
+    Whole seconds were not enough. `observed_at` is what separates one poll from
+    the next, and two ingests inside one second shared a stamp: the second poll
+    replaced the first one's rows where they overlapped and inherited the rest,
+    so a player dropped in between stayed on the roster (review finding 4). The
+    same second-granularity collision is finding 12's, for digest runs.
+
+    Mixed precision still sorts correctly, which every `MAX(observed_at)`
+    relies on: a whole-second stamp and a fractional one from the same second
+    differ first at `+` against `.`, and `+` sorts first.
+    """
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def connect_readonly(db_path: Path) -> sqlite3.Connection:
@@ -94,7 +106,8 @@ def connect(db_path: Path, *, create: bool = True) -> sqlite3.Connection:
 # EXISTS will not add them to a database that already exists, so they are
 # applied explicitly. Additive only — nothing here drops or retypes.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
-    "game_links": {"occurred": "INTEGER", "is_exhibition": "INTEGER"},
+    "game_links": {"occurred": "INTEGER", "is_exhibition": "INTEGER", "state": "TEXT"},
+    "nba_schedule": {"status": "INTEGER"},
     "box_scores": {"is_team_row": "INTEGER"},
     # Added columns are nullable even where schema.sql declares NOT NULL:
     # SQLite cannot ALTER TABLE ADD a NOT NULL column without a default. A
@@ -113,8 +126,19 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
     # Without it, two rosters digested on the same day interleave into one
     # undistinguishable list. Nullable, so the rows written before it survive.
-    "recommendations": {"roster_id": "INTEGER"},
-    "digest_runs": {"last_ingest_at": "TEXT"},
+    "recommendations": {"roster_id": "INTEGER", "run_id": "TEXT", "expires_utc": "TEXT"},
+    "digest_runs": {
+        "last_ingest_at": "TEXT",
+        "run_id": "TEXT",
+        "state_source": "TEXT",
+        "opponent_state": "TEXT",
+        "poll_observed_at": "TEXT",
+        "ingest_run_id": "INTEGER",
+        "n_sims": "INTEGER",
+        "seed": "INTEGER",
+        "model": "TEXT",
+        "abstained": "INTEGER",
+    },
 }
 
 
@@ -150,10 +174,119 @@ def _rebuild_recommendations(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text())
 
 
+def _schema_statement(kind: str, name: str) -> str:
+    """One CREATE statement from schema.sql, for a migration that must re-issue it."""
+    match = re.search(
+        rf"CREATE {kind} IF NOT EXISTS {name}\b.*?;", SCHEMA_PATH.read_text(), re.DOTALL
+    )
+    if match is None:
+        raise RuntimeError(f"schema.sql has no CREATE {kind} {name}")
+    return match.group(0)
+
+
+def _complete_partial_polls(conn: sqlite3.Connection) -> int:
+    """Make every repair observation a whole poll. Returns rows copied forward.
+
+    `lockin repair` used to append only the starter rows it corrected, which the
+    old per-player view merged with everything else. The per-poll view would
+    read such an observation as the roster's entire membership, dropping the
+    bench and every starter the repair left alone — so before the view changes,
+    each one is completed from the poll it corrected.
+
+    Restricted to observations `ingest_log` records as repairs. A live poll
+    that is smaller than the one before it is a roster that lost a player, and
+    filling it in would resurrect him, which is the bug being fixed.
+    Chronological, so a second repair of the same week copies from the first
+    one's completed poll rather than from a partial one.
+    """
+    written = 0
+    stamps = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT started_at FROM ingest_log WHERE source = 'repair' ORDER BY 1"
+        )
+    ]
+    for stamp in stamps:
+        teams = conn.execute(
+            "SELECT week, roster_id FROM weekly_matchup_teams WHERE observed_at = ?", (stamp,)
+        ).fetchall()
+        for week, roster_id in teams:
+            prior = conn.execute(
+                "SELECT MAX(observed_at) FROM weekly_matchup_teams"
+                " WHERE week = ? AND roster_id = ? AND observed_at < ?",
+                (week, roster_id, stamp),
+            ).fetchone()[0]
+            if prior is None:
+                continue
+            # OR IGNORE keeps the corrected rows the repair did write.
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO weekly_matchups"
+                " (week, roster_id, matchup_id, sleeper_id, counted_points, is_starter,"
+                "  slot_index, slot, observed_at)"
+                " SELECT week, roster_id, matchup_id, sleeper_id, counted_points, is_starter,"
+                "        slot_index, slot, ?"
+                "   FROM weekly_matchups"
+                "  WHERE week = ? AND roster_id = ? AND observed_at = ?",
+                (stamp, week, roster_id, prior),
+            )
+            written += cur.rowcount
+    return written
+
+
+def _migrate_coherent_polls(conn: sqlite3.Connection) -> None:
+    """Review finding 4: the latest view reads whole polls, not rows per player."""
+    _complete_partial_polls(conn)
+    conn.execute("DROP VIEW IF EXISTS weekly_matchups_latest")
+    conn.execute(_schema_statement("VIEW", "weekly_matchups_latest"))
+
+
+def _migrate_fixture_states(conn: sqlite3.Connection) -> None:
+    """Review finding 1: carry `occurred` over to `state` for fixtures already here.
+
+    Every fixture in a database from before this change is past-dated, so the
+    old binary was right about them: played is final, and "nobody played" was a
+    real postponement (reconcile checked each against the NBA). The next ingest
+    reclassifies from full evidence anyway.
+    """
+    conn.execute(
+        "UPDATE game_links SET state = CASE occurred WHEN 1 THEN 'final'"
+        " WHEN 0 THEN 'postponed' END WHERE state IS NULL"
+    )
+
+
+# Data migrations, in order. Each runs once per database, inside a savepoint, and
+# is recorded in `schema_migrations`. A fresh database runs them too, against
+# empty tables, which is what records them as done.
+_MIGRATIONS: tuple[tuple[str, Callable[[sqlite3.Connection], None]], ...] = (
+    ("coherent-polls", _migrate_coherent_polls),
+    ("fixture-states", _migrate_fixture_states),
+)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    done = {r[0] for r in conn.execute("SELECT name FROM schema_migrations")}
+    for name, migrate in _MIGRATIONS:
+        if name in done:
+            continue
+        conn.execute("SAVEPOINT migrate")
+        try:
+            migrate(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+                (name, now_iso()),
+            )
+        except BaseException:
+            conn.execute("ROLLBACK TO migrate")
+            conn.execute("RELEASE migrate")
+            raise
+        conn.execute("RELEASE migrate")
+
+
 def apply_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text())
     _apply_added_columns(conn)
     _rebuild_recommendations(conn)
+    _apply_migrations(conn)
 
 
 @contextmanager

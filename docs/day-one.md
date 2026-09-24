@@ -27,6 +27,26 @@ Verify the deployment by running a gate, not by running the digest:
 uv run --frozen lockin verify     # exits nonzero on failure
 ```
 
+**Back up `data/lockin-2025.db` before the Pi first runs the code from the 2026-09-23
+review** (branch `live-state-correctness`). The first command to open the file migrates it:
+it adopts its league identity, completes the partial `lockin repair` polls so the new
+per-poll lineup view reads them whole, and classifies fixture states. All three are additive
+and were checked on a copy — `verify`, `reconcile` and `locks` were identical before and
+after, and `weekly_matchups_latest` row-for-row — but the file is the only copy of the
+season's derived tables, and the cron will do this unattended at 06:30.
+
+```bash
+uv run python -c "
+import sqlite3
+src=sqlite3.connect('file:data/lockin-2025.db?mode=ro', uri=True)
+dst=sqlite3.connect('data/lockin-2025.pre-review.db')
+src.backup(dst); dst.close(); print('backed up')
+"
+```
+
+(The Pi has no `sqlite3` command-line tool; this is SQLite's own backup API, which also
+copies whatever is still in the WAL.)
+
 ---
 
 ## 1. Find the new league id
@@ -94,6 +114,14 @@ the two. The backtest would still run. It would just be meaningless.
 A separate file per season is the intended shape anyway: the database is disposable and
 rebuilt from the API, which is why the archive that is *not* disposable lives outside it.
 
+> **Since 2026-09-23 this is enforced, not just advised.** A database records the league
+> and season it was first ingested for (`db_identity`), and every command compares the
+> configuration against it. Skip this step and `lockin ingest` refuses before writing
+> anything — `this database (...) belongs to league 1283214955830575104 season 2025` — and
+> names the `export` to run. The 2025-26 file adopts its identity automatically the first
+> time any command opens it. `lockin observe` makes the same check against the league
+> payload, so the archive cannot file 2026-27 payloads under 2025 either.
+
 **Point `lockin serve --dashboard-db` at the old file.** Scorecards are retrospective, so
 the only ones that exist now describe 2025-26 and live in `data/lockin-2025.db`. Without it
 `/dashboard` reads "No scorecards yet" until this season is over.
@@ -107,17 +135,16 @@ season-scoped (`snapshots/<kind>/<season>/wkNN/`), so the seasons cannot collide
 ## 3. Confirm the week structure before trusting `--weeks`
 
 `config.ALL_STAT_WEEKS` hardcodes `range(1, 26)` — 25 weeks, from 2025-26. The league
-publishes the real numbers, and a different playoff format would move them:
+publishes the real numbers, and a different playoff format would move them. Read them from
+Sleeper — the new database does not exist until step 4, so there is nothing local to read
+yet:
 
 ```bash
 uv run python -c "
-import json
-from lockin.config import Config, load_env_file
-from lockin.store.db import connect_readonly
-load_env_file()
-c=connect_readonly(Config.from_env().db_path)
-s=json.loads(c.execute('SELECT payload_json FROM league_settings LIMIT 1').fetchone()['payload_json'])['settings']
-print({k:s[k] for k in ('start_week','playoff_week_start','last_scored_leg','playoff_teams')})
+import json, os, urllib.request
+url=f'https://api.sleeper.app/v1/league/{os.environ[\"LOCKIN_LEAGUE_ID\"]}'
+with urllib.request.urlopen(url, timeout=20) as r: s=json.load(r)['settings']
+print({k:s.get(k) for k in ('start_week','playoff_week_start','last_scored_leg','playoff_teams')})
 "
 ```
 
@@ -125,6 +152,10 @@ print({k:s[k] for k in ('start_week','playoff_week_start','last_scored_leg','pla
 If those have moved, `ALL_STAT_WEEKS`, `REGULAR_SEASON_WEEKS` and `PLAYOFF_WEEKS` in
 `lockin/config.py` need updating. `last_scored_week()` already reads the setting rather
 than a constant, so `lockin managers` is safe either way; the ingest default is not.
+
+Every `lockin ingest` also prints the same numbers on its `structure` line, and a
+`WARNING` beneath it when they disagree with `lockin/config.py` — so a format change made
+mid-season is caught by the cron log too, not only by this step.
 
 Early in the season, ingest one week at a time — `--weeks 1` — rather than sweeping 25 that
 do not exist yet.
@@ -161,21 +192,36 @@ change the moment it appears. **If the commissioner changed scoring, `verify` fa
 everything downstream is wrong until the settings are re-read.** That is the intended
 behaviour, not a bug to work around.
 
+`reconcile` can pass on day one now, and for the right reasons. It used to demand all 25
+weeks and read "nothing played yet" as a 0% link rate, so the gate this step prescribes
+could not pass on the morning it was written for (review finding 11). While the league is
+in progress it checks the weeks that should exist by now, links only games that were
+played ("no fixtures played yet" is a pass), fails on any fixture whose evidence disagrees
+(`unknown`: due or NBA-final with no stat lines), and requires tipoff times for the current
+week — the deadline every call is printed against. `tests/test_day_one.py` runs this
+step against a fresh synthetic season.
+
 `calibrate`, `backtest` and `locks` need most of a season and will not pass in week 1.
-Do not run them as gates until there is enough history; the projection layer falls back to
-the pooled donor cohort for players without their own games, which is the right behaviour
-but not something to gate on.
+Do not run them as gates until there is enough history.
+
+**Around week 5, run `uv run lockin calibrate --cold-start`.** The digest abstains until 400
+player-games have been played league-wide, a threshold chosen on 2025-26's first month
+(implementation-plan.md §21). That is a consistency check on the season it was chosen from;
+2026-27's first month is the out-of-sample test of it. If the gate fails, the threshold is
+too low and the first week's advice was not calibrated — raise `min_pool_rows`.
 
 ---
 
-## 5. §7.5 — confirm Sleeper publishes rows for games not yet played
+## 5. §7.5 — a cross-check now, not a dependency
 
-**The one unverified assumption the digest actually depends on.** The evidence from
-2025-26 is encouraging — rows exist for games players sat out, so the feed appears to track
-the team schedule rather than participation — but that was only ever observable in
-retrospect, and retrospectively every game has been played.
+This used to be **the one unverified assumption the digest depended on**: that Sleeper
+publishes stat rows for games not yet played. It no longer matters. Since 2026-09-23 the
+digest reads every game still to come from the NBA schedule (`lockin/slate.py`), joined to
+each player's team and to a Monday-to-Sunday week calendar that held for all 25 weeks of
+2025-26. Sleeper's forward rows, if they exist, are compared against it, and a
+disagreement is printed rather than silently preferred.
 
-Run this on a day with games scheduled, **before tip**:
+It is still worth knowing which way it went. On a day with games scheduled, **before tip**:
 
 ```bash
 uv run python -c "
@@ -187,36 +233,26 @@ cfg=Config.from_env()
 c=connect_readonly(cfg.db_path)
 today=clock.today_iso(cfg.timezone)
 r=c.execute('SELECT COUNT(*) n, SUM(played) p FROM box_scores WHERE game_date=?',(today,)).fetchone()
-print(f'{today}: {r[\"n\"]} rows, {r[\"p\"] or 0} marked played')
+s=c.execute('SELECT state, COUNT(*) FROM game_links WHERE game_date>=? GROUP BY state',(today,)).fetchall()
+print(f'{today}: {r[\"n\"]} Sleeper rows ahead, {r[\"p\"] or 0} played; fixture states {[tuple(x) for x in s]}')
 "
 ```
 
-**Pass:** a nonzero row count with zero (or few) marked played. That is the forward-looking
-feed working.
+Either answer is fine. What must **not** appear is `postponed` against games that are
+simply in the future — that was review finding 1, and it removed every upcoming fixture
+from the digest. And the schedule must reach April:
 
-**Fail — zero rows:** tonight's slate must come from the NBA schedule instead. The work is
-rerouting `lockin/digest.py`'s `lineup_as_of` to build `Game` days from `nba_schedule`
-joined through `game_links` rather than from the box-score panel. Cheap, but it has never
-been exercised — budget an afternoon, not five minutes.
+```bash
+uv run python -c "
+from lockin.config import Config, load_env_file
+from lockin.store.db import connect_readonly
+load_env_file(); c=connect_readonly(Config.from_env().db_path)
+r=c.execute('SELECT COUNT(*) n, MIN(game_date) a, MAX(game_date) b FROM nba_schedule').fetchone()
+print(f'{r[\"n\"]} fixtures, {r[\"a\"]} .. {r[\"b\"]}')
+"
+```
 
-> **This fallback did not exist until 2026-09-20, and the line above used to assert it
-> did.** `ingest_schedule` read LeagueGameFinder, which returns games that have been
-> *played*, so `nba_schedule` could not hold a fixture until after it was over — there was
-> nothing to fall back to on any date that mattered. It now reads `ScheduleLeagueV2`, which
-> publishes the whole season ahead of time with tipoff times (implementation-plan.md §20).
-> Confirm before relying on it:
->
-> ```bash
-> uv run python -c "
-> from lockin.config import Config, load_env_file
-> from lockin.store.db import connect_readonly
-> load_env_file(); c=connect_readonly(Config.from_env().db_path)
-> r=c.execute('SELECT COUNT(*) n, MIN(game_date) a, MAX(game_date) b FROM nba_schedule').fetchone()
-> print(f'{r[\"n\"]} fixtures, {r[\"a\"]} .. {r[\"b\"]}')
-> "
-> ```
->
-> **Pass:** a range ending in April of next year, not yesterday.
+**Pass:** a range ending in April of next year, not yesterday.
 
 ---
 
@@ -233,15 +269,22 @@ from lockin.config import Config, load_env_file
 from lockin.store.db import connect_readonly
 load_env_file()
 c=connect_readonly(Config.from_env().db_path)
-for r in c.execute('SELECT as_of, COUNT(*) n FROM player_status GROUP BY as_of ORDER BY as_of DESC LIMIT 7'):
-    print(r['as_of'], r['n'])
+for r in c.execute('SELECT substr(observed_at,1,10) day, COUNT(*) n, MAX(flagged) f FROM status_captures GROUP BY day ORDER BY day DESC LIMIT 7'):
+    print(r['day'], r['n'], 'capture(s),', r['f'], 'flagged')
 "
 ```
 
-**Pass:** one row per calendar day, each with a plausible count (110 designations on
+**Pass:** one row per calendar day, each with a plausible flagged count (110 designations on
 2026-08-08). A missing day is a missing day forever. Every ingest now captures this
 unconditionally, and prints the day count as it goes, so the check is that the number is
 **one higher than yesterday** — not merely nonzero.
+
+> Since 2026-09-23 the capture is timestamped and records changes, including a designation
+> being *cleared* (`player_status_events`), and every read is logged in `status_captures`
+> whether or not anyone was flagged. The old date-keyed `player_status` table kept a
+> morning's Out all day, let an afternoon update overwrite what was known before tip, and
+> could not tell a healthy day from a missed one (review finding 8). It is kept for the
+> days it already holds and no longer written.
 
 **Matchup poll history** (§10/§15 — what live opponent-lock inference needs):
 
@@ -267,22 +310,34 @@ stand-in indefinitely.
 
 ---
 
-## 7. First digest
+## 7. First digest — and the first week, which it will decline to advise on
 
 ```bash
-uv run lockin digest --locked ""
+uv run lockin digest
 ```
 
-The explicit empty `--locked` asserts that nothing is banked yet, which early in week 1 is
-both true and useful — it skips the reconstruction, which is the noisiest thing the digest
-does (§20).
+**On opening morning the pass is an abstention.** With no games played it says
+`insufficient history`, and it keeps saying so — with a count — until 400 player-games
+have been played league-wide, which in 2025-26 was the Monday of week 2. It used to report
+both projected totals as 0.0, P(win) 50% and every threshold 0.0, which is what this step's
+old "P(win) near 50%" pass criterion was unknowingly accepting (review finding 3).
 
-**Pass:** it names a real opponent, gives a P(win) near 50%, and prints standing rules for
-tonight. Early-season thresholds will be wide and the projections will lean on the pooled
-donor cohort; that is expected and self-correcting as own-history accumulates.
+From then on it advises, reading what you have banked from the morning's matchup poll
+(`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
+`--locked` still overrides it whenever you give it.
 
-Once a week of real state exists, pass `--locked` with what you actually banked. Live, that
-is simply known, and supplying it is strictly better than having it inferred.
+**Shadow-check the poll reading for the first week of advice**, before trusting the cron
+without `--locked`. The rule it applies — a locked player's counted score freezes, so an
+earlier lock shows once he has played again — is the architecture doc's §10 reading and has
+never been observed live. Each morning, compare the `BANKED` list with the locks you
+actually made. They should agree on every player whose next game has been played since he
+was locked; last night's locks are not in it by design, because last night's games are the
+calls. A disagreement means the reading is wrong: pass `--locked` and fix `lockin/state.py`
+before relying on it.
+
+A live run also declines when last night's games are not final yet, or when the last
+*complete* ingest finished before they did — a cron that died half-way no longer vouches
+for the data (review findings 7 and 9). Each says so in the notification.
 
 Then render the page, which is how a missed notification stays readable:
 
@@ -290,8 +345,10 @@ Then render the page, which is how a missed notification stays readable:
 uv run lockin advice
 ```
 
-**Pass:** a green banner saying the advice is for this morning. A red one means the digest
-did not run today — check `logs/digest.log` before trusting anything on the page.
+**Pass:** a green banner saying the advice is for this morning, and each call showing the
+tip it must be acted on before. A red banner means the digest did not run today — check
+`logs/digest.log` before trusting anything on the page. A greyed call is one whose tip has
+passed.
 
 If `lockin-serve` is running on the Pi, the same page is at `http://<pi>:8080/` and is
 rendered fresh on each request, so it cannot lag behind the digest.

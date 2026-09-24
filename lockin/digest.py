@@ -19,12 +19,13 @@ exactly what §7.3 said the live paths would have to be smoke-tested against. Th
 same code path serves both; ``--date`` defaults to today, and in October it will
 simply start landing on days with unplayed games.
 
-**Point-in-time by construction, not by care.** :func:`lineup_as_of` blanks the
-score and the played flag on every game after the cutoff before anything else
-sees them, so a leak is not a discipline the callers have to maintain — the
-future is not in the data structure. ``tests/test_digest.py`` corrupts the
-post-cutoff scores and asserts the digest is byte-identical, which is the check
-that would actually catch a regression.
+**Point-in-time by construction, not by care.** :func:`lineup_as_of` reads each
+game on or before the cutoff from the box scores and every game after it from
+the NBA schedule (`lockin.slate`), which carries no scores at all — so a leak is
+not a discipline the callers have to maintain, the future is not in the data
+structure. ``tests/test_digest.py`` corrupts the post-cutoff scores and asserts
+the digest is byte-identical, which is the check that would actually catch a
+regression.
 
 **What is deliberately not here: a recommended lineup.** §11's second item asks
 for tonight's slot assignment including bench promotions, and §16 measured what
@@ -38,15 +39,18 @@ a risk to check rather than an instruction to follow.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import textwrap
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import numpy as np
 
-from lockin.backtest import greedy_thresholds, player_games, starter_dnp_scale
+from lockin import __version__, calendar, clock
+from lockin.backtest import greedy_thresholds, starter_dnp_scale
 from lockin.core.policy import Game
 from lockin.core.projections import (
     EWMAProjectionSource,
@@ -55,7 +59,7 @@ from lockin.core.projections import (
     SeasonPanel,
 )
 from lockin.core.winprob import win_probability
-from lockin.projections import date_of, day_index, load_panel, observed_scores
+from lockin.projections import NoGamesYet, date_of, day_index, load_panel, observed_scores
 from lockin.rollout import (
     SimulationCache,
     decision_for,
@@ -63,6 +67,16 @@ from lockin.rollout import (
     standing_thresholds,
     walk_locks,
 )
+from lockin.slate import WeekSlate, week_slate
+from lockin.state import (
+    SOURCE_ASSUMED,
+    SOURCE_INFERRED,
+    SOURCE_STAND_IN,
+    SOURCE_SUPPLIED,
+    infer_state,
+    slate_final_at,
+)
+from lockin.store import runs
 from lockin.verify import scoring_settings
 
 FORWARD_NIGHTS = 3
@@ -92,13 +106,17 @@ class LockCall:
     p_win_lock: float
     p_win_pass: float
     break_even: float
-    """What the score would have had to be for the call to flip.
+    """The lowest score worth banking in this state; LOCK exactly when the score
+    reaches it. +inf when no score is: passing already wins every simulation.
 
     §11 asks for "the implied break-even printed alongside", and it is what makes
-    a call auditable: a lock at 42 against a break-even of 41.6 is a different
+    a call auditable: a lock at 42 against a break-even of 41.5 is a different
     recommendation from the same lock against a break-even of 20, even though
     both print as LOCK.
     """
+    expires_utc: str | None = None
+    """His next tipoff: when this window closes and the call stops meaning
+    anything (review finding 7). None when the schedule has no time for it."""
 
     @property
     def edge(self) -> float:
@@ -159,6 +177,20 @@ class Digest:
     note: str | None = None
     """Why the digest is empty, when it is. A week with nothing to decide is a
     normal outcome — light-slate weeks are real (§7.7) — not an error."""
+    abstained: bool = False
+    """True when the digest declined to advise, as opposed to having nothing to
+    decide. `note` says why."""
+    state_source: str | None = None
+    """Where `banked` came from: supplied, inferred from a poll, or assumed."""
+    opponent_state: str | None = None
+    """Where the opponent's banked scores came from: inferred, or the stand-in."""
+    poll_observed_at: str | None = None
+    n_sims: int | None = None
+    seed: int | None = None
+    model: str | None = None
+    """Which engine produced it: lockin's version and a hash of the projection
+    parameters. Recomputing later gives a different answer (§20), so the record
+    must say what it was computed with."""
 
     @property
     def as_of_day(self) -> int:
@@ -169,55 +201,33 @@ class Digest:
 
 
 def lineup_as_of(
-    panel: SeasonPanel,
-    scores: np.ndarray,
+    ctx: DigestContext,
     sleeper_ids: list[str],
     week: int,
     known_through: int,
+    *,
+    live: bool = False,
 ) -> dict[str, list[Game]]:
-    """The week's games for each starter, with everything after the cutoff blanked.
+    """The week's games for each starter, as known the morning after the cutoff.
 
-    The schedule is known in advance — which nights a player has a game is not a
-    result — so the ``day`` field survives. The *outcome* does not: score goes to
-    zero and ``played`` to False for every game after ``known_through``.
+    Games on or before ``known_through`` come from the panel with their real
+    scores; games after it come from the NBA schedule, unplayed and scoreless
+    (`lockin.slate`). The future is not blanked out of the data — it was never
+    read — so a leak is not a discipline the callers have to maintain.
 
-    Blanking rather than trimming matters. The simulator needs to know a player
-    has three games left, not merely that he has some; trimming would silently
-    turn a Thursday-Saturday-Sunday week into a week that ends on Wednesday and
-    make every threshold wrong in the safe-looking direction.
+    Which nights a player has a game is known in advance, and the schedule is
+    what knows it. Trimming instead would turn a Thursday-Saturday-Sunday week
+    into a week that ends on Wednesday and make every threshold wrong in the
+    safe-looking direction.
     """
-    out: dict[str, list[Game]] = {}
-    for sleeper_id in sleeper_ids:
-        games = player_games(panel, scores, sleeper_id, week)
-        if not games:
-            continue
-        out[sleeper_id] = [
-            g if g.day <= known_through else Game(index=g.index, day=g.day, played=False, score=0.0)
-            for g in games
-        ]
-    return out
+    return week_slate(
+        ctx.conn, ctx.panel, ctx.scores, ctx.season, week, sleeper_ids, known_through, live=live
+    ).games
 
 
 def resolve_week(conn: sqlite3.Connection, season: str, as_of: str) -> int | None:
-    """Which fantasy week contains this date.
-
-    Weeks are contiguous in the stat feed but not gapless — week 18 starts three
-    days after week 17 ends, because of the All-Star break — so a date can fall
-    between two weeks. Such a date belongs to the week that is about to start:
-    there is nothing to decide during the break, and the useful digest on the
-    Tuesday of a break is the one that previews Thursday.
-    """
-    row = conn.execute(
-        """
-        SELECT fantasy_week FROM box_scores
-         WHERE season = ? AND game_date >= ?
-         ORDER BY game_date LIMIT 1
-        """,
-        (season, as_of),
-    ).fetchone()
-    if row is not None:
-        return int(row["fantasy_week"])
-    return None
+    """Which fantasy week contains this date. See `lockin.calendar`."""
+    return calendar.resolve_week(conn, season, as_of)
 
 
 def roster_for_user(conn: sqlite3.Connection, user_id: str) -> int | None:
@@ -432,6 +442,159 @@ def durability_warnings(
     return sorted(out, key=lambda w: w.name)
 
 
+DIGEST_RUN_UTC = "13:00:00+00:00"
+"""When the morning digest runs — 09:00 US Eastern in daylight time — for a
+replay that has no clock of its own. It bounds which polls a replay may read."""
+
+
+def run_moment(as_of: str, now: datetime | None) -> str:
+    """The instant the digest is taken to run: now, or that morning for a replay."""
+    return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"
+
+
+def _utc(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def unfinished_slate(
+    mine: WeekSlate, theirs: WeekSlate, as_of: str, now: datetime | None, names: dict[str, str]
+) -> str | None:
+    """Why a live run cannot yet treat last night as final, if it cannot.
+
+    The digest reads every game dated yesterday as complete. Run shortly after
+    midnight, that reads a half-played slate as final (review finding 7). The
+    fixture states say directly whether a starter's game is in; the fixed
+    completion hour in `lockin.clock` is the backstop when nothing else is known.
+    """
+    stuck = sorted({f"{names.get(p, p)} ({d})" for p, d in mine.unsettled + theirs.unsettled})
+    if stuck:
+        return (
+            f"last night is not final yet: no final result for {', '.join(stuck)}."
+            " Re-run once the morning ingest has it."
+        )
+    if now is not None and clock.too_early_for(as_of, now):
+        return "last night's games may still be in progress. Re-run after 07:00 UTC."
+    return None
+
+
+def model_id(ctx: DigestContext) -> str:
+    params = hashlib.sha1(repr(ctx.source.params).encode()).hexdigest()[:10]
+    return f"lockin {__version__}; projection params {params}"
+
+
+def stale_ingest(conn: sqlite3.Connection, week: int, known_through: int) -> str | None:
+    """Why this morning's data cannot be trusted as fresh, if it cannot.
+
+    Asked of the last *complete* ingest covering this week (`ingest_runs`), not
+    of the newest log line: a players refresh today on top of a stats fetch
+    yesterday, or a run that died after committing its first week, looked fresh
+    to the old check (review finding 9). It must have finished after last
+    night's games did.
+    """
+    run = runs.latest_complete(conn, week)
+    if run is None:
+        return f"no complete ingest covering week {week}. Run `lockin ingest --weeks current`."
+    if run["finished_at"] < slate_final_at(known_through):
+        return (
+            f"the last complete ingest finished at {run['finished_at'][:16]}Z, before last"
+            " night's games did. Check the ingest cron, then re-run."
+        )
+    return None
+
+
+def cold_start(
+    ctx: DigestContext,
+    mine: dict[str, list[Game]],
+    theirs: dict[str, list[Game]],
+    week: int,
+    known_through: int,
+    names: dict[str, str],
+) -> str | None:
+    """Why this morning's projections cannot be trusted, if they cannot.
+
+    Two reasons, both about the cold start. The league pool is below the size
+    the cold-start gate certified (`ProjectionParams.min_pool_rows`), so every
+    distribution's right tail is known to be too thin. Or a starter with games
+    left cannot be projected at all. Either way the answer is to say so: the
+    alternative the code used to take counted an unprojectable player's final
+    game, which live has not been played, and turned "no information" into
+    "certain to score nothing" (review finding 3).
+
+    Probes on a generator of its own, so a digest that does advise draws
+    exactly the numbers it drew before this check existed.
+    """
+    as_of = known_through + 1
+    pool, need = ctx.panel.pool_size(as_of), ctx.source.params.min_pool_rows
+    if pool < need:
+        return (
+            f"insufficient history: {pool} player-games played so far, and"
+            f" projections are not calibrated until {need}. No advice today."
+        )
+    probe = np.random.default_rng(0)
+    stuck = []
+    for pid, games in (*mine.items(), *theirs.items()):
+        if not any(g.day > known_through for g in games):
+            continue
+        try:
+            ctx.source.project(pid, as_of, fantasy_week=week, rng=probe, n_draws=8)
+        except InsufficientHistory:
+            stuck.append(names.get(pid, pid))
+    if stuck:
+        return f"insufficient history: cannot project {', '.join(sorted(stuck))}. No advice today."
+    return None
+
+
+def abstain(conn: sqlite3.Connection, season: str, roster_id: int, as_of: str, note: str) -> Digest:
+    """A digest that declines to advise, for mornings with nothing to project from.
+
+    Persisted and sent like any other, so the page and the notification say why
+    there is no advice rather than looking like a cron that did not run.
+    """
+    return Digest(
+        as_of=as_of,
+        week=resolve_week(conn, season, as_of) or 0,
+        roster_id=roster_id,
+        opponent_roster_id=None,
+        known_through=day_index(as_of) - 1,
+        note=note,
+        abstained=True,
+    )
+
+
+def morning(
+    conn: sqlite3.Connection,
+    season: str,
+    roster_id: int,
+    as_of: str,
+    *,
+    n_sims: int = 400,
+    locked: dict[str, float] | None = None,
+    live: bool = False,
+    now: datetime | None = None,
+    params: ProjectionParams | None = None,
+) -> Digest:
+    """The digest the cron runs: load, then build — or abstain before any game.
+
+    One function for `lockin digest` and for the lifecycle rehearsal
+    (`tests/test_lifecycle.py`), so the rehearsal exercises the sequence the
+    cron runs rather than a copy of it.
+    """
+    try:
+        ctx = load_context(conn, season, params=params)
+    except NoGamesYet as exc:
+        return abstain(conn, season, roster_id, as_of, f"insufficient history: {exc}")
+    return build(
+        ctx,
+        roster_id,
+        as_of,
+        n_sims=n_sims,
+        n_paths=n_sims,
+        locked=locked,
+        live=live,
+        now=now,
+    )
+
+
 def build(
     ctx: DigestContext,
     roster_id: int,
@@ -442,23 +605,25 @@ def build(
     seed: int = 20260815,
     forward_nights: int = FORWARD_NIGHTS,
     locked: dict[str, float] | None = None,
+    live: bool = False,
+    now: datetime | None = None,
 ) -> Digest:
     """Assemble the digest for the morning of ``as_of``.
 
-    ``locked`` is the state the week is already in. Left None it is reconstructed
-    by walking the week under the rollout policy through yesterday — i.e. on the
-    assumption that you took the engine's own advice. That is the only assumption
-    available offline and it is stated in the output, because the alternative
-    live source does not exist yet: inferring an opponent's locks needs the
-    polling history §10 describes, and nothing has been polled (§15).
+    ``locked`` is the state the week is already in, as you know it. Left None it
+    is **read from the matchup poll** (`lockin.state`): every closed-window lock,
+    on both teams. It used to be reconstructed by replaying this engine's own
+    policy through yesterday, which assumed last night's recommendations had
+    been taken and then dropped them from the calls meant to deliver them
+    (review finding 2). A printed recommendation is not evidence it was acted on.
 
-    **Pass it in whenever you know it.** The reconstruction is the least stable
-    number the digest produces: it is a chain of near-tied lock/pass calls, and
-    resampling flips enough of them that the same date reconstructs 1 to 3 locks
-    across seeds (§20). Live this does not arise — you know what you locked, and
-    supplying it removes the noise rather than averaging it. Everything
-    downstream is stable once the state is fixed: the calls are identical across
-    seeds at the default 400 simulations.
+    Without a usable poll, a live run abstains and asks for ``--locked``. A
+    replay of a past date — where no poll from that morning exists — falls back
+    to reconstructing the closed windows only, and says it is an assumption.
+
+    ``live`` is a run for today: the player-to-team join reads today's rosters,
+    and the run refuses to read a slate that has not finished. ``now`` is the
+    moment of the run, which closes any call whose next tipoff has passed.
     """
     conn = ctx.conn
     day = day_index(as_of)
@@ -488,7 +653,10 @@ def build(
     opponent_id = ctx.opponents.get((week, roster_id))
     names = player_names(conn, starters + ctx.lineup_ids(week, opponent_id or -1))
 
-    mine = lineup_as_of(ctx.panel, ctx.scores, starters, week, known_through)
+    mine_slate = week_slate(
+        conn, ctx.panel, ctx.scores, ctx.season, week, starters, known_through, live=live
+    )
+    mine = mine_slate.games
     digest = Digest(
         as_of=as_of,
         week=week,
@@ -496,6 +664,9 @@ def build(
         opponent_roster_id=opponent_id,
         known_through=known_through,
         names=names,
+        n_sims=n_sims,
+        seed=seed,
+        model=model_id(ctx),
     )
     if opponent_id is None:
         # Weeks 23-24 drop eliminated teams and week 25 is unscored (§7.7).
@@ -503,11 +674,44 @@ def build(
         # is no recommendation to make rather than a worse one to invent.
         digest.note = f"roster {roster_id} has no matchup in week {week}; nothing to decide"
         return digest
-    theirs = lineup_as_of(
-        ctx.panel, ctx.scores, ctx.lineup_ids(week, opponent_id), week, known_through
+    theirs_slate = week_slate(
+        conn,
+        ctx.panel,
+        ctx.scores,
+        ctx.season,
+        week,
+        ctx.lineup_ids(week, opponent_id),
+        known_through,
+        live=live,
     )
+    theirs = theirs_slate.games
+    # Where Sleeper and the NBA disagree about a starter's week. Surfaced with the
+    # other warnings — in the notification and on the page — not preferred silently.
+    for pid, detail in mine_slate.warnings + theirs_slate.warnings:
+        digest.warnings.append(
+            Warning(
+                sleeper_id=pid,
+                name=names.get(pid, pid) or "schedule",
+                kind="schedule disagreement",
+                detail=detail,
+                short="schedule? check",
+            )
+        )
     if not mine or not theirs:
         digest.note = f"week {week} has no countable games for one of the two teams"
+        return digest
+
+    if live:
+        reason = unfinished_slate(mine_slate, theirs_slate, as_of, now, names) or stale_ingest(
+            conn, week, known_through
+        )
+        if reason:
+            digest.note, digest.abstained = reason, True
+            return digest
+
+    reason = cold_start(ctx, mine, theirs, week, known_through, names)
+    if reason:
+        digest.note, digest.abstained = reason, True
         return digest
 
     rng = np.random.default_rng(seed)
@@ -516,17 +720,12 @@ def build(
         pid: greedy_thresholds(ctx.source, pid, theirs[pid], week, rng, n_paths) for pid in theirs
     }
 
-    if locked is None:
-        locked, _ = walk_locks(
-            mine,
-            theirs,
-            opponent_thresholds,
-            week,
-            cache,
-            rng,
-            through_day=known_through,
-        )
-    else:
+    before = run_moment(as_of, now)
+    opponent_state = infer_state(conn, week, opponent_id, theirs, known_through, before=before)
+    opponent_known = opponent_state.banked if opponent_state.usable else None
+    digest.opponent_state = SOURCE_INFERRED if opponent_known is not None else SOURCE_STAND_IN
+
+    if locked is not None:
         # A banked score for someone who is not in the lineup would be added to
         # the total *and* leave him counted among the unlocked, double-counting
         # him and flattering every number downstream. Silence is the wrong
@@ -538,58 +737,96 @@ def build(
                 f"locked contains players who are not week {week} starters"
                 f" for roster {roster_id}: {named}"
             )
-    digest.banked = dict(locked)
-
-    # -- 1. last night's calls --------------------------------------------
-    played_days = sorted({g.day for games in mine.values() for g in games if g.played})
-    if played_days:
-        last_night = played_days[-1]
-        # The break-evens for that night, computed once. `known_through` and the
-        # night coincide here — the games are played and past banking — which is
-        # the end-of-day case, so these are exactly the thresholds the calls
-        # below are being taken against rather than a second opinion.
-        break_evens = standing_thresholds(
-            mine,
-            theirs,
-            opponent_thresholds,
-            week,
-            last_night,
-            locked,
-            cache,
-            rng,
-            known_through=last_night,
-        )
-        for sleeper_id, games in mine.items():
-            if sleeper_id in locked:
-                continue
-            tonight = next((g for g in games if g.day == last_night and g.played), None)
-            if tonight is None or not any(g.day > last_night for g in games):
-                continue  # did not play, or nothing left to ride for
-            call = decision_for(
+        digest.state_source = SOURCE_SUPPLIED
+    else:
+        state = infer_state(conn, week, roster_id, mine, known_through, before=before)
+        if state.source == SOURCE_INFERRED and state.unresolved:
+            unclear = ", ".join(sorted(names.get(p, p) for p in state.unresolved))
+            digest.note = (
+                f"lock state unclear: the latest poll matches none of the games for"
+                f" {unclear}. Pass --locked with what you have banked."
+            )
+            digest.abstained = True
+            return digest
+        if state.source == SOURCE_INFERRED:
+            locked, digest.state_source = dict(state.banked), SOURCE_INFERRED
+            digest.poll_observed_at = state.poll_observed_at
+            for pid in state.ambiguous:
+                digest.warnings.append(
+                    Warning(
+                        sleeper_id=pid,
+                        name=names.get(pid, pid),
+                        kind="lock state ambiguous",
+                        detail="his counted score matches his latest game and an earlier one;"
+                        " if you locked the earlier one, ignore his call and pass --locked",
+                        short="locked earlier? check",
+                    )
+                )
+        elif live:
+            digest.note = (
+                f"lock state unknown: {state.reason}. Pass --locked with what you have"
+                " banked, or run after the morning ingest."
+            )
+            digest.abstained = True
+            return digest
+        else:
+            locked, _ = walk_locks(
                 mine,
                 theirs,
                 opponent_thresholds,
                 week,
-                last_night,
-                sleeper_id,
-                tonight.score,
-                locked,
                 cache,
                 rng,
+                through_day=known_through,
             )
-            digest.calls.append(
-                LockCall(
-                    sleeper_id=sleeper_id,
-                    name=names.get(sleeper_id, sleeper_id),
-                    day=last_night,
-                    score=tonight.score,
-                    lock=call.lock,
-                    p_win_lock=call.p_win_lock,
-                    p_win_pass=call.p_win_pass,
-                    break_even=break_evens.get(sleeper_id, float("nan")),
-                )
+            digest.state_source = SOURCE_ASSUMED
+    digest.banked = dict(locked)
+
+    # -- 1. calls on games whose lock window is still open ----------------
+    # One per player, not one night per team (review finding 6): a player who
+    # played Monday and next plays Thursday can still bank Monday on Wednesday,
+    # whatever his teammates did on Tuesday. The window closes at his next tip.
+    for sleeper_id, games in mine.items():
+        if sleeper_id in locked:
+            continue
+        seen = [g for g in games if g.day <= known_through]
+        ahead = [g for g in games if g.day > known_through]
+        if not seen or not ahead or not seen[-1].played:
+            # Nothing played yet, nothing left to ride for, or his latest game
+            # was a DNP — which closed the earlier window at its tip and left
+            # nothing to bank.
+            continue
+        game = seen[-1]
+        expires = mine_slate.tipoff.get((sleeper_id, ahead[0].day))
+        if now is not None and expires and _utc(expires) <= now:
+            continue  # he has tipped again: the window is shut
+        call, break_even = decision_for(
+            mine,
+            theirs,
+            opponent_thresholds,
+            week,
+            known_through,
+            sleeper_id,
+            game.score,
+            locked,
+            cache,
+            rng,
+            opponent_known=opponent_known,
+        )
+        digest.calls.append(
+            LockCall(
+                sleeper_id=sleeper_id,
+                name=names.get(sleeper_id, sleeper_id),
+                day=game.day,
+                score=game.score,
+                lock=call.lock,
+                p_win_lock=call.p_win_lock,
+                p_win_pass=call.p_win_pass,
+                break_even=break_even,
+                expires_utc=expires,
             )
-        digest.calls.sort(key=lambda c: -c.score)
+        )
+    digest.calls.sort(key=lambda c: -c.score)
 
     # -- 2. standing rules, tonight and the nights after -------------------
     nights = sorted(
@@ -606,8 +843,11 @@ def build(
             cache,
             rng,
             known_through=known_through,
+            opponent_known=opponent_known,
         )
         for sleeper_id, threshold in rules.items():
+            if not np.isfinite(threshold):
+                continue  # passing already wins every simulation: no score to name
             digest.rules.append(
                 StandingRule(
                     sleeper_id=sleeper_id,
@@ -630,7 +870,9 @@ def build(
             )
 
     # -- 3. where the matchup stands ---------------------------------------
-    opponent = opponent_totals(theirs, opponent_thresholds, week, known_through, cache, rng)
+    opponent = opponent_totals(
+        theirs, opponent_thresholds, week, known_through, cache, rng, known=opponent_known
+    )
     banked_total = sum(locked.values())
     unlocked = [pid for pid in mine if pid not in locked]
     if unlocked:
@@ -650,7 +892,7 @@ def build(
     digest.margin = {f"q{int(q * 100):02d}": float(np.quantile(margin, q)) for q in (0.1, 0.5, 0.9)}
 
     # -- 4. warnings --------------------------------------------------------
-    digest.warnings = durability_warnings(ctx, mine, locked, week, known_through, names)
+    digest.warnings += durability_warnings(ctx, mine, locked, week, known_through, names)
     return digest
 
 
@@ -673,6 +915,19 @@ def _short(name: str, width: int) -> str:
     return f"{initials} {last}"[:width]
 
 
+def deadline_day(tipoff_utc: str | None) -> str | None:
+    """The local date a window closes on, for grouping."""
+    if tipoff_utc is None:
+        return None
+    return _utc(tipoff_utc).astimezone(clock.zone()).date().isoformat()
+
+
+def deadline_label(tipoff_utc: str) -> str:
+    """ "THU 7:30PM" — in the schedule's timezone, which is the one on the TV."""
+    local = datetime.fromisoformat(tipoff_utc.replace("Z", "+00:00")).astimezone(clock.zone())
+    return f"{local.strftime('%a').upper()} {local.strftime('%I:%M%p').lstrip('0')}"
+
+
 def render(digest: Digest, *, compact: bool = False) -> str:
     """The digest as text, in the order §11 asks for it.
 
@@ -693,15 +948,24 @@ def render(digest: Digest, *, compact: bool = False) -> str:
         f"roster {digest.roster_id} v {digest.opponent_roster_id}   P(win) {digest.p_win:.0%}"
     )
 
-    if digest.calls:
-        night = datetime.fromordinal(digest.calls[0].day).strftime("%a")
-        out.append(f"\nLAST NIGHT ({night}) — do this now")
-        for call in digest.calls:
+    # Grouped by the day each window closes — his next tip — under that day's
+    # earliest tip. A phone line has no room for a time per player, and a
+    # deadline stated early is one that is met; the exact one is on the page.
+    by_day: dict[str | None, list[LockCall]] = defaultdict(list)
+    for call in digest.calls:
+        by_day[deadline_day(call.expires_utc)].append(call)
+    for key in sorted(by_day, key=lambda d: (d is None, d or "")):
+        calls = by_day[key]
+        if key is None:
+            night = datetime.fromordinal(calls[0].day).strftime("%a")
+            out.append(f"\nLAST NIGHT ({night}) — do this now")
+        else:
+            first = min(c.expires_utc for c in calls if c.expires_utc)
+            out.append(f"\nBEFORE {deadline_label(first)} TIP — lock or pass")
+        for call in calls:
             verb = "LOCK" if call.lock else "pass"
-            out.append(
-                f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}"
-                f"  need {call.break_even:.0f}"
-            )
+            need = "ride" if not np.isfinite(call.break_even) else f"need {call.break_even:.0f}"
+            out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}  {need}")
 
     by_night: dict[int, list[StandingRule]] = defaultdict(list)
     for rule in digest.rules:
@@ -744,14 +1008,16 @@ def render(digest: Digest, *, compact: bool = False) -> str:
 # ------------------------------------------------------------------- persistence
 
 
-def last_ingest_at(conn: sqlite3.Connection) -> str | None:
-    """When the ingest last finished, from its own log.
+def last_ingest_at(conn: sqlite3.Connection, week: int | None = None) -> str | None:
+    """When the data under a digest was last complete, from `ingest_runs`.
 
-    Recorded with every digest because a digest running on data a failed cron
-    never refreshed is indistinguishable from a healthy one: it reads yesterday's
-    box scores, makes confident calls and says nothing. This is the only signal
-    that separates the two, and it costs one query.
+    A database no run-recording ingest has touched yet falls back to the newest
+    `ingest_log` line — the old signal, which a sub-step can refresh without the
+    stats (review finding 9). The first ingest by current code ends that.
     """
+    if runs.any_recorded(conn):
+        run = runs.latest_complete(conn, week)
+        return run["finished_at"] if run else None
     row = conn.execute(
         "SELECT MAX(finished_at) f FROM ingest_log WHERE source = 'sleeper'"
     ).fetchone()
@@ -759,29 +1025,37 @@ def last_ingest_at(conn: sqlite3.Connection) -> str | None:
 
 
 def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = False) -> int:
-    """Write the digest to `recommendations` and `digest_runs`.
+    """Write the digest: one immutable run, and every row it produced.
 
-    Keyed by ``generated_at``, so a re-run appends rather than overwrites and the
-    record of what was advised at the time survives a model change. That matters
-    here more than elsewhere: §12 established that the upstream data is rewritten
-    under us, so "what did the engine say on the day" is not recoverable by
-    recomputation.
+    **Inserted, never replaced.** `generated_at` used to resolve to the second
+    and every write was INSERT OR REPLACE, so two runs for one roster inside a
+    second overwrote each other's header and kept each other's stale rows — a
+    page could then show half of each (review finding 12). Every run now has
+    its own `run_id`, its rows are keyed to it, and a collision is an error
+    rather than a merge.
 
-    Two tables, because a call means nothing without the state it was taken
-    against. `digest_runs` carries the win probability, the projected totals and
-    what was already banked, so `lockin advice` can render a past digest exactly
-    rather than approximately. It is written even when there are no calls to
-    make — "no matchup this week" is a real answer and a page that showed
-    nothing at all would be indistinguishable from a cron that never ran.
+    Enough is kept to audit a call later without recomputing it — which §20
+    says would give a different answer and §12 says the inputs no longer
+    support: where the banked state came from and what it was, per player; the
+    poll and the ingest it read; the simulation count, seed and model; and the
+    warnings the notification carried.
+
+    Written even when there are no calls — "no matchup this week" and "no
+    advice today, and why" are real answers, and a page that showed nothing at
+    all would be indistinguishable from a cron that never ran.
     """
-    generated_at = datetime.now(UTC).isoformat(timespec="seconds")
+    run_id = uuid.uuid4().hex
+    generated_at = datetime.now(UTC).isoformat(timespec="microseconds")
+    ingest = runs.latest_complete(conn, digest.week) if runs.any_recorded(conn) else None
     conn.execute(
         """
-        INSERT OR REPLACE INTO digest_runs
+        INSERT INTO digest_runs
             (generated_at, roster_id, as_of, week, opponent_roster_id, p_win,
              projected, opponent_projected, margin_p10, margin_p50, margin_p90,
-             banked_total, banked_slots, state_supplied, last_ingest_at, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             banked_total, banked_slots, state_supplied, last_ingest_at, note,
+             run_id, state_source, opponent_state, poll_observed_at, ingest_run_id,
+             n_sims, seed, model, abstained)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -797,11 +1071,23 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             digest.margin.get("q90"),
             sum(digest.banked.values()),
             len(digest.banked),
-            int(state_supplied),
-            last_ingest_at(conn),
+            int(state_supplied or digest.state_source == SOURCE_SUPPLIED),
+            last_ingest_at(conn, digest.week),
             digest.note,
+            run_id,
+            digest.state_source,
+            digest.opponent_state,
+            digest.poll_observed_at,
+            ingest["run_id"] if ingest else None,
+            digest.n_sims,
+            digest.seed,
+            digest.model,
+            int(digest.abstained),
         ),
     )
+
+    def finite(x: float) -> float | None:
+        return x if np.isfinite(x) else None
 
     rows = [
         (
@@ -811,12 +1097,18 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             call.sleeper_id,
             "LOCK" if call.lock else "PASS",
             call.day,
-            call.break_even,
+            finite(call.break_even),
             call.p_win_lock,
             call.p_win_pass,
             call.p_win_lock - call.p_win_pass,
             f"{call.name} scored {call.score:.1f} on {date_of(call.day)};"
-            f" break-even {call.break_even:.1f}",
+            + (
+                f" break-even {call.break_even:.1f}"
+                if np.isfinite(call.break_even)
+                else " no score is worth banking"
+            ),
+            run_id,
+            call.expires_utc,
         )
         for call in digest.calls
     ] + [
@@ -831,19 +1123,29 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             None,
             None,
             None,
-            f"{rule.name}: lock on {date_of(rule.night)} if he clears"
+            f"{rule.name}: lock on {date_of(rule.night)} if he scores"
             f" {rule.threshold:.0f} ({rule.idle_nights} idle night(s) assumed, §7.2)",
+            run_id,
+            None,
         )
         for rule in digest.rules
     ]
-    if rows:
-        conn.executemany(
-            """
-            INSERT OR REPLACE INTO recommendations
-                (generated_at, week, roster_id, sleeper_id, action, for_day, threshold,
-                 ev_lock, ev_pass, win_prob_delta, rationale)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+    conn.executemany(
+        """
+        INSERT INTO recommendations
+            (generated_at, week, roster_id, sleeper_id, action, for_day, threshold,
+             ev_lock, ev_pass, win_prob_delta, rationale, run_id, expires_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.executemany(
+        "INSERT INTO digest_banked (run_id, sleeper_id, score) VALUES (?, ?, ?)",
+        [(run_id, pid, score) for pid, score in digest.banked.items()],
+    )
+    conn.executemany(
+        "INSERT INTO digest_warnings (run_id, sleeper_id, kind, detail, short)"
+        " VALUES (?, ?, ?, ?, ?)",
+        [(run_id, w.sleeper_id, w.kind, w.detail, w.short) for w in digest.warnings],
+    )
     return len(rows)

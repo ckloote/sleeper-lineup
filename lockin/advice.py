@@ -31,7 +31,7 @@ from __future__ import annotations
 import html
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from lockin import clock
 from lockin.projections import date_of, day_index
@@ -47,6 +47,11 @@ class Item:
     ev_lock: float | None
     ev_pass: float | None
     rationale: str
+    expires_utc: str | None = None
+    """When the call stops meaning anything: his next tip."""
+
+    def expired(self, now: datetime) -> bool:
+        return self.expires_utc is not None and _utc(self.expires_utc) <= now
 
     @property
     def is_call(self) -> bool:
@@ -78,8 +83,16 @@ class Run:
     last_ingest_at: str | None
     note: str | None
     items: tuple[Item, ...] = ()
+    run_id: str | None = None
+    state_source: str | None = None
+    poll_observed_at: str | None = None
+    abstained: bool = False
+    banked: tuple[tuple[str, float], ...] = ()
+    """(name, score) for each banked player."""
+    warnings: tuple[tuple[str, str, str], ...] = ()
+    """(name, kind, detail) — what the notification carried."""
     availability_days: int = 0
-    """Distinct days of `player_status` on or before this morning."""
+    """Distinct days with an availability capture, on or before this morning."""
     recent_availability_days: int = 0
     """The same, within the last 30 days — the number that says whether the
     capture is still *running*, as opposed to having run once in October."""
@@ -107,8 +120,30 @@ class Run:
         return day_index(today or clock.today_iso()) - day_index(self.as_of)
 
 
+def _utc(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _rows(conn: sqlite3.Connection, sql: str, args: tuple) -> list[sqlite3.Row]:
+    """A query against a table a database may be too old to have: none is empty.
+
+    `lockin serve` holds a read-only connection and never applies the schema,
+    so a page must degrade on an old file rather than return a 500.
+    """
+    try:
+        return conn.execute(sql, args).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
 def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
-    """The most recent digest for this roster, with its calls attached."""
+    """The most recent digest for this roster, with everything it recorded.
+
+    Rows are gathered by `run_id`, one run's and no other's. Before runs had
+    ids they were matched on `generated_at`, which two runs inside one second
+    shared — so a page could show the header of one and the calls of both.
+    Rows from then still attach the old way.
+    """
     row = conn.execute(
         """
         SELECT * FROM digest_runs
@@ -120,7 +155,24 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
     ).fetchone()
     if row is None:
         return None
+    keys = set(row.keys())
 
+    def get(name: str):
+        return row[name] if name in keys else None
+
+    run_id = get("run_id")
+    if run_id is not None:
+        where, args = "c.run_id = ?", (run_id,)
+    else:
+        # Older rows predate the columns; roster_id NULL belongs to the only
+        # roster that existed when they were written.
+        where, args = (
+            "c.generated_at = ? AND (c.roster_id = ? OR c.roster_id IS NULL)",
+            (
+                row["generated_at"],
+                roster_id,
+            ),
+        )
     items = [
         Item(
             sleeper_id=r["sleeper_id"],
@@ -131,21 +183,39 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
             ev_lock=r["ev_lock"],
             ev_pass=r["ev_pass"],
             rationale=r["rationale"] or "",
+            expires_utc=r["expires_utc"] if "expires_utc" in r.keys() else None,
         )
         for r in conn.execute(
-            """
+            f"""
             SELECT c.*, p.full_name
               FROM recommendations c
               LEFT JOIN players p ON p.sleeper_id = c.sleeper_id
-             WHERE c.generated_at = ?
-               -- Older rows predate the column and are NULL; they belong to the
-               -- only roster that existed when they were written.
-               AND (c.roster_id = ? OR c.roster_id IS NULL)
+             WHERE {where}
              ORDER BY c.for_day, c.action, c.threshold DESC
             """,
-            (row["generated_at"], roster_id),
+            args,
         )
     ]
+    banked = tuple(
+        (r["full_name"] or r["sleeper_id"], r["score"])
+        for r in _rows(
+            conn,
+            "SELECT b.sleeper_id, b.score, p.full_name FROM digest_banked b"
+            " LEFT JOIN players p ON p.sleeper_id = b.sleeper_id"
+            " WHERE b.run_id = ? ORDER BY b.score DESC",
+            (run_id,),
+        )
+    )
+    warnings = tuple(
+        (r["full_name"] or r["sleeper_id"], r["kind"], r["detail"])
+        for r in _rows(
+            conn,
+            "SELECT w.sleeper_id, w.kind, w.detail, p.full_name FROM digest_warnings w"
+            " LEFT JOIN players p ON p.sleeper_id = w.sleeper_id"
+            " WHERE w.run_id = ? ORDER BY p.full_name",
+            (run_id,),
+        )
+    )
     return Run(
         generated_at=row["generated_at"],
         roster_id=row["roster_id"],
@@ -164,6 +234,12 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         last_ingest_at=row["last_ingest_at"],
         note=row["note"],
         items=tuple(items),
+        run_id=run_id,
+        state_source=get("state_source"),
+        poll_observed_at=get("poll_observed_at"),
+        abstained=bool(get("abstained")),
+        banked=banked,
+        warnings=warnings,
         **availability_coverage(conn, row["as_of"]),
     )
 
@@ -178,12 +254,15 @@ def availability_coverage(conn: sqlite3.Connection, as_of: str) -> dict[str, int
     that made `ingest` drop its `--full` flag.
     """
     window = date_of(day_index(as_of) - 30)
+    # Days with a capture, whether or not anyone was flagged: a healthy day is a
+    # captured day. Legacy `player_status` dates count too, so history carries.
     row = conn.execute(
         """
-        SELECT COUNT(DISTINCT as_of) total,
-               COUNT(DISTINCT CASE WHEN as_of > ? THEN as_of END) recent
-          FROM player_status
-         WHERE as_of <= ?
+        SELECT COUNT(DISTINCT day) total,
+               COUNT(DISTINCT CASE WHEN day > ? THEN day END) recent
+          FROM (SELECT substr(observed_at, 1, 10) AS day FROM status_captures
+                UNION SELECT as_of FROM player_status)
+         WHERE day <= ?
         """,
         (window, as_of),
     ).fetchone()
@@ -288,7 +367,17 @@ def _freshness(run: Run, today: str | None = None) -> tuple[str, str]:
     return "stale", f"This is {age} days old ({run.as_of}). Re-run `lockin digest`."
 
 
-def render(run: Run | None, *, today: str | None = None) -> str:
+def _deadline(item: Item, now: datetime) -> str:
+    if item.expires_utc is None:
+        return ""
+    local = _utc(item.expires_utc).astimezone(clock.zone())
+    when = f"{local.strftime('%a')} {local.strftime('%I:%M%p').lstrip('0').lower()}"
+    if item.expired(now):
+        return f"<div class=deadline>closed at {when} tip</div>"
+    return f"<div class=deadline>by {when} tip</div>"
+
+
+def render(run: Run | None, *, today: str | None = None, now: datetime | None = None) -> str:
     if run is None:
         return (
             "<!doctype html><meta charset=utf-8><title>Lock-in — tonight</title>"
@@ -296,6 +385,7 @@ def render(run: Run | None, *, today: str | None = None) -> str:
         )
 
     tone, sentence = _freshness(run, today)
+    now = now or datetime.now(UTC)
     parts: list[str] = []
 
     # Directly under the staleness banner, because it is the same question asked
@@ -310,30 +400,34 @@ def render(run: Run | None, *, today: str | None = None) -> str:
 
     calls = run.calls
     if calls:
-        night = date_of(calls[0].for_day)
         rows = "".join(
-            "<tr>"
+            f"<tr{' class=expired' if i.expired(now) else ''}>"
             f'<td class=act><span class="tag {"lock" if i.action == "LOCK" else "pass"}">'
             f"{i.action}</span></td>"
-            f"<td class=who>{html.escape(i.name)}</td>"
-            f"<td class=num>{'' if i.threshold is None else f'{i.threshold:.0f}'}</td>"
+            f"<td class=who>{html.escape(i.name)}"
+            f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}</td>"
+            f"<td class=num>{'ride' if i.threshold is None else f'{i.threshold:.0f}'}</td>"
             f"<td class=num>{'' if i.edge is None else f'{i.edge:.1%}'}</td>"
             "</tr>"
-            for i in sorted(calls, key=lambda x: -(x.edge or 0))
+            for i in sorted(calls, key=lambda x: (x.expired(now), -(x.edge or 0)))
         )
         # The heading carries the verdict, because it is the part that gets
         # scanned. A section of four PASS rows under "do these now" told the
         # reader to act when the correct action was to do nothing — passing *is*
-        # inaction, and only a LOCK has a deadline.
-        locks = [i for i in calls if i.action == "LOCK"]
+        # inaction, and only a LOCK has a deadline. A LOCK whose deadline has
+        # passed is no longer one to act on, so it does not count either.
+        locks = [i for i in calls if i.action == "LOCK" and not i.expired(now)]
         if locks:
-            heading = f"Lock now &mdash; {night}"
+            heading = "Lock now &mdash; before each player's next tip"
             hint = (
                 "Marked LOCK: bank before his next game tips, or the score is gone."
                 " The rest are worth riding."
             )
+        elif any(i.action == "LOCK" for i in calls):
+            heading = "Nothing to lock now &mdash; the lock windows have closed"
+            hint = "The LOCK calls below expired at their tips. Re-run the digest."
         else:
-            heading = f"Nothing to lock &mdash; {night}"
+            heading = "Nothing to lock &mdash; ride them all"
             hint = "Every one of these is worth riding. No action needed tonight."
         parts.append(
             f"<h2>{heading}</h2>"
@@ -364,6 +458,14 @@ def render(run: Run | None, *, today: str | None = None) -> str:
             f"<tbody>{rows}</tbody></table>"
         )
 
+    if run.warnings:
+        items_html = "".join(
+            f"<li><strong>{html.escape(name)}</strong> &mdash; {html.escape(kind)}:"
+            f" {html.escape(detail)}</li>"
+            for name, kind, detail in run.warnings
+        )
+        parts.append(f"<h2>Watch</h2><ul class=watch>{items_html}</ul>")
+
     state = ""
     if run.p_win is not None:
         margin = ""
@@ -375,7 +477,12 @@ def render(run: Run | None, *, today: str | None = None) -> str:
             )
         banked = ""
         if run.banked_slots:
-            banked = f"<div>banked {run.banked_total:.1f} across {run.banked_slots} of 6</div>"
+            who = ", ".join(f"{html.escape(n)} {x:.1f}" for n, x in run.banked)
+            banked = (
+                f"<div>banked {run.banked_total:.1f} across {run.banked_slots} of 6"
+                + (f" &mdash; {who}" if who else "")
+                + "</div>"
+            )
         # Each line guarded on its own field rather than on `p_win` standing in
         # for all of them. A row carrying a win probability and nothing else is
         # not a shape `persist` produces, but this is rendered into an HTTP
@@ -399,12 +506,21 @@ def render(run: Run | None, *, today: str | None = None) -> str:
         # would make the two compete on a morning when only one of them expires.
         prompt = f'<p class="callout {tone_class}">{message}</p>'
 
-    provenance = (
-        "State was supplied on the command line."
-        if run.state_supplied
-        else "Banked state was inferred by replaying the week &mdash; the least stable"
-        " number here (&sect;20). Pass <code>--locked</code> when you know it."
-    )
+    if run.state_supplied or run.state_source == "supplied":
+        provenance = "State was supplied on the command line."
+    elif run.state_source == "inferred":
+        provenance = (
+            f"Banked state was read from the matchup poll at"
+            f" {html.escape(run.poll_observed_at or '?')}. Last night's games are the calls"
+            " above, whatever you did with them; a lock you made on one just makes its"
+            " row moot."
+        )
+    else:
+        provenance = (
+            "Banked state was assumed by replaying the week under this engine's policy"
+            " &mdash; the least stable number here (&sect;20). Pass <code>--locked</code>"
+            " when you know it."
+        )
 
     return f"""<!doctype html>
 <meta charset=utf-8>
@@ -442,6 +558,9 @@ def render(run: Run | None, *, today: str | None = None) -> str:
   td.num, th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
   td.act {{ width:4.4rem; }}
   .who {{ font-weight:600; }}
+  .game, .deadline {{ font-weight:400; font-size:.75rem; color:var(--mute); }}
+  tr.expired td {{ opacity:.45; }}
+  .watch {{ padding-left:1.1rem; margin:.3rem 0; font-size:.9rem; }}
   .tag {{ display:inline-block; padding:.12rem .45rem; border-radius:4px;
           font-size:.72rem; font-weight:700; letter-spacing:.04em; }}
   .lock {{ background:var(--lockbg); color:var(--lock); }}

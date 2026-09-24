@@ -24,8 +24,8 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def conn():
-    c = sqlite3.connect(cfg.db_path)
+def conn(season_db):
+    c = sqlite3.connect(season_db)
     c.row_factory = sqlite3.Row
     # Apply the schema so a database created before a view or column existed
     # still satisfies these tests. Everything here is CREATE ... IF NOT EXISTS.

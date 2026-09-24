@@ -559,45 +559,67 @@ uv run lockin digest --date 2026-01-08 --locked 1000:46.0,1787:47.5
 
 ```
 LOCK-IN  Thu 8 Jan  wk 12
-roster 4 v 5   P(win) 54%
+roster 4 v 5   P(win) 52%
 
-LAST NIGHT (Wed) — do this now
-  pass  Karl-Anthony Towns  49.0  need 55
-  pass  Tyrese Maxey        42.5  need 59
+BEFORE FRI 7:00PM TIP — lock or pass
+  pass  Karl-Anthony Towns  49.0  need 52
+  pass  Tyrese Maxey        42.5  need 54
   pass  OG Anunoby          31.0  need 41
-  pass  Devin Booker        19.0  need 42
+  pass  Devin Booker        19.0  need 43
 
 FRI 9 — lock if he clears
-  Tyrese Maxey             49  53%
-  Karl-Anthony Towns       48  41%
-  Devin Booker             38  50%
-  OG Anunoby               34  42%
+  Tyrese Maxey             50  51%
+  Karl-Anthony Towns       45  49%
+  Devin Booker             36  54%
+  OG Anunoby               31  46%
 
 BANKED 93.5 across 2 of 6
-PROJECTED 286 v 281
-margin p10/p50/p90  -54 / +4 / +71
+PROJECTED 284 v 281
+margin p10/p50/p90  -57 / +4 / +70
 ```
 
-Nothing on or after the as-of date is read. Post-cutoff scores are blanked out of the data
-structure before anything sees them, and a test overwrites them with garbage and asserts
-the digest is byte-identical — a leak is prevented by construction rather than by care.
+Nothing on or after the as-of date is read. Games already played come from the box scores;
+games still to come come from the NBA schedule, which has no scores in it — so a leak is
+prevented by construction rather than by care. One test overwrites every post-cutoff score
+with garbage, and another un-plays 2025-26 from 8 January onward; both require the digest
+to be byte-identical.
+
+**Each call is on that player's own open window.** A game can be banked until his *next*
+game tips, so a player who played Monday and next plays Thursday is still a call on
+Wednesday. Calls are grouped under the day their windows close, headed by that day's
+earliest tip; a re-run after a player's tip drops his call.
+
+**The digest abstains rather than guess.** It says why and advises nothing when: no
+rostered player has played yet; fewer than 400 player-games have been played league-wide
+(the first week — below that the right tail is known to be miscalibrated, see
+`lockin calibrate --cold-start`); a starter cannot be projected; last night's games are not
+final; the last *complete* ingest predates them; or the banked state cannot be read. Each
+of those used to produce a confident, wrong number instead.
 
 **Forward thresholds assume you act on none of the nights in between.** That is deliberate
 and it is the whole point: a threshold computed on the assumption that you followed
 yesterday's advice is worthless exactly when you needed it. The count of idle nights
 assumed is printed with each rule.
 
-**Pass `--locked` whenever you know what you have banked.** Without it the state is
-reconstructed by replaying the week under the engine's own policy, and that is the noisiest
-number the digest produces — a chain of near-tied calls, which resampling flips often enough
-that the same date reconstructs 1 to 3 locks across seeds. Live this never arises: you know
-what you locked. Everything downstream is stable once the state is fixed — the lock/pass
-calls are identical across seeds at the default 400 simulations. Thresholds still carry 1-3
-points of Monte Carlo noise, which is why they print as whole numbers.
+**Banked state is read, not assumed.** Without `--locked`, a live digest reads it from the
+morning's matchup poll: a player's counted score freezes when he is locked, so once he has
+played again the poll shows whether an earlier game was banked (lockin/state.py). Last
+night's games are the calls themselves, so the poll not knowing them yet costs nothing.
+The opponent's locks are read the same way. A live run with no usable poll abstains and
+asks for `--locked`; a replay of a past date — no poll from that morning exists —
+reconstructs the closed windows under the engine's own policy and says it is assuming.
+`--locked` always wins. It never counts its own printed advice as having been taken.
 
-Each run appends to `recommendations`, keyed by timestamp, so a re-run records a second
-opinion rather than overwriting the first — which matters because Sleeper rewrites
-completed seasons, and this table is the only record of what was advised on the day.
+Everything downstream is stable once the state is fixed — the lock/pass calls are identical
+across seeds at the default 400 simulations. Thresholds still carry 1-3 points of Monte
+Carlo noise, which is why they print as whole numbers. A threshold is the lowest score worth
+banking, on the half-point grid scores live on: reaching it is a LOCK, half a point short is
+not, and a matchup already won in every simulation has no threshold at all ("ride").
+
+Each run is inserted, never replaced, under its own `run_id`, with what it was computed
+from — the state and where it came from, the poll and ingest it read, simulation count,
+seed and model — and the warnings it printed. Sleeper rewrites completed seasons, and this
+table is the only record of what was advised on the day.
 
 ### `lockin explain`
 

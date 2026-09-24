@@ -94,6 +94,7 @@ from lockin.core.projections import EWMAProjectionSource, ProjectionParams, Seas
 from lockin.core.winprob import evaluate_lock
 from lockin.projections import load_panel, observed_scores
 from lockin.rollout import SimulationCache, decision_days, opponent_totals
+from lockin.store import identity
 from lockin.store.db import now_iso
 from lockin.verify import scoring_settings
 
@@ -115,10 +116,7 @@ def last_scored_week(conn: sqlite3.Connection) -> int:
     Read from ``last_scored_leg`` rather than hardcoded, since a season that ends
     early would move it.
     """
-    row = conn.execute("SELECT payload_json FROM league_settings LIMIT 1").fetchone()
-    if row is None:
-        raise RuntimeError("no league settings ingested; run `lockin ingest`")
-    return int(json.loads(row["payload_json"])["settings"]["last_scored_leg"])
+    return int(identity.league_payload(conn)["settings"]["last_scored_leg"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,7 +458,9 @@ def evaluate_managers(
         )
         for w in np.unique(panel_weeks)
     }
-    cache = SimulationCache(source=source, n_sims=n_sims, dnp_scale=dnp_scale)
+    cache = SimulationCache(
+        source=source, n_sims=n_sims, dnp_scale=dnp_scale, ride_unprojectable=True
+    )
 
     games_cache: dict[tuple[str, int], list[Game]] = {}
 

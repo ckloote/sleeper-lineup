@@ -62,6 +62,20 @@ class SimulationCache:
     contributions: dict[tuple[str, int, int], np.ndarray] = field(default_factory=dict)
     thresholds: dict[tuple[str, int], dict[int, float]] = field(default_factory=dict)
     misses: int = 0
+    ride_unprojectable: bool = False
+    """What to do with a player who cannot be projected but has games left.
+
+    False, the default: raise `InsufficientHistory`. The alternative was to
+    assume he rides to his final game and count that game's recorded score —
+    which in a completed season is a known number, and in a live one is a game
+    not yet played and so a certain 0.0. On opening day that turned every
+    projection into zero and every P(win) into 50% (review finding 3). The
+    digest therefore refuses up front instead (`lockin.digest.build`).
+
+    The backtest and the manager evaluation replay a finished season and keep
+    the old behaviour, explicitly. For the handful of early-season players it
+    touches it reads the final game's real score — hindsight, but hindsight
+    about a decision nobody could make, not about one being graded."""
 
     def contribution(
         self,
@@ -119,8 +133,9 @@ class SimulationCache:
                     dnp_scale=self.dnp_scale.get(week, 1.0),
                 )
             except InsufficientHistory:
-                # No basis to project him; assume he rides, which is what
-                # happens by default anyway.
+                if not self.ride_unprojectable:
+                    raise
+                # Retrospective only: see `ride_unprojectable`.
                 last = games[-1]
                 value = np.full(self.n_sims, last.score if last.played else 0.0)
             else:
@@ -160,6 +175,8 @@ def opponent_totals(
     known_through: int,
     cache: SimulationCache,
     rng: np.random.Generator,
+    *,
+    known: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Simulated final totals for the opposing team. ``(n_sims,)``.
 
@@ -174,14 +191,32 @@ def opponent_totals(
     would lower his simulated total — pessimism about yourself and optimism
     about him, which is not conservatism, just a thumb on the scale.
 
-    In-season this is where §10's latent lock belief goes — a frozen
-    ``players_points`` reveals a lock one game later, sharpened by the manager's
-    fitted tendency. Retrospectively there is nothing to infer from, and §12
-    makes the recorded lock field unreliable anyway, so a policy stands in for
-    the belief.
+    ``known`` is the opponent's state read from a poll (`lockin.state`): every
+    closed-window lock, as a constant, and — by omission — every closed window
+    he did *not* lock. Given it, the policy stands in only where the poll
+    cannot see: last night's game, whose window is still open. Without it
+    (replays, or no poll yet) the policy stands in for his whole week so far,
+    which is the stand-in the digest says it is using.
     """
     total = np.zeros(cache.n_sims)
     for sleeper_id, games in lineup.items():
+        if known is not None:
+            if sleeper_id in known:
+                total += known[sleeper_id]  # banked, observed
+                continue
+            seen = [g for g in games if g.day <= known_through]
+            last = seen[-1] if seen else None
+            still_open = (
+                last is not None and last.played and any(g.day > known_through for g in games)
+            )
+            limit = greedy_thresholds.get(sleeper_id, {}).get(last.index) if last else None
+            if still_open and limit is not None and last.score > limit:
+                total += last.score  # the stand-in, for the one window he may yet use
+            else:
+                total += cache.contribution(
+                    sleeper_id, games, week, rng, known_through=known_through
+                )
+            continue
         past = [g for g in games if g.day <= known_through]
         outcome = replay(past, greedy_thresholds.get(sleeper_id, {})) if past else None
         if outcome is not None and outcome.locked_index is not None:
@@ -189,6 +224,14 @@ def opponent_totals(
         else:
             total += cache.contribution(sleeper_id, games, week, rng, known_through=known_through)
     return total
+
+
+def _window_closes(games: list[Game], day: int, through_day: int | None) -> bool:
+    """Has he a later game — and, when walking only to a date, has it tipped by then?"""
+    after = [g.day for g in games if g.day > day]
+    if not after:
+        return False
+    return through_day is None or min(after) <= through_day
 
 
 def walk_locks(
@@ -204,11 +247,16 @@ def walk_locks(
     """Take every lock the rollout policy would take, day by day.
 
     Returns the banked scores and how many calls were faced. ``through_day``
-    stops the walk after that day, which is how the digest reconstructs the
-    state a week is *currently* in without also asserting how it ends. Reading
-    the whole week and then discarding the tail would be the same computation
-    only if nothing downstream saw the discarded part, and that is exactly the
-    kind of thing that stops being true after one edit.
+    stops the walk after that day, which is how a replay reconstructs the state
+    a week is *currently* in without also asserting how it ends. Reading the
+    whole week and then discarding the tail would be the same computation only
+    if nothing downstream saw the discarded part, and that is exactly the kind
+    of thing that stops being true after one edit.
+
+    **With ``through_day``, only closed windows are walked**: a game whose next
+    game is still ahead is the call the digest is about to present, and deciding
+    it here would bank the very action the digest exists to deliver (review
+    finding 2). Without it — the backtest's full replay — every window is.
     """
     locked: dict[str, float] = {}
     decisions = 0
@@ -225,7 +273,7 @@ def walk_locks(
                 for pid, games in lineup.items()
                 if pid not in locked
                 and any(g.day == day and g.played for g in games)
-                and any(g.day > day for g in games)
+                and _window_closes(games, day, through_day)
             ),
             reverse=True,
         )
@@ -290,6 +338,7 @@ def standing_thresholds(
     rng: np.random.Generator,
     *,
     known_through: int,
+    opponent_known: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """ "Lock him if he clears X on ``night``", for every starter playing then.
 
@@ -315,7 +364,7 @@ def standing_thresholds(
     silently re-banks the score under test.
     """
     opponent = opponent_totals(
-        opponent_lineup, opponent_thresholds, week, known_through, cache, rng
+        opponent_lineup, opponent_thresholds, week, known_through, cache, rng, known=opponent_known
     )
     unlocked = [pid for pid in lineup if pid not in locked]
     if not unlocked:
@@ -368,24 +417,32 @@ def decision_for(
     locked: dict[str, float],
     cache: SimulationCache,
     rng: np.random.Generator,
-) -> RolloutDecision:
-    """One lock/pass call, exposed for the digest and for explanation.
+    *,
+    opponent_known: dict[str, float] | None = None,
+) -> tuple[RolloutDecision, float]:
+    """One lock/pass call, and the break-even it was taken against.
 
-    ``day`` is the night the game was played, and the call is taken after it, so
-    here the two dates genuinely do coincide: everything through ``day`` is
-    observed, and everything through ``day`` is past banking. This is the
-    end-of-day case :func:`standing_thresholds` had to generalise, not a
-    simplification of it.
+    ``day`` is the last day observed. In the backtest it is the night the game
+    was played; in a morning digest it is yesterday, whichever night the game
+    being decided was — a player who played Monday and next plays Thursday can
+    still bank Monday's score on Wednesday, and is decided with everything known
+    by Wednesday (review finding 6). Either way everything through ``day`` is
+    observed, and the candidate's pass branch is his continuation after it.
+
+    The break-even comes from the same contributions as the call, so the two
+    cannot disagree: LOCK exactly when the score is at or above it.
     """
-    opponent = opponent_totals(opponent_lineup, opponent_thresholds, week, day, cache, rng)
+    opponent = opponent_totals(
+        opponent_lineup, opponent_thresholds, week, day, cache, rng, known=opponent_known
+    )
     unlocked = [pid for pid in lineup if pid not in locked]
     contributions = np.vstack(
         [cache.contribution(pid, lineup[pid], week, rng, known_through=day) for pid in unlocked]
     )
-    return evaluate_lock(
+    args = dict(
         banked=sum(locked.values()),
         contributions=contributions,
         player=unlocked.index(sleeper_id),
-        lock_value=score,
         opponent=opponent,
     )
+    return evaluate_lock(**args, lock_value=score), lock_threshold(**args)

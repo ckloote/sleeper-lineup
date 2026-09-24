@@ -23,6 +23,12 @@ def _box(conn, sleeper_id, week, game_id, played=1, date="2026-01-05"):
 
 
 def _starter(conn, week, roster_id, sleeper_id):
+    # A player row belongs to a poll, and a poll is its team row.
+    conn.execute(
+        "INSERT OR IGNORE INTO weekly_matchup_teams (week, roster_id, matchup_id, observed_at)"
+        " VALUES (?, ?, 1, 'now')",
+        (week, roster_id),
+    )
     conn.execute(
         "INSERT OR REPLACE INTO weekly_matchups"
         " (week, roster_id, matchup_id, sleeper_id, counted_points, is_starter, observed_at)"

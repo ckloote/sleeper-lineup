@@ -12,8 +12,10 @@ per-game ``pit_positions`` snapshot, never from the live ``players`` table.
 ``/players/nba`` has no history, so reading it would import next season's roster
 moves into a replay of last season (implementation-plan.md §3).
 
-**Fixture semantics.** Exhibitions, postponed fixtures and team-aggregate rows
-are excluded here, once, rather than in every caller. The All-Star Game carries
+**Fixture semantics.** Exhibitions, fixtures that are not final and
+team-aggregate rows are excluded here, once, rather than in every caller. The
+panel is observed history only; games still to come are read from the NBA
+schedule by `lockin.slate`, never from box-score rows. The All-Star Game carries
 real stat lines but does not count, a postponed fixture never happened, and a
 ``TEAM_OKC`` row reads as a triple-double every night.
 """
@@ -36,10 +38,25 @@ from lockin.core.projections import (
 )
 from lockin.core.scoring import COMPONENT_ORDER, score_matrix
 
+FINAL_FIXTURE = (
+    "COALESCE(g.state, CASE WHEN g.occurred = 0 THEN 'postponed' ELSE 'final' END) = 'final'"
+)
+"""SQL: the fixture aliased ``g`` in `game_links` is a game that has been played.
+
+Only a *final* game is an observation. A scheduled one has not happened, a
+postponed one never will on that date, and an unknown one has no trustworthy
+stat lines. Rows from before `state` existed fall back to `occurred`, which
+for a database of past fixtures meant the same thing.
+"""
+
 # Sleeper's stat rows and StatLine happen to agree on every component name, so
 # the column list is derived rather than restated. Assert it, because a rename
 # on either side would otherwise silently shift a column.
 _COLUMNS = ", ".join(f"b.{name}" for name in COMPONENT_ORDER)
+
+
+class NoGamesYet(RuntimeError):
+    """The season has no final game for any rostered player: nothing to project from."""
 
 
 def day_index(iso_date: str) -> int:
@@ -119,7 +136,7 @@ def load_panel(
           JOIN game_links g ON g.sleeper_game_id = b.sleeper_game_id
          WHERE b.season = ?
            AND COALESCE(g.is_exhibition, 0) = 0
-           AND COALESCE(g.occurred, 1) = 1
+           AND {FINAL_FIXTURE}
            AND COALESCE(b.is_team_row, 0) = 0
            AND b.sleeper_id IN (SELECT DISTINCT sleeper_id FROM weekly_matchups_latest)
          ORDER BY b.sleeper_id, b.game_date
@@ -127,7 +144,10 @@ def load_panel(
         (season,),
     ).fetchall()
     if not rows:
-        raise RuntimeError("no box scores for rostered players; run `lockin ingest`")
+        raise NoGamesYet(
+            "no rostered player has a final game yet; run `lockin ingest`, or wait for"
+            " the season's first night"
+        )
 
     grouped: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
@@ -149,4 +169,17 @@ def load_panel(
             ),
             pos_group=np.array(groups, dtype=np.int64),
         )
-    return SeasonPanel(histories=histories, params=params or ProjectionParams())
+    # Rostered but not yet seen in a final game: projectable from the pool by
+    # role, so record the role. `players` is today's listing, which for someone
+    # with no game yet is the only listing there is.
+    unplayed = {}
+    for row in conn.execute(
+        """
+        SELECT DISTINCT m.sleeper_id, p.positions
+          FROM weekly_matchups_latest m
+          LEFT JOIN players p ON p.sleeper_id = m.sleeper_id
+        """
+    ):
+        if row["sleeper_id"] not in histories:
+            unplayed[row["sleeper_id"]] = position_group(json.loads(row["positions"] or "[]"))
+    return SeasonPanel(histories=histories, params=params or ProjectionParams(), unplayed=unplayed)

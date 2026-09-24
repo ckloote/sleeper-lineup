@@ -24,6 +24,14 @@ Two halves, both read-only unless `apply` is called:
     takes effect without any reader knowing it happened. Provenance lands in
     `ingest_log` under source `repair`.
 
+**Final weeks only, and final evidence only.** Once live polling begins, an
+early zero or an interim score is an ordinary observation of a week in
+progress, and a week polled five times before its last game would outvote its
+one final reading — `[0, 0, 0, 50]` "recovers" a confident 0 that would
+overwrite a correct 50 (review finding 10). So the vote counts only snapshots
+taken at or after the week's `FINALIZED` marker (`lockin.store.snapshots`), and
+a week without one is refused as open.
+
 **Starters only.** A bench player's `players_points` can hold a stale value from
 a game played while started, so the archive is not authoritative for it — the
 same reason `snapshots.counted_values` is starters-only. Bench rows are left
@@ -51,7 +59,12 @@ Slot = tuple[int, str]  # (roster_id, sleeper_id)
 
 @dataclass(frozen=True)
 class Consensus:
-    """The archive's verdict on one starter slot."""
+    """The archive's verdict on one starter slot.
+
+    The most-observed value, which is evidence rather than proof: a clear
+    majority recovers the stored value 97% of the time (§12), but a plurality
+    or a tie is a weaker claim and is reported as one.
+    """
 
     week: int
     roster_id: int
@@ -64,6 +77,13 @@ class Consensus:
     @property
     def share(self) -> float:
         return self.votes / self.observations if self.observations else 0.0
+
+    @property
+    def strength(self) -> str:
+        """``majority`` | ``plurality`` | ``tied`` — how far to trust the value."""
+        if self.tied:
+            return "tied"
+        return "majority" if self.share > 0.5 else "plurality"
 
 
 @dataclass(frozen=True)
@@ -109,6 +129,11 @@ def consensus_for_week(payloads: list[Any], week: int) -> dict[Slot, Consensus]:
     return out
 
 
+def open_weeks(root: Path, season: str, weeks: list[int]) -> list[int]:
+    """Weeks with no finalization marker, which no repair may touch."""
+    return [w for w in weeks if snapshots.finalized_at(root, snapshots.MATCHUPS, season, w) is None]
+
+
 def consensus(
     root: Path,
     season: str,
@@ -116,11 +141,16 @@ def consensus(
     *,
     min_observations: int = MIN_OBSERVATIONS,
 ) -> tuple[dict[int, dict[Slot, Consensus]], list[int]]:
-    """Consensus per week, plus the weeks skipped for want of observations."""
+    """Consensus per final week, plus the weeks skipped for want of observations.
+
+    Open weeks are in neither: they are not short of evidence, they have none
+    yet. `open_weeks` reports them.
+    """
     found: dict[int, dict[Slot, Consensus]] = {}
     skipped: list[int] = []
-    for week in weeks:
-        paths = snapshots.list_snapshots(root, snapshots.MATCHUPS, season, week)
+    closed = [w for w in weeks if w not in set(open_weeks(root, season, weeks))]
+    for week in closed:
+        paths = snapshots.final_snapshots(root, snapshots.MATCHUPS, season, week)
         if len(paths) < min_observations:
             skipped.append(week)
             continue
@@ -172,12 +202,18 @@ def apply(
     observed_at: str,
     min_observations: int = MIN_OBSERVATIONS,
 ) -> tuple[int, int]:
-    """Append the recovered values. Returns (starter rows, team rows) written.
+    """Append the recovered values. Returns (starter values corrected, team rows).
 
     Appends rather than updates, so the corrupted values stay queryable as
     history and a repair can be audited — or undone by deleting one
     `observed_at`. Team totals are recomputed from the full repaired starter
     set, not adjusted by the delta, so `points` stays the sum of its six slots.
+
+    **Each touched roster-week is written as a whole poll**: every row of its
+    latest observation, with the corrected values substituted. The latest view
+    reads one poll per roster-week (schema.sql), so a repair that appended only
+    the rows it changed would become the roster's entire membership and drop
+    everyone it left alone.
     """
     touched = sorted({(r.consensus.week, r.consensus.roster_id) for r in repairs})
     weeks = sorted({week for week, _ in touched})
@@ -185,29 +221,34 @@ def apply(
         return 0, 0
 
     by_week, _ = consensus(root, season, weeks, min_observations=min_observations)
-    stored = _db_starters(conn, weeks)
+    fixes = {
+        (r.consensus.week, r.consensus.roster_id, r.consensus.sleeper_id): r.consensus.value
+        for r in repairs
+    }
 
-    starter_rows = 0
-    for repair in repairs:
-        c = repair.consensus
-        row = stored[c.week][(c.roster_id, c.sleeper_id)]
-        conn.execute(
-            "INSERT OR REPLACE INTO weekly_matchups"
-            " (week, roster_id, matchup_id, sleeper_id, counted_points, is_starter,"
-            "  slot_index, slot, observed_at)"
-            " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
-            (
-                c.week,
-                c.roster_id,
-                row["matchup_id"],
-                c.sleeper_id,
-                c.value,
-                row["slot_index"],
-                row["slot"],
-                observed_at,
-            ),
-        )
-        starter_rows += 1
+    for week, roster_id in touched:
+        for row in conn.execute(
+            "SELECT matchup_id, sleeper_id, counted_points, is_starter, slot_index, slot"
+            "  FROM weekly_matchups_latest WHERE week = ? AND roster_id = ?",
+            (week, roster_id),
+        ).fetchall():
+            conn.execute(
+                "INSERT OR REPLACE INTO weekly_matchups"
+                " (week, roster_id, matchup_id, sleeper_id, counted_points, is_starter,"
+                "  slot_index, slot, observed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    week,
+                    roster_id,
+                    row["matchup_id"],
+                    row["sleeper_id"],
+                    fixes.get((week, roster_id, row["sleeper_id"]), row["counted_points"]),
+                    row["is_starter"],
+                    row["slot_index"],
+                    row["slot"],
+                    observed_at,
+                ),
+            )
 
     team_rows = 0
     for week, roster_id in touched:
@@ -236,7 +277,7 @@ def apply(
     for week in weeks:
         n = sum(1 for r in repairs if r.consensus.week == week)
         log_ingest(conn, "repair", f"weekly_matchups:week={week}", n, observed_at)
-    return starter_rows, team_rows
+    return len(repairs), team_rows
 
 
 # --------------------------------------------------------------------------
@@ -331,7 +372,7 @@ def stats(
     )
 
     for week, slots in sorted(by_week.items()):
-        paths = snapshots.list_snapshots(root, snapshots.MATCHUPS, season, week)
+        paths = snapshots.final_snapshots(root, snapshots.MATCHUPS, season, week)
         payloads = [snapshots.load_snapshot(p) for p in paths]
         series = [snapshots.counted_values(p) for p in payloads]
 

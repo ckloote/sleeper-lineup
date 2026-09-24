@@ -41,6 +41,17 @@ def payload(**player_points):
     ]
 
 
+def league_payload(league_id: str, season: str) -> dict:
+    return {
+        "league_id": league_id,
+        "season": season,
+        "scoring_settings": {"pts": 1.0},
+        "roster_positions": ["PG", "G", "F", "C", "UTIL", "UTIL"],
+        "settings": {"leg": 24, "last_scored_leg": 24},
+        "total_rosters": 10,
+    }
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -57,6 +68,9 @@ def fake_client(monkeypatch, payloads):
     calls = []
 
     class Fake:
+        def league(self, league_id):
+            return league_payload(league_id, "2025")
+
         def matchups(self, league_id, week):
             calls.append(week)
             return payloads[week]
@@ -161,3 +175,20 @@ def test_two_observations_in_one_second_do_not_collide(project, monkeypatch):
     assert len(paths) == 2
     first, second = (json.loads(p.read_text())[0]["players_points"]["1697"] for p in paths)
     assert (first, second) == (42.5, 29.0), "list_snapshots must stay in time order"
+
+
+def test_a_league_from_another_season_writes_no_snapshot(project, monkeypatch):
+    """Snapshot paths are keyed by season; a 2026 league must not land under 2025."""
+    calls = fake_client(monkeypatch, {12: payload(**{"1697": 42.5})})
+    monkeypatch.setattr(
+        cli.sleeper_ingest,
+        "fetch_league",
+        lambda client, league_id: league_payload(league_id, "2026"),
+    )
+
+    result = CliRunner().invoke(cli.main, ["observe", "--weeks", "12"])
+
+    assert result.exit_code != 0
+    assert "LOCKIN_SEASON is 2025" in result.output
+    assert calls == []
+    assert not (project / "snapshots").exists()

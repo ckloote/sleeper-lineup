@@ -5,6 +5,10 @@
 reassessed and taken on after Phases 0-2 landed, as §6 anticipated. Phase 6 (digest, deployment)
 remains, and is mostly live-only work that cannot be backtested.
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
+**Current status (2026-09-23):** Phase 6 shipped and deployed (§20). The 2026-09-23 code
+review (`docs/code-review-2026-09-23.md`) found the live paths assumed a completed season;
+§21 records the fixes, on branch `live-state-correctness`. That section is current; older
+status lines above and in §6 are history.
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
 against the live API, or proposes a change with the evidence for that change. Section 8
@@ -2939,3 +2943,92 @@ Unchanged from §15, and none of it is closable before October:
    §7.5 itself is *not* closed by this. Whether Sleeper publishes forward-looking stat rows
    is still a day-one question; what changed is that a "no" is now genuinely cheap to
    absorb, which is what this entry always claimed and could not have delivered.
+
+---
+
+## 21. Live-state correctness — the 2026-09-23 review
+
+The review's headline: the historical foundation is sound, and the project was not ready
+for unattended live recommendations, because several paths assumed a completed season even
+when the live digest called them. Every test that exercised the digest loaded a finished
+season and blanked its future, which cannot represent a season in progress. The fixes are
+ordered as the review recommended — what protects unrecoverable data first.
+
+**The test harness came first.** `lockin/ingest/run.py` is the ingest sequence, lifted out
+of the CLI so it can run against `tests/live_fixture.py`: a synthetic, unfinished season
+served through fake Sleeper and NBA clients. Every live-state test below ingests one the
+way the cron does. Suites that read the recorded season now read a per-run copy, since
+`apply_schema` can migrate data.
+
+### Before live capture (unrecoverable if wrong)
+
+- **Identity (finding 5).** `db_identity` records the league and season a file was first
+  ingested for; every command refuses a configuration for another, and `lockin ingest`
+  checks the league payload too — before its first write or snapshot. Settings are read for
+  the file's own season, not `LIMIT 1`.
+- **Coherent polls (finding 4).** `weekly_matchups_latest` returns the latest *poll* of a
+  roster-week, not the latest row per player, so a dropped starter leaves it. The ingest
+  records full membership (NULL points when none yet); `lockin repair` writes whole polls; a
+  one-off migration completed the 2025-26 file's partial repair polls. Stamps went to the
+  microsecond, because two polls in one second merged. Checked on a copy of 2025-26: the
+  view is row-identical before and after, and `verify`, `reconcile`, `locks` unchanged.
+- **Final-only repair (finding 10).** A `FINALIZED` marker beside each archived week records
+  when Sleeper first reported it scored; the consensus reads only snapshots from then on and
+  refuses open weeks. 2025-26 was backfilled at each week's earliest snapshot (all taken
+  after the season). Same 32 verdicts as before.
+- **Availability (finding 8).** `status_captures` logs every read; `player_status_events`
+  records each change with its timestamp, including a designation being cleared. The old
+  date-keyed table kept a morning's Out all day and could not tell a healthy day from a
+  missed one. It is kept for its history and no longer written.
+
+### Before the digest's advice is actionable
+
+- **Fixture states and the slate (finding 1).** `game_links.state` is classified from stat
+  lines, NBA status and whether the NBA still lists the game that day; the panel holds final
+  games only. Games still to come are read from the NBA schedule (`lockin/slate.py`), and
+  fantasy weeks from a Monday-to-Sunday calendar (`lockin/calendar.py`) that matches every
+  row of 2025-26 and is checked against Sleeper's `leg` on each ingest. Evidence: across
+  4,500 starter-week-mornings the schedule reproduces every future game the box scores knew,
+  except across trades; and 2025-26 un-played from 8 January produces a digest
+  byte-identical to the finished season's.
+- **Cold start (finding 3).** An unprojectable player is no longer a certain 0.0; the
+  digest abstains, and says why. The threshold came from projecting 2025-26's first month
+  with no burn-in (`lockin calibrate --cold-start`):
+
+  | player-games before | n | P(> q0.90) (z) | P(> q0.99) (z) |
+  |---|---:|---:|---:|
+  | 0-100 | 151 | 0.199 (+4.0) | 0.0464 (+4.5) |
+  | 100-200 | 180 | 0.172 (+3.2) | 0.0833 (+9.9) |
+  | 300-400 | 174 | 0.144 (+1.9) | 0.0287 (+2.5) |
+  | 400-500 | 144 | 0.118 (+0.7) | 0.0139 (+0.5) |
+  | 500-700 | 192 | 0.104 (+0.2) | 0.0052 (-0.7) |
+  | 700-1000 | 448 | 0.121 (+1.4) | 0.0201 (+2.1) |
+
+  **`min_pool_rows = 400`**: below it the right tail — the one lock calls are made in — is
+  under-predicted by up to eight times; from it every bin is within the Phase 3 gate's
+  tolerance. It was chosen on these weeks, so 2026-27's first month is its out-of-sample
+  test (day-one.md step 4). Players whose team has not yet played are projected from the
+  pool by role rather than refused.
+- **Observed state (finding 2).** Banked state is read from the morning's poll
+  (`lockin/state.py`) — for both teams — not reconstructed from the engine's own advice,
+  which had banked last night's recommendations and suppressed the calls announcing them
+  (roster 4, 2026-01-07: two banked, no calls; now Jarrett Allen's 47.5 LOCK is there). A
+  replay with no poll reconstructs closed windows only and says it is assuming. The reading
+  is §10's and unverified live: day-one.md step 7 shadow-checks it.
+- **Windows and time (findings 6, 7).** A call is per player, on his own latest game while
+  its window is open, evaluated with everything known this morning, and expires at his next
+  tip. Live runs refuse an unfinished slate, using fixture states before the fixed hour.
+- **Tie semantics.** A threshold is the lowest half-point score at which `evaluate_lock`
+  says LOCK, from the same tie-aware win probability; indifference passes, and a won
+  matchup has no threshold (+inf) rather than one inviting a pointless lock.
+- **Runs and freshness (findings 9, 12).** Digest runs are inserted under a `run_id` with
+  their provenance, banked players and warnings; `ingest_runs` marks an ingest complete only
+  when every step finished, and only such a run vouches for a live digest.
+
+`tests/test_lifecycle.py` runs the review's rehearsal — fresh season, first tip, first
+morning, DNP, roster change, partial ingest, week rollover, postponement — one synthetic
+morning at a time, asserting on the push text.
+
+**Still live-only:** the poll reading (§10), and whether Sleeper's week rolls over before
+the 06:30 ingest on a Monday (tolerated either way). Both are in day-one.md.
+

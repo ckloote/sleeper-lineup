@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from lockin.cli import main
-from lockin.ingest.sleeper import record_player_status, status_coverage
+from lockin.ingest.sleeper import designations_as_of, record_player_status, status_coverage
 from lockin.store.db import session
 
 PAYLOAD = {
@@ -30,17 +30,24 @@ PAYLOAD = {
 }
 
 
-def test_only_flagged_players_are_stored(tmp_path):
-    """No row means "nothing reported", which is what an empty field means.
+def _events(conn, sleeper_id):
+    return [
+        (r["observed_at"], r["designation"])
+        for r in conn.execute(
+            "SELECT observed_at, designation FROM player_status_events"
+            " WHERE sleeper_id = ? ORDER BY observed_at",
+            (sleeper_id,),
+        )
+    ]
 
-    Storing 2,000 nulls a day would bury the signal and grow the table by two
-    orders of magnitude for no information.
-    """
+
+def test_only_flagged_players_are_stored(tmp_path):
+    """A player never flagged writes nothing; 2,000 nulls a day would bury the signal."""
     with session(tmp_path / "t.db") as conn:
         assert record_player_status(conn, PAYLOAD, "2026-10-21") == 3
         stored = {
             r["sleeper_id"]: r["designation"]
-            for r in conn.execute("SELECT sleeper_id, designation FROM player_status")
+            for r in conn.execute("SELECT sleeper_id, designation FROM player_status_events")
         }
     assert stored == {"1000": "DTD", "2126": "Out", "1966": "IR"}
 
@@ -59,13 +66,7 @@ def test_running_across_days_accumulates(tmp_path):
         record_player_status(conn, PAYLOAD, "2026-10-21")
         record_player_status(conn, {"1000": {"injury_status": "Out"}}, "2026-10-22")
         days, rows = status_coverage(conn)
-        history = [
-            (r["as_of"], r["designation"])
-            for r in conn.execute(
-                "SELECT as_of, designation FROM player_status"
-                " WHERE sleeper_id = '1000' ORDER BY as_of"
-            )
-        ]
+        history = _events(conn, "1000")
     assert (days, rows) == (2, 4)
     # A designation that changed is two rows, not an overwrite — the change is
     # the signal that start/sit evaluation needs.
@@ -142,9 +143,60 @@ def test_designations_are_stored_verbatim(tmp_path, designation):
     """
     with session(tmp_path / "t.db") as conn:
         record_player_status(conn, {"1": {"injury_status": designation}}, "2026-10-21")
-        stored = conn.execute("SELECT designation FROM player_status").fetchone()
+        stored = conn.execute("SELECT designation FROM player_status_events").fetchone()
     assert stored["designation"] == designation
 
 
 def test_the_command_group_still_exposes_ingest():
     assert isinstance(main.commands["ingest"], click.Command)
+
+
+# ----------------------------------------------- review 2026-09-23, finding 8
+
+
+def test_a_designation_cleared_later_the_same_day_is_recorded_as_cleared(tmp_path):
+    """The review's reproduction: Out, then nothing. The old table kept Out all day."""
+    with session(tmp_path / "t.db") as conn:
+        record_player_status(conn, {"7": {"injury_status": "Out"}}, "2026-10-21T10:30:00+00:00")
+        record_player_status(conn, {"7": {"injury_status": None}}, "2026-10-21T18:00:00+00:00")
+
+        assert _events(conn, "7") == [
+            ("2026-10-21T10:30:00+00:00", "Out"),
+            ("2026-10-21T18:00:00+00:00", None),
+        ]
+        assert designations_as_of(conn, "2026-10-21T20:00:00+00:00") == {}
+
+
+def test_the_status_known_before_a_decision_survives_a_later_update(tmp_path):
+    """Out at 10:00, Questionable at 14:00: at noon he was Out, and that stays true."""
+    with session(tmp_path / "t.db") as conn:
+        record_player_status(conn, {"7": {"injury_status": "Out"}}, "2026-10-21T10:00:00+00:00")
+        record_player_status(
+            conn, {"7": {"injury_status": "Questionable"}}, "2026-10-21T14:00:00+00:00"
+        )
+
+        assert designations_as_of(conn, "2026-10-21T12:00:00+00:00") == {"7": "Out"}
+        assert designations_as_of(conn, "2026-10-21T15:00:00+00:00") == {"7": "Questionable"}
+
+
+def test_no_capture_is_not_the_same_as_nobody_injured(tmp_path):
+    with session(tmp_path / "t.db") as conn:
+        assert designations_as_of(conn, "2026-10-21T12:00:00+00:00") is None
+        record_player_status(conn, {"7": {"injury_status": None}}, "2026-10-21T10:00:00+00:00")
+        assert designations_as_of(conn, "2026-10-21T12:00:00+00:00") == {}
+
+
+def test_a_healthy_day_is_still_a_captured_day(tmp_path):
+    """The old coverage counter could not tell a day with no injuries from a missed one."""
+    with session(tmp_path / "t.db") as conn:
+        record_player_status(conn, {"7": {"injury_status": None}}, "2026-10-21T10:30:00+00:00")
+        record_player_status(conn, {"7": {"injury_status": None}}, "2026-10-22T10:30:00+00:00")
+        assert status_coverage(conn) == (2, 0)
+
+
+def test_a_player_missing_from_the_payload_is_not_cleared(tmp_path):
+    """Absent from one response is not evidence of recovery."""
+    with session(tmp_path / "t.db") as conn:
+        record_player_status(conn, {"7": {"injury_status": "Out"}}, "2026-10-21T10:30:00+00:00")
+        record_player_status(conn, {"8": {"injury_status": None}}, "2026-10-22T10:30:00+00:00")
+        assert designations_as_of(conn, "2026-10-23T00:00:00+00:00") == {"7": "Out"}

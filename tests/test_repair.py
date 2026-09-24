@@ -43,9 +43,18 @@ def payload(roster_points, *, matchup_id=1):
     ]
 
 
-def archive(root, season, week, payloads):
+def archive(root, season, week, payloads, *, final_from: int | None = 0):
+    """Snapshot each payload a day apart.
+
+    ``final_from`` is the index of the first one taken after Sleeper finished
+    scoring the week — the marker `lockin repair` reads evidence from. None
+    leaves the week open.
+    """
     for i, p in enumerate(payloads):
-        snapshots.save(root, snapshots.MATCHUPS, season, week, p, stamp=f"2026090{i + 1}T000000Z")
+        stamp = f"2026090{i + 1}T000000Z"
+        if final_from is not None and i == final_from:
+            snapshots.mark_finalized(root, snapshots.MATCHUPS, season, week, stamp=stamp)
+        snapshots.save(root, snapshots.MATCHUPS, season, week, p, stamp=stamp)
 
 
 @pytest.fixture
@@ -146,6 +155,62 @@ def test_a_thin_week_abstains(project):
     assert skipped == [25]
 
 
+def test_only_readings_taken_after_the_week_was_final_are_evidence(project):
+    """The review's reproduction: [0, 0, 0, 50] must not recover a confident 0.
+
+    Three early polls of a live week read 0.0 because the player had not played
+    yet. They are not corruption, and once the week is scored they must not
+    outvote the final value.
+    """
+    root = project / "snapshots"
+    early = {"1697": 0.0, "1809": 30.0, "2133": 20.0}
+    final = {"1697": 50.0, "1809": 30.0, "2133": 20.0}
+    # Distinct payloads, so none dedupe: three live readings, three final ones.
+    live = [payload({1: {**early, "1809": 30.0 + i}}) for i in range(3)]
+    done = [payload({1: {**final, "2133": 20.0 + i}}) for i in range(3)]
+    archive(root, "2025", 12, [*live, *done], final_from=3)
+
+    verdicts, skipped = repair.consensus(root, "2025", [12])
+
+    assert skipped == []
+    verdict = verdicts[12][(1, "1697")]
+    assert verdict.value == 50.0
+    assert (verdict.votes, verdict.observations) == (3, 3), "only final readings vote"
+
+
+def test_an_open_week_is_refused_not_merely_thin(project):
+    root = project / "snapshots"
+    good = {"1697": 42.5, "1809": 30.0, "2133": 20.0}
+    archive(
+        root, "2025", 12, [payload({1: {**good, "1809": v}}) for v in (30, 31, 32)], final_from=None
+    )
+
+    verdicts, skipped = repair.consensus(root, "2025", [12])
+
+    assert verdicts == {}
+    assert skipped == [], "an open week is not short of evidence; it has none yet"
+    assert repair.open_weeks(root, "2025", [12]) == [12]
+
+
+def test_a_plurality_is_reported_as_one(project):
+    root = project / "snapshots"
+    values = (42.5, 54.5, 42.5, 30.0, 31.0)
+    archive(
+        root, "2025", 12, [payload({1: {"1697": v, "1809": 30.0, "2133": 20.0}}) for v in values]
+    )
+
+    verdict = repair.consensus(root, "2025", [12])[0][12][(1, "1697")]
+
+    assert (verdict.value, verdict.votes, verdict.observations) == (42.5, 2, 5)
+    assert verdict.strength == "plurality"
+
+
+def test_the_first_sighting_of_a_final_week_is_never_moved(tmp_path):
+    assert snapshots.mark_finalized(tmp_path, "matchups", "2026", 3, stamp="20261110T103000Z")
+    assert not snapshots.mark_finalized(tmp_path, "matchups", "2026", 3, stamp="20261111T103000Z")
+    assert snapshots.finalized_at(tmp_path, "matchups", "2026", 3) == "20261110T103000Z"
+
+
 # --- the plan ------------------------------------------------------------
 
 
@@ -240,10 +305,16 @@ def test_the_bench_is_left_alone(project):
         repairs, _ = repair.plan(conn, root, "2025", [12])
         repair.apply(conn, root, "2025", repairs, observed_at=now_iso())
         bench = conn.execute(
-            "SELECT COUNT(*) c FROM weekly_matchups WHERE sleeper_id = '9999'"
-        ).fetchone()
+            "SELECT counted_points, is_starter FROM weekly_matchups_latest"
+            " WHERE sleeper_id = '9999'"
+        ).fetchall()
 
-    assert bench["c"] == 1, "no repair row should have been written for a bench player"
+    assert repairs, "the corrupted starter should have been planned"
+    assert all(r.consensus.sleeper_id != "9999" for r in repairs), (
+        "the archive must never propose a bench value"
+    )
+    # Still on the roster — a repair writes the whole poll — and untouched.
+    assert [(r["counted_points"], r["is_starter"]) for r in bench] == [(0.0, 0)]
 
 
 def test_the_write_is_logged_as_a_repair(project):
@@ -372,6 +443,7 @@ def test_json_reports_the_votes(project):
         "votes": 2,
         "observations": 3,
         "tied": False,
+        "strength": "majority",
     }
 
 

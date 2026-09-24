@@ -41,8 +41,8 @@ BANKED = {"1000": 46.0, "1787": 47.5}
 
 
 @pytest.fixture(scope="module")
-def report():
-    conn = sqlite3.connect(cfg.db_path)
+def report(season_db):
+    conn = sqlite3.connect(season_db)
     conn.row_factory = sqlite3.Row
     apply_schema(conn)
     try:
