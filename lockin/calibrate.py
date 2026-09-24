@@ -478,6 +478,76 @@ def check_no_leakage(
     )
 
 
+# --------------------------------------------------------------- cold start
+
+COLD_START_WEEKS = (1, 2, 3, 4)
+"""Where the cold start lives. Everything above is scored on held-out weeks
+after a burn-in, which by construction never looks at the first month."""
+
+
+def evaluate_cold_start(
+    conn: sqlite3.Connection,
+    season: str,
+    *,
+    params: ProjectionParams | None = None,
+    n_draws: int = 500,
+    seed: int = 20260808,
+) -> tuple[CalibrationSample, np.ndarray]:
+    """Every player-game of the first month, with no burn-in, and the pool behind it.
+
+    Returns the sample and, per row, how many played league rows preceded it —
+    the quantity `ProjectionParams.min_pool_rows` thresholds. The main gate's
+    burn-in (15 games, 8 played) excludes exactly the regime a first-week digest
+    runs in, so it could never have caught the opening-day failure.
+    """
+    panel = load_panel(conn, season, params=params)
+    full = evaluate(
+        conn,
+        season,
+        params=params,
+        n_draws=n_draws,
+        seed=seed,
+        min_prior_games=0,
+        min_prior_played=0,
+        panel=panel,
+    )
+    sample = full.weeks(COLD_START_WEEKS)
+    played_days = np.sort(panel.day[panel.played])
+    return sample, np.searchsorted(played_days, sample.day, side="left")
+
+
+def cold_start_checks(
+    sample: CalibrationSample, pool: np.ndarray, threshold: int | None = None
+) -> list[Check]:
+    """Is the digest's abstention threshold where calibration begins?
+
+    Gates the side the digest advises on: once the pool holds ``threshold``
+    rows, the right tail must pass the Phase 3 criterion. The side it abstains
+    on is reported, not gated — it is expected to fail, which is the reason for
+    abstaining. The threshold was chosen on 2025-26's first month, so on that
+    season this is a consistency check; on the next season's first month it is
+    the out-of-sample test.
+    """
+    threshold = ProjectionParams().min_pool_rows if threshold is None else threshold
+    above, below = sample._select(pool >= threshold), sample._select(pool < threshold)
+    gate = check_tail_calibration(above)
+    gate.name = f"right tail calibrated once the pool holds {threshold} rows (weeks 1-4)"
+    gate.detail = f"n={len(above)}; " + gate.detail
+    parts = []
+    if len(below):
+        for level in (0.90, 0.99):
+            realised, z = _z(below, level)
+            parts.append(f"q{level:.2f}: {realised:.4f} vs {1 - level:.3f} (z={z:+.2f})")
+    return [
+        gate,
+        Check(
+            name=f"below {threshold} rows the digest abstains (advisory)",
+            passed=True,
+            detail=f"n={len(below)}; " + ("; ".join(parts) or "no player-games below it"),
+        ),
+    ]
+
+
 def pit_histogram(sample: CalibrationSample, bins: int = 10) -> list[float]:
     counts, _ = np.histogram(sample.pit, bins=bins, range=(0.0, 1.0))
     return [float(c) / len(sample) for c in counts]

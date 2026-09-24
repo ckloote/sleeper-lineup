@@ -169,7 +169,7 @@ def test_threshold_matches_a_brute_force_scan():
 
     grid = np.arange(-20.0, 160.0, 0.5)
     scanned = next(s for s in grid if evaluate_lock(**args, lock_value=float(s)).lock)
-    assert lock_threshold(**args) == pytest.approx(scanned, abs=1.0)
+    assert lock_threshold(**args) == scanned, "exactly, now that both are on the grid"
 
 
 def test_threshold_rises_against_a_stronger_opponent():
@@ -181,9 +181,37 @@ def test_threshold_rises_against_a_stronger_opponent():
     assert strong > weak
 
 
-def test_threshold_is_finite_when_the_matchup_is_already_decided():
-    """Hopeless and won are both real states; neither may produce a NaN."""
+def test_a_decided_matchup_has_a_rule_only_where_one_means_something():
+    """Hopeless: bank anything that finally beats the deficit. Won: no rule at all.
+
+    A won matchup used to return max(deficit), so any score above it printed
+    as a lock that `evaluate_lock` then refused. Indifference passes, and the
+    threshold says so with +inf rather than a number that invites a pointless lock.
+    """
     contributions = np.vstack([constant(20.0)])
     hopeless = lock_threshold(0.0, contributions, 0, constant(9999.0))
     won = lock_threshold(9999.0, contributions, 0, constant(0.0))
-    assert np.isfinite(hopeless) and np.isfinite(won)
+    assert np.isfinite(hopeless)
+    assert won == float("inf")
+
+
+def test_the_review_case_a_score_above_the_threshold_is_never_a_pass():
+    """Continuation 20, opponent 10, score 11: the rule and the call must agree."""
+    args = dict(banked=0.0, contributions=np.vstack([constant(20.0)]), player=0)
+    threshold = lock_threshold(**args, opponent=constant(10.0))
+    call = evaluate_lock(**args, lock_value=11.0, opponent=constant(10.0))
+    assert call.lock == (11.0 >= threshold)
+
+
+def test_threshold_is_on_the_half_point_grid_and_exact_at_ties():
+    """The printed number is scoreable, and scoring it exactly is a lock."""
+    rng = np.random.default_rng(8)
+    contributions = np.vstack([rng.integers(0, 120, 5000) * 0.5])
+    opponent = 200.0 + rng.integers(-80, 80, 5000) * 0.5
+    args = dict(banked=180.0, contributions=contributions, player=0, opponent=opponent)
+
+    threshold = lock_threshold(**args)
+
+    assert threshold % 0.5 == 0.0
+    assert evaluate_lock(**args, lock_value=threshold).lock
+    assert not evaluate_lock(**args, lock_value=threshold - 0.5).lock

@@ -27,6 +27,7 @@ from lockin.core.scoring import (
     score_recorded,
     shot_values,
 )
+from lockin.store import identity
 
 CENT = 0.005
 
@@ -40,10 +41,7 @@ class Check:
 
 
 def scoring_settings(conn: sqlite3.Connection) -> dict[str, float]:
-    row = conn.execute("SELECT payload_json FROM league_settings LIMIT 1").fetchone()
-    if row is None:
-        raise RuntimeError("no league settings ingested; run `lockin ingest`")
-    return json.loads(row["payload_json"])["scoring_settings"]
+    return identity.league_payload(conn)["scoring_settings"]
 
 
 def _played_rows(conn: sqlite3.Connection, season: str):

@@ -105,6 +105,11 @@ def test_latest_view_does_not_double_count_repeated_observations(tmp_path):
             ("2026-08-07T00:00:00+00:00", 61.0),
         ):
             conn.execute(
+                "INSERT INTO weekly_matchup_teams (week, roster_id, matchup_id, observed_at)"
+                " VALUES (12, 7, 4, ?)",
+                (stamp,),
+            )
+            conn.execute(
                 "INSERT INTO weekly_matchups"
                 " (week, roster_id, matchup_id, sleeper_id, counted_points,"
                 "  is_starter, observed_at)"
@@ -133,6 +138,11 @@ def test_latest_view_keeps_rosters_and_weeks_separate(tmp_path):
             (13, 7, "a", 40.0, "2026-08-05T00:00:00+00:00"),
         ]
         for wk, rid, pid, pts, stamp in rows:
+            conn.execute(
+                "INSERT INTO weekly_matchup_teams (week, roster_id, matchup_id, observed_at)"
+                " VALUES (?, ?, 1, ?)",
+                (wk, rid, stamp),
+            )
             conn.execute(
                 "INSERT INTO weekly_matchups"
                 " (week, roster_id, matchup_id, sleeper_id, counted_points,"

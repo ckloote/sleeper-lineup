@@ -118,29 +118,47 @@ def evaluate_lock(
     return RolloutDecision(lock=p_lock > p_pass, p_win_lock=p_lock, p_win_pass=p_pass)
 
 
+SCORE_STEP = 0.5
+"""Fantasy scores in this league are multiples of half a point (fgm 0.5, oreb
+1.5, everything else whole), so a threshold between two of them is a number
+nobody can score."""
+
+
 def lock_threshold(
     banked: float,
     contributions: np.ndarray,
     player: int,
     opponent: np.ndarray,
 ) -> float:
-    """The score at which banking becomes correct — the standing rule.
+    """The lowest score worth banking — the standing rule.
 
-    *"Lock Player X tonight if he clears 47."* This is a first-class output
-    (§11), not a diagnostic: it is what makes a missed check-in survivable.
+    *"Lock Player X tonight if he scores 47 or more."* This is a first-class
+    output (§11), not a diagnostic: it is what makes a missed check-in survivable.
 
-    The architecture doc proposes a binary search over hypothetical *S*. It is
-    not needed. Writing ``D = opponent − banked − others``, the value of locking
-    at *S* is P(S > D), which is the CDF of ``D`` evaluated at *S* and therefore
-    increasing in *S*, while the value of passing does not depend on *S* at all.
-    The crossing is then exactly the ``p_pass``-quantile of ``D`` — one sort
-    instead of a search, and exact rather than converged to a tolerance.
+    **It must agree with** :func:`evaluate_lock` **exactly**, and used not to.
+    That was a closed form — the ``p_pass``-quantile of the deficit ``D =
+    opponent − banked − others`` — which interpolates between samples and
+    ignores that `win_probability` counts a tie as half a win. At the edges the
+    two parted: passing already winning every simulation returned max(D), so a
+    score above it printed as a lock while `evaluate_lock` said pass (review
+    2026-09-23: continuation 20, opponent 10, score 11 — threshold 10, PASS).
+
+    So it is computed from the same tie-aware quantity on the same grid scores
+    live on. Locking at *S* is worth P(S > D) + ½P(S = D), a step function
+    that only moves at a grid score at or just above some D; the threshold is
+    the first such score whose value strictly beats passing. Strictly, because
+    `evaluate_lock` does: **an indifferent decision passes.** When no score
+    beats passing — the matchup is already won in every simulation — there is
+    no rule to give, and the answer is +inf rather than a number that invites a
+    pointless lock.
     """
     others = contributions.sum(axis=0) - contributions[player]
     p_pass = win_probability(banked + others + contributions[player], opponent)
-    deficit = opponent - banked - others
-    if p_pass <= 0.0:
-        return float(np.min(deficit))
-    if p_pass >= 1.0:
-        return float(np.max(deficit))
-    return float(np.quantile(deficit, p_pass))
+    deficit = np.sort(opponent - banked - others)
+    on_grid = np.ceil(deficit / SCORE_STEP - 1e-9) * SCORE_STEP
+    candidates = np.unique(np.concatenate([on_grid, on_grid + SCORE_STEP]))
+    below = np.searchsorted(deficit, candidates, side="left")
+    through = np.searchsorted(deficit, candidates, side="right")
+    p_lock = (below + 0.5 * (through - below)) / len(deficit)
+    better = np.nonzero(p_lock > p_pass)[0]
+    return float(candidates[better[0]]) if len(better) else float("inf")

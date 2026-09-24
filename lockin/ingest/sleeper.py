@@ -80,16 +80,46 @@ class SleeperClient:
 # --------------------------------------------------------------------- ingest
 
 
-def ingest_league(conn: sqlite3.Connection, client: SleeperClient, league_id: str) -> dict:
-    started = now_iso()
-    league = validate_league(client.league(league_id))
+def fetch_league(client: SleeperClient, league_id: str) -> dict:
+    """The league payload, validated but not stored.
+
+    Split from `store_league` so an ingest can check the payload against the
+    database's identity before its first write (lockin/store/identity.py).
+    """
+    return validate_league(client.league(league_id))
+
+
+def store_league(conn: sqlite3.Connection, league: dict, started: str) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO league_settings (league_id, season, payload_json, fetched_at)"
         " VALUES (?, ?, ?, ?)",
         (league["league_id"], league["season"], json.dumps(league), now_iso()),
     )
-    log_ingest(conn, "sleeper", f"league:{league_id}", 1, started)
+    log_ingest(conn, "sleeper", f"league:{league['league_id']}", 1, started)
+
+
+def ingest_league(conn: sqlite3.Connection, client: SleeperClient, league_id: str) -> dict:
+    started = now_iso()
+    league = fetch_league(client, league_id)
+    store_league(conn, league, started)
     return league
+
+
+def mark_final_weeks(league: dict, root: Path, season: str, *, stamp: str) -> list[int]:
+    """Record the first sighting of each week Sleeper has finished scoring.
+
+    `settings.last_scored_leg` is Sleeper's own statement that a week is done.
+    The marker it leaves beside the archive is the boundary `lockin repair`
+    reads evidence from (lockin/repair.py). Returns the weeks newly marked.
+    """
+    last = (league.get("settings") or {}).get("last_scored_leg")
+    if not isinstance(last, int):
+        return []
+    return [
+        w
+        for w in ALL_STAT_WEEKS
+        if w <= last and snapshots.mark_finalized(root, snapshots.MATCHUPS, season, w, stamp=stamp)
+    ]
 
 
 def current_weeks(league: dict) -> list[int]:
@@ -186,38 +216,102 @@ def ingest_rosters(conn: sqlite3.Connection, client: SleeperClient, league_id: s
     return n
 
 
-def record_player_status(conn: sqlite3.Connection, payload: dict, as_of: str) -> int:
-    """Append today's injury designations to `player_status`.
+def _latest_designations(conn: sqlite3.Connection, before: str | None = None) -> dict:
+    """Each player's most recent designation event, optionally strictly before a time."""
+    where, args = ("WHERE observed_at < ?", (before,)) if before is not None else ("", ())
+    return {
+        r[0]: r[1]
+        for r in conn.execute(
+            f"""
+            SELECT sleeper_id, designation FROM (
+                SELECT sleeper_id, designation,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY sleeper_id ORDER BY observed_at DESC
+                       ) AS rn
+                  FROM player_status_events {where}
+            ) WHERE rn = 1
+            """,
+            args,
+        )
+    }
 
-    Keyed on (sleeper_id, as_of) so re-running in a day is idempotent and
-    running across days accumulates. Only players carrying a designation are
-    stored — the absence of a row means "nothing reported", which is what an
-    empty ``injury_status`` means anyway, and storing 2,000 nulls a day would
-    bury the signal.
+
+def record_player_status(conn: sqlite3.Connection, payload: dict, observed_at: str) -> int:
+    """Record one read of the injury designations. Returns how many were flagged.
+
+    **A capture, then the changes.** Every call writes a `status_captures` row,
+    so a day on which nobody was hurt is still visibly a day that was captured.
+    Then an event for each player whose designation differs from his last one —
+    including a change to NULL, so an Out that clears at 2pm is recorded as
+    clearing rather than standing until tomorrow.
+
+    This replaced a table keyed on (player, date) that stored flagged players
+    only (review finding 8). There, a cleared designation wrote nothing and the
+    morning's Out stood all day; a later update overwrote an earlier one, so a
+    backtest could not tell what was known before tip from what arrived after
+    it; and a healthy day looked like a missed one. None of that is
+    recoverable afterwards, which is why it had to be right before the season.
+
+    `observed_at` is a timestamp, not a date. Rows are small because unchanged
+    players write nothing: 2,000 nulls a day would bury the signal, and so, in
+    the old table, did never writing the one null that mattered.
     """
-    rows = [
-        (sleeper_id, as_of, p.get("injury_status"))
-        for sleeper_id, p in payload.items()
-        if isinstance(p, dict) and p.get("injury_status")
+    players = {sid: p for sid, p in payload.items() if isinstance(p, dict)}
+    flagged = sum(1 for p in players.values() if p.get("injury_status"))
+    cur = conn.execute(
+        "INSERT INTO status_captures (observed_at, players_seen, flagged) VALUES (?, ?, ?)",
+        (observed_at, len(players), flagged),
+    )
+    capture_id = cur.lastrowid
+
+    known = _latest_designations(conn)
+    changes = [
+        (sleeper_id, observed_at, p.get("injury_status") or None, capture_id)
+        for sleeper_id, p in players.items()
+        if (p.get("injury_status") or None) != known.get(sleeper_id)
     ]
     conn.executemany(
-        "INSERT OR REPLACE INTO player_status (sleeper_id, as_of, designation) VALUES (?, ?, ?)",
-        rows,
+        "INSERT OR REPLACE INTO player_status_events"
+        " (sleeper_id, observed_at, designation, capture_id) VALUES (?, ?, ?, ?)",
+        changes,
     )
-    return len(rows)
+    return flagged
+
+
+def designations_as_of(conn: sqlite3.Connection, before: str) -> dict[str, str] | None:
+    """Every designation in force strictly before ``before``, as it was known then.
+
+    None when no capture happened before that moment — "nobody was flagged" and
+    "nobody looked" are different answers, and only the first is healthy.
+    """
+    seen = conn.execute(
+        "SELECT 1 FROM status_captures WHERE observed_at < ? LIMIT 1", (before,)
+    ).fetchone()
+    if seen is None:
+        return None
+    return {sid: d for sid, d in _latest_designations(conn, before).items() if d}
 
 
 def status_coverage(conn: sqlite3.Connection) -> tuple[int, int]:
-    """How many distinct days of availability data exist, and how many rows.
+    """Distinct days with a capture, and how many designation changes exist.
 
     Printed by every ingest because the *day count* is the number that reveals a
     stalled capture. Rows alone do not: a capture frozen since October still
     reports thousands of them, and the failure this exposes — a season of
     designations never recorded — is silent, permanent, and otherwise looks
     exactly like a working system.
+
+    Days come from captures, not designations, so a healthy day counts; the
+    legacy `player_status` days are included so the history does not restart.
     """
-    row = conn.execute("SELECT COUNT(DISTINCT as_of) d, COUNT(*) n FROM player_status").fetchone()
-    return int(row["d"]), int(row["n"])
+    days = conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT substr(observed_at, 1, 10) FROM status_captures"
+        "  UNION SELECT as_of FROM player_status"
+        ")"
+    ).fetchone()[0]
+    changes = conn.execute("SELECT COUNT(*) FROM player_status_events").fetchone()[0]
+    return int(days), int(changes)
 
 
 def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
@@ -229,8 +323,8 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
     genuinely point-in-time player attribute Sleeper publishes is the stat row's
     own ``team``, stored as ``box_scores.team``.
 
-    Each run therefore also appends today's injury designation to
-    ``player_status``. That cannot recover the past, but it starts the record
+    Each run therefore also records the injury designations, timestamped, in
+    ``player_status_events``. That cannot recover the past, but it starts the record
     that evaluating start/sit decisions will need, and it is unrecoverable if
     nobody starts it.
 
@@ -271,7 +365,7 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
 
     # Start the availability record. It cannot be backfilled, so the only way
     # to have it next season is to begin now.
-    flagged = record_player_status(conn, payload, updated[:10])
+    flagged = record_player_status(conn, payload, updated)
     log_ingest(conn, "sleeper", "players", n, started)
     log_ingest(conn, "sleeper", "player_status", flagged, started)
     return n
@@ -287,7 +381,7 @@ def ingest_matchups(
     snapshot_root: Path | None = None,
     season: str | None = None,
 ) -> tuple[int, Path | None]:
-    """Append a matchup observation. Never upserts — see schema.sql.
+    """Append a matchup observation — one whole poll. Never upserts; see schema.sql.
 
     Also preserves the raw payload to `snapshot_root` when it differs from the
     last one seen. That file, not the database row, is what survives a rebuild —
@@ -333,7 +427,15 @@ def ingest_matchups(
                     roster_positions[idx] if idx < len(roster_positions) else None,
                 )
 
-        for sleeper_id, points in (team.get("players_points") or {}).items():
+        # The poll's membership is everyone the payload names, not everyone with
+        # a score. Early in a week `players_points` is sparse or empty while
+        # `starters` already lists a valid lineup; reading only the scores
+        # recorded no lineup at all, and made a starter with no game yet
+        # indistinguishable from one who was not there. No score is NULL.
+        points_of = team.get("players_points") or {}
+        members = [p for p in team.get("players") or [] if p and p != "0"]
+        for sleeper_id in dict.fromkeys([*members, *slot_of, *points_of]):
+            points = points_of.get(sleeper_id)
             slot_index, slot = slot_of.get(sleeper_id, (None, None))
             conn.execute(
                 "INSERT OR REPLACE INTO weekly_matchups"
@@ -503,26 +605,87 @@ def refresh_row_kinds(conn: sqlite3.Connection) -> tuple[int, int]:
     return player, team
 
 
-def refresh_game_occurrence(conn: sqlite3.Connection) -> tuple[int, int]:
-    """Mark which fixtures actually happened.
+FIXTURE_STATES = ("final", "in_progress", "scheduled", "postponed", "unknown")
 
-    A fixture where not one player recorded a stat line did not take place —
-    it was postponed. This matters because an unplayed REAL game scores 0.0 for
-    an unlocked starter, while a postponed fixture is excluded entirely. See
-    schema.sql for the week-12 evidence.
+# What `occurred` means under each state, for readers that predate `state`.
+_OCCURRED = {"final": 1, "in_progress": 1, "postponed": 0}
 
-    Returns (occurred, postponed).
+
+def fixture_state(
+    *,
+    played: bool,
+    linked: bool,
+    nba_status: int | None,
+    game_date: str,
+    today: str,
+    schedule_loaded: bool,
+) -> str:
+    """What one fixture is, from the three pieces of evidence there are.
+
+    Nobody having a stat line used to mean "postponed". It means that for a
+    game in the past, and it also means "not played yet" for every game in the
+    future — the rule removed all 681 of them from the digest (review finding
+    1). So absence of stats is read against the NBA's status and date:
+
+    - Stat lines exist: the game happened (``in_progress`` while the NBA says
+      it is still being played).
+    - Linked to an NBA game with no stat lines: ``scheduled`` if it is not due
+      yet, but ``unknown`` if the NBA calls it final or its date has passed.
+      That is an incomplete Sleeper feed, and guessing either way mis-scores a
+      final game.
+    - No NBA game on this date for this pair: ``postponed``. The NBA files a
+      moved game only under its new date — true of all three 2025-26
+      postponements. Without a schedule to consult, only a past date can say so.
     """
-    conn.execute(
+    if played:
+        return "in_progress" if nba_status == 2 else "final"
+    if linked:
+        if nba_status == 3:
+            return "unknown"
+        if nba_status == 2:
+            return "in_progress"
+        return "unknown" if game_date < today else "scheduled"
+    if schedule_loaded or game_date < today:
+        return "postponed"
+    return "scheduled"
+
+
+def classify_fixtures(conn: sqlite3.Connection, today: str) -> dict[str, int]:
+    """Set every fixture's `state` (and `occurred`, in step). Returns counts.
+
+    ``today`` is the NBA date — the schedule's timezone, not the host's; see
+    lockin/clock.py. Run after `link_games`, whose links are part of the evidence.
+    """
+    schedule_loaded = conn.execute("SELECT EXISTS (SELECT 1 FROM nba_schedule)").fetchone()[0]
+    rows = conn.execute(
         """
-        UPDATE game_links
-           SET occurred = (
-               SELECT CASE WHEN SUM(b.played) > 0 THEN 1 ELSE 0 END
-                 FROM box_scores b
-                WHERE b.sleeper_game_id = game_links.sleeper_game_id
-           )
+        SELECT g.sleeper_game_id, g.game_date, s.status,
+               s.nba_game_id IS NOT NULL AS linked,
+               EXISTS (SELECT 1 FROM box_scores b
+                        WHERE b.sleeper_game_id = g.sleeper_game_id AND b.played = 1) AS played,
+               COALESCE(g.is_exhibition, 0) AS exhibition
+          FROM game_links g
+          LEFT JOIN nba_schedule s ON s.nba_game_id = g.nba_game_id
         """
+    ).fetchall()
+    counts = dict.fromkeys(FIXTURE_STATES, 0)
+    updates = []
+    for r in rows:
+        # The NBA schedule leaves exhibitions out on purpose (lockin/ingest/nba.py),
+        # so for them "not in the schedule" is not evidence of a postponement:
+        # only the date can speak. The All-Star Game is scheduled until played.
+        exhibition = bool(r[5])
+        state = fixture_state(
+            played=bool(r[4]),
+            linked=bool(r[3]) and not exhibition,
+            nba_status=None if exhibition else r[2],
+            game_date=r[1],
+            today=today,
+            schedule_loaded=bool(schedule_loaded) and not exhibition,
+        )
+        counts[state] += 1
+        updates.append((state, _OCCURRED.get(state), r[0]))
+    conn.executemany(
+        "UPDATE game_links SET state = ?, occurred = ? WHERE sleeper_game_id = ?", updates
     )
-    occurred = conn.execute("SELECT COUNT(*) c FROM game_links WHERE occurred = 1").fetchone()["c"]
-    postponed = conn.execute("SELECT COUNT(*) c FROM game_links WHERE occurred = 0").fetchone()["c"]
-    return occurred, postponed
+    return counts

@@ -14,10 +14,48 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lockin.store import snapshots
+from lockin import calendar
+from lockin.store import identity, snapshots
 
 EXPECTED_WEEKS = set(range(1, 26))
 GAME_LINK_THRESHOLD = 0.99
+
+# A fixture's state, falling back to `occurred` for rows written before `state`.
+STATE = "COALESCE(state, CASE occurred WHEN 1 THEN 'final' WHEN 0 THEN 'postponed' END)"
+
+
+def season_progress(conn: sqlite3.Connection) -> tuple[int | None, bool]:
+    """(current week, complete) from this database's league payload.
+
+    Historical gates and live-readiness gates differ in one number: how many
+    weeks should exist. On a finished season it is all 25. On day one it is the
+    one being played, and demanding 25 made the checklist's own gate
+    unpassable (review finding 11). No league payload — a test database, or one
+    ingested before the league was — is treated as historical.
+    """
+    try:
+        league = identity.league_payload(conn)
+    except (RuntimeError, identity.IdentityMismatch):
+        return None, True
+    leg = (league.get("settings") or {}).get("leg")
+    complete = league.get("status") == "complete" or not isinstance(leg, int)
+    return (leg if isinstance(leg, int) else None), complete
+
+
+def completed_weeks(conn: sqlite3.Connection) -> set[int]:
+    """Weeks that must be fully ingested: all of them, or those before this one."""
+    leg, complete = season_progress(conn)
+    if complete:
+        return set(EXPECTED_WEEKS)
+    return {w for w in EXPECTED_WEEKS if w < leg}
+
+
+def started_weeks(conn: sqlite3.Connection) -> set[int]:
+    """Weeks with matchups by now: every completed week, and the current one."""
+    leg, complete = season_progress(conn)
+    if complete:
+        return set(EXPECTED_WEEKS)
+    return {w for w in EXPECTED_WEEKS if w <= leg}
 
 
 @dataclass
@@ -29,27 +67,33 @@ class Check:
 
 
 def check_weeks_present(conn: sqlite3.Connection, season: str) -> Check:
+    expected = completed_weeks(conn)
     weeks = {
         r["fantasy_week"]
         for r in conn.execute(
             "SELECT DISTINCT fantasy_week FROM box_scores WHERE season = ?", (season,)
         )
     }
-    missing = sorted(EXPECTED_WEEKS - weeks)
+    missing = sorted(expected - weeks)
+    scope = "all 25 fantasy weeks" if expected == EXPECTED_WEEKS else "every completed week"
     return Check(
-        name="all 25 fantasy weeks ingested",
+        name=f"{scope} ingested",
         passed=not missing,
-        detail=f"{len(weeks)}/25 weeks present" + (f", missing {missing}" if missing else ""),
+        detail=f"{len(weeks & expected)}/{len(expected)} weeks present"
+        + (f", missing {missing}" if missing else ""),
     )
 
 
 def check_matchups_present(conn: sqlite3.Connection) -> Check:
+    expected = started_weeks(conn)
     weeks = {r["week"] for r in conn.execute("SELECT DISTINCT week FROM weekly_matchups_latest")}
-    missing = sorted(EXPECTED_WEEKS - weeks)
+    missing = sorted(expected - weeks)
+    scope = "all 25 weeks" if expected == EXPECTED_WEEKS else "every week so far"
     return Check(
-        name="all 25 weeks of matchups ingested",
+        name=f"{scope} of matchups ingested",
         passed=not missing,
-        detail=f"{len(weeks)}/25 weeks present" + (f", missing {missing}" if missing else ""),
+        detail=f"{len(weeks & expected)}/{len(expected)} weeks present"
+        + (f", missing {missing}" if missing else ""),
     )
 
 
@@ -60,8 +104,13 @@ def check_starter_coverage(conn: sqlite3.Connection, season: str) -> Check:
     distinction between "we failed to ingest him" and "his team was idle" is
     exactly the distinction that matters.
     """
+    weeks = sorted(completed_weeks(conn))
+    marks = ",".join("?" * len(weeks)) or "NULL"
+    # Completed weeks only. Mid-week, a starter whose team has not played yet
+    # has no rows for a reason, and the schedule — not the box scores — is what
+    # knows his games (lockin/slate.py).
     rows = conn.execute(
-        """
+        f"""
         SELECT m.week, m.roster_id, m.sleeper_id,
                COALESCE(p.full_name, '?') AS name,
                (SELECT COUNT(*) FROM box_scores b
@@ -70,10 +119,10 @@ def check_starter_coverage(conn: sqlite3.Connection, season: str) -> Check:
                    AND b.season = ?) AS n_games
           FROM weekly_matchups_latest m
           LEFT JOIN players p ON p.sleeper_id = m.sleeper_id
-         WHERE m.is_starter = 1
+         WHERE m.is_starter = 1 AND m.week IN ({marks})
          GROUP BY m.week, m.roster_id, m.sleeper_id
         """,
-        (season,),
+        (season, *weeks),
     ).fetchall()
 
     total = len(rows)
@@ -94,16 +143,17 @@ def check_starter_coverage(conn: sqlite3.Connection, season: str) -> Check:
 def check_game_links(conn: sqlite3.Connection) -> Check:
     """Link rate over fixtures that actually happened.
 
-    Postponed fixtures are excluded rather than counted as failures:
-    LeagueGameFinder returns played games, not the schedule, so a postponed
-    fixture has no NBA counterpart by construction.
+    Postponed fixtures are excluded rather than counted as failures: the NBA
+    schedule files a moved game under its new date, so a postponed fixture has
+    no counterpart on its old one by construction. Games not played yet are not
+    in the denominator either — and a season with none played yet has nothing to
+    link, which is a pass, not a 0% link rate.
     """
-    real = "occurred = 1 AND COALESCE(is_exhibition, 0) = 0"
+    real = f"{STATE} = 'final' AND COALESCE(is_exhibition, 0) = 0"
     total = conn.execute(f"SELECT COUNT(*) c FROM game_links WHERE {real}").fetchone()["c"]
     linked = conn.execute(
         f"SELECT COUNT(*) c FROM game_links WHERE {real} AND nba_game_id IS NOT NULL"
     ).fetchone()["c"]
-    rate = linked / total if total else 0.0
     offenders = [
         f"{r['game_date']} {r['team_a']}/{r['team_b']} ({r['sleeper_game_id']})"
         for r in conn.execute(
@@ -111,6 +161,13 @@ def check_game_links(conn: sqlite3.Connection) -> Check:
             " ORDER BY game_date LIMIT 20"
         )
     ]
+    if not total:
+        return Check(
+            name=f"played fixtures link to NBA schedule (>={GAME_LINK_THRESHOLD:.0%})",
+            passed=True,
+            detail="no fixtures played yet",
+        )
+    rate = linked / total
     return Check(
         name=f"played fixtures link to NBA schedule (>={GAME_LINK_THRESHOLD:.0%})",
         passed=rate >= GAME_LINK_THRESHOLD,
@@ -120,24 +177,33 @@ def check_game_links(conn: sqlite3.Connection) -> Check:
 
 
 def check_postponements(conn: sqlite3.Connection) -> Check:
-    """Two independent signals for "this fixture happened" must agree.
+    """Every fixture's evidence agrees with itself.
 
-    Sleeper says a game happened if any player recorded a stat line. The NBA
-    says so by having a game row at all. A fixture where those disagree means
-    either the ingest is incomplete or the team-pair join is wrong, and the
-    lock engine would then mis-score an unplayed final game.
+    Two ways it can fail. A fixture in state ``unknown`` is due or NBA-final
+    with nobody's stat line: usually an incomplete Sleeper feed, and the lock
+    engine would read every player in it as a DNP. And a fixture called
+    postponed that the NBA still has a game for means the team-pair join, or
+    the ingest, is wrong.
     """
-    rows = conn.execute(
-        "SELECT * FROM game_links WHERE occurred = 0 AND nba_game_id IS NOT NULL"
+    unknown = conn.execute(
+        f"SELECT * FROM game_links WHERE {STATE} = 'unknown' ORDER BY game_date"
     ).fetchall()
-    postponed = conn.execute("SELECT COUNT(*) c FROM game_links WHERE occurred = 0").fetchone()["c"]
+    contradicted = conn.execute(
+        f"SELECT * FROM game_links WHERE {STATE} = 'postponed' AND nba_game_id IS NOT NULL"
+    ).fetchall()
+    counts = dict(conn.execute(f"SELECT {STATE}, COUNT(*) FROM game_links GROUP BY 1").fetchall())
     return Check(
-        name="postponed fixtures agree between Sleeper and NBA",
-        passed=not rows,
-        detail=f"{postponed} postponed fixture(s), {len(rows)} disagreeing",
+        name="every fixture is final, scheduled or genuinely postponed",
+        passed=not unknown and not contradicted,
+        detail=f"{counts.get('postponed', 0)} postponed, {counts.get('scheduled', 0)} scheduled,"
+        f" {len(unknown)} unknown, {len(contradicted)} disagreeing with the NBA",
         offenders=[
+            f"{r['game_date']} {r['team_a']}/{r['team_b']} unknown: no stat lines, but due"
+            for r in unknown[:10]
+        ]
+        + [
             f"{r['game_date']} {r['team_a']}/{r['team_b']} has NBA game {r['nba_game_id']}"
-            for r in rows[:20]
+            for r in contradicted[:10]
         ],
     )
 
@@ -264,6 +330,34 @@ def check_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
     )
 
 
+def check_current_week_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
+    """Live readiness: every game this week has a tipoff, which is when a call expires.
+
+    A finished season needs none, and passes.
+    """
+    leg, complete = season_progress(conn)
+    opening = calendar.opening_night(conn, season)
+    name = "this week's games have tipoff times"
+    if complete or leg is None or opening is None:
+        return Check(name=name, passed=True, detail="season not in progress")
+    monday, sunday = calendar.week_bounds(leg, opening)
+    missing = conn.execute(
+        "SELECT game_date, home_team, away_team FROM nba_schedule"
+        " WHERE season = ? AND game_date BETWEEN ? AND ? AND tipoff_utc IS NULL",
+        (season, monday.isoformat(), sunday.isoformat()),
+    ).fetchall()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM nba_schedule WHERE season = ? AND game_date BETWEEN ? AND ?",
+        (season, monday.isoformat(), sunday.isoformat()),
+    ).fetchone()[0]
+    return Check(
+        name=name,
+        passed=not missing,
+        detail=f"{total - len(missing)}/{total} week {leg} games have tipoff_utc",
+        offenders=[f"{r[0]} {r[2]} @ {r[1]}" for r in missing[:20]],
+    )
+
+
 def run(conn: sqlite3.Connection, season: str, snapshot_root: Path | None = None) -> list[Check]:
     extra = [check_snapshot_drift(season, snapshot_root)] if snapshot_root else []
     return extra + [
@@ -276,4 +370,5 @@ def run(conn: sqlite3.Connection, season: str, snapshot_root: Path | None = None
         check_exhibitions(conn),
         check_team_rows(conn),
         check_tipoffs(conn, season),
+        check_current_week_tipoffs(conn, season),
     ]

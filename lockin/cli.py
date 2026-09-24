@@ -35,6 +35,7 @@ import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -56,9 +57,9 @@ from lockin import serve as serve_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config, load_env_file
 from lockin.core import projections as core_projections
-from lockin.ingest import nba as nba_ingest
+from lockin.ingest import run as ingest_run
 from lockin.ingest import sleeper as sleeper_ingest
-from lockin.store import db, snapshots
+from lockin.store import db, identity, snapshots
 from lockin.store.db import session
 
 CURRENT_WEEKS = "current"
@@ -147,9 +148,17 @@ def _season(cfg: Config) -> Iterator[sqlite3.Connection]:
     `ingest` is the one command that creates; see `lockin.store.db.connect`.
     Every other command is asking a question about a season, and there is no
     honest answer to give without one.
+
+    It must also be the season configured: a `.env` still naming last season's
+    file, or a `LOCKIN_SEASON` left behind at rollover, is refused here rather
+    than answered from the wrong year (lockin/store/identity.py).
     """
     try:
         with session(cfg.db_path, create=False) as conn:
+            try:
+                identity.check(conn, cfg.league_id, cfg.season, db_path=cfg.db_path)
+            except identity.IdentityMismatch as exc:
+                raise click.ClickException(str(exc)) from None
             yield conn
     except db.DatabaseMissing as exc:
         raise _missing_db(exc.db_path) from None
@@ -172,89 +181,24 @@ def ingest(weeks: str | None, skip_nba: bool, skip_tipoffs: bool) -> None:
     depend on remembering a flag. See `lockin.ingest.sleeper.ingest_players`.
     """
     cfg = Config.from_env()
-    # `current` needs the league payload, which the ingest fetches below anyway —
-    # so it costs no extra call, and cannot disagree with the run it belongs to.
     from_league = (weeks or "").strip().lower() == CURRENT_WEEKS
-    week_list = [] if from_league else _parse_weeks(weeks)
-    client = sleeper_ingest.SleeperClient()
+    week_list = None if from_league else _parse_weeks(weeks)
 
     # The one command that may bring a database into being: this is how a season
     # starts, on a fresh clone and on day one of the next one.
     with session(cfg.db_path, create=True) as conn:
-        click.echo(f"league {cfg.league_id} season {cfg.season} -> {cfg.db_path}")
-
-        league = sleeper_ingest.ingest_league(conn, client, cfg.league_id)
-        roster_positions = league["roster_positions"]
-        click.echo(f"  league      slots={' '.join(roster_positions[:6])}")
-
-        if from_league:
-            try:
-                week_list = sleeper_ingest.current_weeks(league)
-            except ValueError as exc:
-                raise click.ClickException(str(exc)) from None
-            named = ", ".join(str(w) for w in week_list)
-            click.echo(f"  weeks       current -> {named}")
-
-        n = sleeper_ingest.ingest_rosters(conn, client, cfg.league_id)
-        click.echo(f"  rosters     {n} roster-player rows")
-
-        n = sleeper_ingest.ingest_users(conn, client, cfg.league_id)
-        click.echo(f"  managers    {n} display names")
-
-        n = sleeper_ingest.ingest_players(conn, client)
-        click.echo(f"  players     {n} (live snapshot)")
-        days, status_rows = sleeper_ingest.status_coverage(conn)
-        click.echo(f"  status      {status_rows} availability rows across {days} day(s)")
-
-        total_rows = total_played = snapshots_written = 0
-        for week in week_list:
-            rows, played = sleeper_ingest.ingest_week_stats(conn, client, cfg.season, week)
-            _, snap = sleeper_ingest.ingest_matchups(
+        try:
+            ingest_run.run_ingest(
                 conn,
-                client,
-                cfg.league_id,
-                week,
-                roster_positions,
-                snapshot_root=cfg.snapshot_root,
-                season=cfg.season,
+                cfg,
+                client=sleeper_ingest.SleeperClient(),
+                weeks=week_list,
+                skip_nba=skip_nba,
+                skip_tipoffs=skip_tipoffs,
+                echo=click.echo,
             )
-            total_rows += rows
-            total_played += played
-            snapshots_written += 1 if snap else 0
-            marker = "  *snapshot changed*" if snap else ""
-            click.echo(f"  week {week:>2}     {rows:>5} player-games ({played} played){marker}")
-            # Release the write lock between weeks. Holding it for the whole run
-            # is what would make a digest firing mid-ingest fail outright.
-            db.checkpoint(conn)
-        click.echo(f"  box scores  {total_rows} rows, {total_played} played")
-        click.echo(
-            f"  snapshots   {snapshots_written} new/changed of {len(week_list)} weeks"
-            f" -> {cfg.snapshot_root}"
-        )
-
-        player_rows, team_rows = sleeper_ingest.refresh_row_kinds(conn)
-        click.echo(f"  row kinds   {player_rows} player, {team_rows} team-aggregate")
-
-        occurred, postponed = sleeper_ingest.refresh_game_occurrence(conn)
-        click.echo(f"  fixtures    {occurred} played, {postponed} postponed")
-
-        if not skip_nba:
-            sched = nba_ingest.ingest_schedule(conn, cfg.season)
-            note = f"{sched.written} NBA games, {sched.unplayed} not yet played"
-            if sched.undecided:
-                note += f", {sched.undecided} without teams yet"
-            click.echo(f"  schedule    {note}")
-            exhibitions = nba_ingest.mark_exhibitions(conn, cfg.season)
-            click.echo(f"  exhibitions {exhibitions} non-NBA fixture(s) excluded")
-
-            # Link once to find what is missing, sweep the scoreboard to fill
-            # tipoffs and backfill non-regular-season games, then link again.
-            nba_ingest.link_games(conn, cfg.season)
-            if not skip_tipoffs:
-                filled, non_rs = nba_ingest.ingest_scoreboard(conn, cfg.season)
-                click.echo(f"  tipoffs     {filled} filled, {non_rs} non-regular-season game(s)")
-            linked, unlinked = nba_ingest.link_games(conn, cfg.season)
-            click.echo(f"  game links  {linked} linked, {unlinked} unlinked")
+        except ingest_run.IngestRefused as exc:
+            raise click.ClickException(str(exc)) from None
 
     click.echo("done. run `lockin reconcile` to check the Phase 0 gates.")
 
@@ -291,6 +235,17 @@ def observe(weeks: str | None) -> None:
     client = sleeper_ingest.SleeperClient()
     stamp = sleeper_ingest.snapshot_stamp()
     click.echo(f"league {cfg.league_id} season {cfg.season} -> {cfg.snapshot_root}")
+
+    # Snapshot paths are keyed by season, so a league from another season would
+    # file its payloads under this one's weeks. One call, before any file.
+    league = sleeper_ingest.fetch_league(client, cfg.league_id)
+    try:
+        identity.check_payload(league, cfg.league_id, cfg.season)
+    except identity.IdentityMismatch as exc:
+        raise click.ClickException(str(exc)) from None
+    finals = sleeper_ingest.mark_final_weeks(league, cfg.snapshot_root, cfg.season, stamp=stamp)
+    if finals:
+        click.echo(f"  final       week(s) {', '.join(map(str, finals))} now scored")
 
     changed = 0
     for week in week_list:
@@ -336,14 +291,17 @@ def observe(weeks: str | None) -> None:
 def repair(
     weeks: str | None, do_apply: bool, show_stats: bool, as_json: bool, min_observations: int
 ) -> None:
-    """Restore the original lock selections from the snapshot archive.
+    """Restore the archive's consensus lock selections to the database.
 
     Sleeper rewrites completed seasons, but it does not lose them: a corrupted
     starter value reverts to the stored one at the next rewrite, and the value a
     slot keeps returning to agrees with the oldest snapshot 97% of the time
     (implementation-plan.md §12, "The locks are intact"). So with enough
-    observations the original is recoverable by counting, and needs nothing from
-    Sleeper.
+    observations the stored value is usually recoverable by counting, and needs
+    nothing from Sleeper. "Usually": a plurality or a tie is flagged as one.
+
+    Only weeks Sleeper has finished scoring, and only snapshots taken after
+    that: during a live week an early zero is a reading, not corruption.
 
     Reports by default and writes only under `--apply`. The write is an append:
     corrupted rows stay in `weekly_matchups` as history, readers go through
@@ -394,6 +352,7 @@ def repair(
             week_list,
             min_observations=min_observations,
         )
+        still_open = repair_mod.open_weeks(cfg.snapshot_root, cfg.season, week_list)
 
         if as_json:
             click.echo(
@@ -401,6 +360,7 @@ def repair(
                     {
                         "applied": do_apply,
                         "skipped_weeks": skipped,
+                        "open_weeks": still_open,
                         "consensus": [
                             {
                                 "week": r.consensus.week,
@@ -411,6 +371,7 @@ def repair(
                                 "votes": r.consensus.votes,
                                 "observations": r.consensus.observations,
                                 "tied": r.consensus.tied,
+                                "strength": r.consensus.strength,
                             }
                             for r in repairs
                         ],
@@ -420,9 +381,15 @@ def repair(
             )
         else:
             click.echo(f"league {cfg.league_id} season {cfg.season} <- {cfg.snapshot_root}")
+            if still_open:
+                click.echo(
+                    f"  open        weeks {still_open} — not scored yet; live polls are"
+                    " readings, not evidence"
+                )
             if skipped:
                 click.echo(
-                    f"  skipped     weeks {skipped} — fewer than {min_observations} observations"
+                    f"  skipped     weeks {skipped} — fewer than {min_observations} final"
+                    " observations"
                 )
             by_week: dict[int, list[repair_mod.Repair]] = {}
             for r in repairs:
@@ -431,7 +398,7 @@ def repair(
                 click.echo(f"  week {week:>2}     {len(items)} starter values")
                 for r in items[:3]:
                     c = r.consensus
-                    flag = "  TIED" if c.tied else ""
+                    flag = "" if c.strength == "majority" else f"  {c.strength.upper()}"
                     click.echo(
                         f"               roster {c.roster_id} player {c.sleeper_id}"
                         f"  {r.db_value} -> {c.value}"
@@ -527,9 +494,37 @@ def locks(as_json: bool, profiles: bool) -> None:
     show_default=True,
     help="First held-out fantasy week. Earlier weeks tuned the model.",
 )
-def calibrate(as_json: bool, draws: int, holdout_from: int) -> None:
+@click.option(
+    "--cold-start",
+    is_flag=True,
+    help="Check the first month, with no burn-in, against the digest's abstention threshold.",
+)
+def calibrate(as_json: bool, draws: int, holdout_from: int, cold_start: bool) -> None:
     """Check the projection layer's quantiles against what happened. Nonzero on failure."""
     cfg = Config.from_env()
+    if cold_start:
+        with _season(cfg) as conn:
+            sample, pool = calibrate_mod.evaluate_cold_start(
+                conn, cfg.season, n_draws=min(draws, 500)
+            )
+        if not as_json:
+            click.echo(f"projected {len(sample)} player-games in weeks 1-4, no burn-in\n")
+            click.echo("  pool rows before     n    P(> q0.90)   P(> q0.99)")
+            edges = [0, 100, 200, 300, 400, 500, 700, 1000, 1500, 2500, 10**9]
+            for lo, hi in zip(edges, edges[1:], strict=False):
+                mask = (pool >= lo) & (pool < hi)
+                if mask.sum() < 30:
+                    continue
+                band = sample._select(mask)
+                a, b = calibrate_mod._z(band, 0.90), calibrate_mod._z(band, 0.99)
+                label = f"{lo}-{hi}" if hi < 10**9 else f"{lo}+"
+                click.echo(
+                    f"  {label:<16} {mask.sum():>5}   {a[0]:.3f} ({a[1]:+.1f})"
+                    f"   {b[0]:.4f} ({b[1]:+.1f})"
+                )
+            click.echo()
+        _render(calibrate_mod.cold_start_checks(sample, pool), "Cold-start calibration", as_json)
+        return
     with _season(cfg) as conn:
         checks, sample = calibrate_mod.run(
             conn, cfg.season, n_draws=draws, holdout_from=holdout_from
@@ -840,7 +835,12 @@ def digest(
     removes that noise instead of averaging over it.
     """
     cfg = Config.from_env()
-    as_of = as_of or clock.today_iso(cfg.timezone)
+    today = clock.today_iso(cfg.timezone)
+    as_of = as_of or today
+    # A run for today is live: it reads today's rosters, refuses an unfinished
+    # slate, and closes calls whose tip has passed. A past date is a replay.
+    live = as_of == today
+    now = datetime.now(UTC) if live else None
     banked = _parse_locked(locked)
 
     with _season(cfg) as conn:
@@ -849,10 +849,16 @@ def digest(
             raise click.ClickException(
                 f"no roster for user {cfg.user_id}; run `lockin ingest` or pass --roster"
             )
-        ctx = digest_mod.load_context(conn, cfg.season)
         try:
-            report = digest_mod.build(
-                ctx, roster_id, as_of, n_sims=sims, n_paths=sims, locked=banked
+            report = digest_mod.morning(
+                conn,
+                cfg.season,
+                roster_id,
+                as_of,
+                n_sims=sims,
+                locked=banked,
+                live=live,
+                now=now,
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from None
@@ -874,6 +880,8 @@ def digest(
                     "opponent_projected": report.opponent_total,
                     "margin": report.margin,
                     "banked": {report.names.get(k, k): v for k, v in report.banked.items()},
+                    "state_source": report.state_source,
+                    "opponent_state": report.opponent_state,
                     "calls": [
                         {
                             "player": c.name,
@@ -881,9 +889,10 @@ def digest(
                             "date": projections_mod.date_of(c.day),
                             "score": c.score,
                             "action": "LOCK" if c.lock else "PASS",
-                            "break_even": c.break_even,
+                            "break_even": c.break_even if np.isfinite(c.break_even) else None,
                             "p_win_lock": c.p_win_lock,
                             "p_win_pass": c.p_win_pass,
+                            "expires_utc": c.expires_utc,
                         }
                         for c in report.calls
                     ],
@@ -912,13 +921,16 @@ def digest(
 
     click.echo(digest_mod.render(report))
     if report.note is None:
-        source = (
-            "banked state as given on the command line"
-            if banked is not None
-            else "banked state assumes you followed this engine so far — the\n"
-            "  noisiest number here; pass --locked when you know it (§20).\n"
-            "  Live it comes from the poll history, which does not exist yet (§15)"
-        )
+        source = {
+            "supplied": "banked state as given on the command line",
+            "inferred": f"banked state read from the {report.poll_observed_at} poll;\n"
+            "  last night's games are the calls above, whatever you did with them",
+            "assumed": "banked state ASSUMES you followed this engine on every\n"
+            "  closed window — a replay with no poll from that morning;\n"
+            "  pass --locked when you know it (§20)",
+        }.get(report.state_source, "banked state unknown")
+        if report.opponent_state == "stand-in":
+            source += ".\n  Opponent's locks: the greedy base policy stands in (no poll)"
         click.echo(
             f"\n  {source}."
             f"\n  Thresholds carry 1-3 points of Monte Carlo noise at --sims {sims};"
@@ -1124,19 +1136,32 @@ def explain(
     value, or the explanation would describe a different state from the digest.
     """
     cfg = Config.from_env()
-    as_of = as_of or clock.today_iso(cfg.timezone)
+    today = clock.today_iso(cfg.timezone)
+    as_of = as_of or today
+    # The same live/replay rule as `digest`, or a traded player's week — read
+    # from today's rosters live, from the box scores in a replay — could
+    # differ from the one the digest described.
+    live = as_of == today
+    now = datetime.now(UTC) if live else None
     banked = _parse_locked(locked)
 
     with _season(cfg) as conn:
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
         if roster_id is None:
             raise click.ClickException(f"no roster for user {cfg.user_id}")
-        ctx = digest_mod.load_context(conn, cfg.season)
         try:
+            ctx = digest_mod.load_context(conn, cfg.season)
             report = digest_mod.build(
-                ctx, roster_id, as_of, n_sims=sims, n_paths=sims, locked=banked
+                ctx,
+                roster_id,
+                as_of,
+                n_sims=sims,
+                n_paths=sims,
+                locked=banked,
+                live=live,
+                now=now,
             )
-        except ValueError as exc:
+        except (ValueError, projections_mod.NoGamesYet) as exc:
             raise click.ClickException(str(exc)) from None
         if report.note:
             raise click.ClickException(report.note)
@@ -1155,9 +1180,9 @@ def explain(
             raise click.ClickException(f"{player!r} matches several: {names}")
         pid = matches[0]
 
-        games = digest_mod.lineup_as_of(
-            ctx.panel, ctx.scores, [pid], report.week, report.known_through
-        )[pid]
+        games = digest_mod.lineup_as_of(ctx, [pid], report.week, report.known_through, live=live)[
+            pid
+        ]
         dist = core_projections.EWMAProjectionSource(
             ctx.panel, verify_mod.scoring_settings(conn)
         ).project(

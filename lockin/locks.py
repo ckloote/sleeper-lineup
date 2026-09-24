@@ -26,6 +26,7 @@ from lockin.core.locks import (
     profile_manager,
 )
 from lockin.core.scoring import score_recorded
+from lockin.projections import FINAL_FIXTURE
 from lockin.store.db import now_iso
 from lockin.verify import Check, scoring_settings
 
@@ -41,7 +42,7 @@ def _game_sequence(conn: sqlite3.Connection, season: str) -> dict[tuple[str, int
     """
     seq: dict[tuple[str, int], list[dict]] = defaultdict(list)
     rows = conn.execute(
-        """
+        f"""
         SELECT b.sleeper_id, b.fantasy_week, b.game_date, b.played,
                b.raw_stats, b.sleeper_game_id
           FROM box_scores b
@@ -49,7 +50,7 @@ def _game_sequence(conn: sqlite3.Connection, season: str) -> dict[tuple[str, int
          WHERE b.season = ?
            AND COALESCE(b.is_team_row, 0) = 0
            AND COALESCE(g.is_exhibition, 0) = 0
-           AND COALESCE(g.occurred, 1) = 1
+           AND {FINAL_FIXTURE}
          ORDER BY b.sleeper_id, b.fantasy_week, b.game_date
         """,
         (season,),

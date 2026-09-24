@@ -29,8 +29,8 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def conn():
-    c = sqlite3.connect(cfg.db_path)
+def conn(season_db):
+    c = sqlite3.connect(season_db)
     c.row_factory = sqlite3.Row
     apply_schema(c)
     yield c

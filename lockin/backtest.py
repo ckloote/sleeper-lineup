@@ -322,7 +322,9 @@ def run_backtest(
         for week, day in week_start.items()
     }
 
-    cache = SimulationCache(source=source, n_sims=n_sims, dnp_scale=dnp_scale)
+    cache = SimulationCache(
+        source=source, n_sims=n_sims, dnp_scale=dnp_scale, ride_unprojectable=True
+    )
 
     result = BacktestResult(rows=[])
     for (week, roster_id), starters in sorted(lineups.items()):

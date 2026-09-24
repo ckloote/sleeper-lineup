@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from lockin import digest as digest_mod
+from lockin.backtest import player_games
 from lockin.config import Config
 from lockin.core.winprob import apply_base_policy, base_policy_thresholds
 from lockin.projections import day_index
@@ -46,8 +47,8 @@ every branch of the digest has something to say."""
 
 
 @pytest.fixture(scope="module")
-def conn():
-    c = sqlite3.connect(cfg.db_path)
+def conn(season_db):
+    c = sqlite3.connect(season_db)
     c.row_factory = sqlite3.Row
     apply_schema(c)
     yield c
@@ -76,7 +77,7 @@ def test_lineup_as_of_blanks_the_future_but_keeps_the_schedule(ctx, roster_id):
     """Which nights he plays is known in advance; what he scores is not."""
     known_through = day_index(AS_OF) - 1
     starters = ctx.lineup_ids(12, roster_id)
-    lineup = digest_mod.lineup_as_of(ctx.panel, ctx.scores, starters, 12, known_through)
+    lineup = digest_mod.lineup_as_of(ctx, starters, 12, known_through)
 
     assert lineup, "week 12 should have starters with games"
     future = [g for games in lineup.values() for g in games if g.day > known_through]
@@ -85,7 +86,7 @@ def test_lineup_as_of_blanks_the_future_but_keeps_the_schedule(ctx, roster_id):
 
     # The schedule survives: a player with four games in the week still has
     # four, or the continuation value is computed over the wrong horizon.
-    unfiltered = {pid: digest_mod.player_games(ctx.panel, ctx.scores, pid, 12) for pid in lineup}
+    unfiltered = {pid: player_games(ctx.panel, ctx.scores, pid, 12) for pid in lineup}
     assert {pid: len(g) for pid, g in lineup.items()} == {
         pid: len(g) for pid, g in unfiltered.items()
     }
@@ -149,7 +150,7 @@ def test_backtest_cutoffs_are_unchanged(ctx, roster_id):
     """
     week, day = 12, day_index("2026-01-07")
     starters = ctx.lineup_ids(week, roster_id)
-    lineup = digest_mod.lineup_as_of(ctx.panel, ctx.scores, starters, week, day)
+    lineup = digest_mod.lineup_as_of(ctx, starters, week, day)
 
     for pid, games in lineup.items():
         remaining = [g for g in games if g.day > day]
@@ -180,7 +181,7 @@ def test_an_idle_night_can_never_be_banked(ctx, roster_id):
     week = 12
     known_through = day_index("2026-01-06")
     starters = ctx.lineup_ids(week, roster_id)
-    lineup = digest_mod.lineup_as_of(ctx.panel, ctx.scores, starters, week, known_through)
+    lineup = digest_mod.lineup_as_of(ctx, starters, week, known_through)
 
     # Someone with at least two games left, so there is an intervening night.
     candidates = [
@@ -217,11 +218,9 @@ def test_forward_nights_assume_no_action(ctx, roster_id):
     week = 12
     known_through = day_index("2026-01-06")
     starters = ctx.lineup_ids(week, roster_id)
-    mine = digest_mod.lineup_as_of(ctx.panel, ctx.scores, starters, week, known_through)
+    mine = digest_mod.lineup_as_of(ctx, starters, week, known_through)
     opponent_id = ctx.opponents[(week, roster_id)]
-    theirs = digest_mod.lineup_as_of(
-        ctx.panel, ctx.scores, ctx.lineup_ids(week, opponent_id), week, known_through
-    )
+    theirs = digest_mod.lineup_as_of(ctx, ctx.lineup_ids(week, opponent_id), week, known_through)
 
     nights = sorted({g.day for games in mine.values() for g in games if g.day > known_through})
     assert len(nights) >= 2
@@ -257,7 +256,7 @@ def test_the_asked_player_is_priced_differently_from_his_teammates(ctx, roster_i
     week = 12
     known_through = day_index("2026-01-06")
     starters = ctx.lineup_ids(week, roster_id)
-    lineup = digest_mod.lineup_as_of(ctx.panel, ctx.scores, starters, week, known_through)
+    lineup = digest_mod.lineup_as_of(ctx, starters, week, known_through)
 
     night = min(g.day for games in lineup.values() for g in games if g.day > known_through)
     pid = next(
@@ -292,17 +291,16 @@ def test_the_digest_fits_a_phone(report):
 
 
 def test_a_call_agrees_with_its_own_break_even(report):
-    """LOCK iff the score cleared the printed break-even.
+    """LOCK exactly when the score reaches the printed break-even.
 
-    Both come out of the same simulation, so disagreement means the two were
-    computed against different state — which is exactly what the hoisted
-    `standing_thresholds` call in `build` exists to prevent.
+    Both come out of the same simulation — `decision_for` returns them
+    together — so disagreement would mean they were computed against different
+    state. The break-even is the lowest score worth banking, so reaching it is
+    a lock and falling half a point short is not (review 2026-09-23).
     """
     assert report.calls, "week 12 midweek should have calls to make"
     for call in report.calls:
-        if np.isnan(call.break_even):
-            continue
-        assert call.lock == (call.score > call.break_even), call
+        assert call.lock == (call.score >= call.break_even), call
 
 
 def test_render_survives_a_week_with_nothing_to_decide(ctx, roster_id):
@@ -412,11 +410,11 @@ def test_walk_locks_matches_the_full_replay(ctx, roster_id):
 
     week = 12
     starters = ctx.lineup_ids(week, roster_id)
-    mine = {pid: digest_mod.player_games(ctx.panel, ctx.scores, pid, week) for pid in starters}
+    mine = {pid: player_games(ctx.panel, ctx.scores, pid, week) for pid in starters}
     mine = {pid: games for pid, games in mine.items() if games}
     opponent_id = ctx.opponents[(week, roster_id)]
     theirs = {
-        pid: digest_mod.player_games(ctx.panel, ctx.scores, pid, week)
+        pid: player_games(ctx.panel, ctx.scores, pid, week)
         for pid in ctx.lineup_ids(week, opponent_id)
     }
     theirs = {pid: games for pid, games in theirs.items() if games}
@@ -511,3 +509,24 @@ def test_thresholds_are_rendered_without_false_precision(ctx, roster_id):
             checked += 1
             assert not re.search(r"\d+\.\d", line), f"decimal threshold: {line!r}"
     assert checked >= len(report.rules)
+
+
+def test_the_reconstruction_no_longer_consumes_the_calls_it_should_deliver(ctx, roster_id):
+    """Review 2026-09-23, finding 2, reproduced on the recorded season.
+
+    Replaying the engine's own policy through yesterday banked last night's
+    recommended locks and then skipped those players: roster 4 on 2026-01-07
+    showed two banked players and no calls at all, and 2026-01-10 lost Devin
+    Booker's 48.5. A replay still reconstructs — there is no poll from those
+    mornings — but only windows that have closed, and says it is assuming.
+    """
+    assert roster_id == 4
+    wed = digest_mod.build(ctx, roster_id, "2026-01-07")
+    calls = {c.sleeper_id: c for c in wed.calls}
+    assert wed.state_source == "assumed"
+    assert calls["1787"].score == 47.5 and calls["1787"].lock
+    assert not set(wed.banked) & set(calls), "nothing both banked and called"
+
+    sat = digest_mod.build(ctx, roster_id, "2026-01-10")
+    calls = {c.sleeper_id: c for c in sat.calls}
+    assert calls["1648"].score == 48.5 and calls["1648"].lock

@@ -31,6 +31,19 @@ CREATE TABLE IF NOT EXISTS league_settings (
     PRIMARY KEY (league_id, season)
 );
 
+-- Which league and season this file belongs to. One row, ever.
+--
+-- Written by the first `lockin ingest` and compared against the configuration by
+-- every command after it (lockin/store/identity.py). One file per season was the
+-- design from the start; this row is what makes it enforced rather than a line
+-- in day-one.md, because nothing below it carries a season column.
+CREATE TABLE IF NOT EXISTS db_identity (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+    league_id       TEXT NOT NULL,
+    season          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS rosters (
     league_id       TEXT NOT NULL,
     roster_id       INTEGER NOT NULL,
@@ -84,7 +97,11 @@ CREATE TABLE IF NOT EXISTS nba_schedule (
     game_date       TEXT NOT NULL,
     tipoff_utc      TEXT,
     home_team       TEXT NOT NULL,
-    away_team       TEXT NOT NULL
+    away_team       TEXT NOT NULL,
+    -- The NBA's own status as of the last fetch: 1 scheduled, 2 in progress,
+    -- 3 final. NULL for rows written before 2026-09-23. This, not the absence
+    -- of box scores, is what says a game has not happened yet.
+    status          INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_nba_schedule_date ON nba_schedule (game_date);
@@ -106,8 +123,22 @@ CREATE INDEX IF NOT EXISTS idx_nba_schedule_date ON nba_schedule (game_date);
 -- final fixture (CHI/MIA, 2026-01-08) was postponed to 2026-01-29, and he
 -- counted his last played game rather than a zero.
 --
--- Derived from Sleeper alone — a fixture where no player recorded a stat line
--- did not happen — and cross-checked against nba_game_id being resolvable.
+-- `state` is set by `classify_fixtures` (lockin/ingest/sleeper.py) from three
+-- pieces of evidence: whether anyone has a stat line, what the NBA says the game's
+-- status is, and whether the NBA still lists the game on this date at all. It
+-- used to be derived from the first alone — "nobody recorded a stat line, so it
+-- was postponed" — which is equally true of a game that has not been played
+-- yet, and removed every future fixture from the digest (review finding 1).
+--
+--   final        stat lines exist; the game happened
+--   in_progress  the NBA says it is being played
+--   scheduled    not played, not yet due
+--   postponed    the NBA no longer lists it on this date
+--   unknown      the evidence disagrees: past-dated or NBA-final with no stat
+--                lines. Usually an incomplete feed. Readers must not guess.
+--
+-- `occurred` is kept in step for older readers: final/in_progress 1, postponed
+-- 0, otherwise NULL.
 CREATE TABLE IF NOT EXISTS game_links (
     sleeper_game_id TEXT PRIMARY KEY,
     nba_game_id     TEXT,
@@ -116,6 +147,7 @@ CREATE TABLE IF NOT EXISTS game_links (
     team_b          TEXT NOT NULL,
     occurred        INTEGER,         -- 1 played, 0 postponed/cancelled, NULL unknown
     is_exhibition   INTEGER,         -- 1 if not a real NBA fixture (All-Star Game)
+    state           TEXT,            -- see above
     FOREIGN KEY (nba_game_id) REFERENCES nba_schedule (nba_game_id)
 );
 
@@ -180,12 +212,45 @@ CREATE TABLE IF NOT EXISTS box_scores (
 CREATE INDEX IF NOT EXISTS idx_box_player_week ON box_scores (sleeper_id, fantasy_week);
 CREATE INDEX IF NOT EXISTS idx_box_week ON box_scores (season, fantasy_week);
 CREATE INDEX IF NOT EXISTS idx_box_date ON box_scores (game_date);
+-- "His last game on or before this date", which the slate asks per starter
+-- (lockin/slate.py). Without it SQLite scans the season: 15ms a lookup, 1,500x.
+CREATE INDEX IF NOT EXISTS idx_box_player_date ON box_scores (sleeper_id, game_date);
 
+-- LEGACY, no longer written (2026-09-23). One row per player per DATE, flagged
+-- players only, so it could not record a designation being cleared — a second
+-- capture that day inserted nothing and the morning's Out stood — and a later
+-- capture overwrote an earlier one, losing what was known before a decision.
+-- Kept for the days it holds; `player_status_events` replaces it.
 CREATE TABLE IF NOT EXISTS player_status (
     sleeper_id      TEXT NOT NULL,
     as_of           TEXT NOT NULL,
     designation     TEXT,            -- OUT / DOUBTFUL / QUESTIONABLE / PROBABLE / null
     PRIMARY KEY (sleeper_id, as_of)
+);
+
+-- One row per read of /players/nba: the evidence that a capture happened at all.
+-- A day on which nobody was injured writes no designation, and without this
+-- row it would be indistinguishable from a day the cron did not run.
+CREATE TABLE IF NOT EXISTS status_captures (
+    capture_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at     TEXT NOT NULL,   -- UTC timestamp, not a date
+    players_seen    INTEGER NOT NULL,
+    flagged         INTEGER NOT NULL
+);
+
+-- Availability as a series of changes, each stamped with when it was SEEN.
+--
+-- A row is written when a player's designation differs from his previous one,
+-- including a change to NULL — cleared, or healthy. Replaying the events up to a
+-- moment gives the status as known then, which is the only question start/sit
+-- evaluation can ask honestly: what did the manager know before tip, not what
+-- was true by evening. A player with no row has never carried a designation.
+CREATE TABLE IF NOT EXISTS player_status_events (
+    sleeper_id      TEXT NOT NULL,
+    observed_at     TEXT NOT NULL,
+    designation     TEXT,            -- verbatim from Sleeper; NULL = none
+    capture_id      INTEGER NOT NULL REFERENCES status_captures (capture_id),
+    PRIMARY KEY (sleeper_id, observed_at)
 );
 
 
@@ -227,25 +292,33 @@ CREATE TABLE IF NOT EXISTS weekly_matchup_teams (
 );
 
 
--- Latest observation per player-week / team-week.
+-- The latest observation of each roster-week, and only that one.
 --
 -- weekly_matchups is append-only, so after two ingests every player-week has
 -- two rows. Any reader that forgets this double-counts — `SUM(counted_points)`
 -- silently returns twice the team's score. Read through these views, never the
 -- base tables, unless you specifically want the polling history.
 --
+-- A POLL is one ingest of one roster-week: a weekly_matchup_teams row and the
+-- player rows written with the same `observed_at`. The view returns the players
+-- of the latest poll, not the latest row per player. Those differ exactly when
+-- somebody leaves: until 2026-09-23 the view chose per player, so a starter
+-- dropped between two polls stayed "current" beside his replacement and the
+-- digest could simulate seven starters (review finding 4). Every writer
+-- therefore writes whole polls — ingest from the payload's full membership,
+-- `lockin repair` by copying the poll it corrects.
+--
 -- ISO-8601 `observed_at` sorts lexicographically, so MAX() is the latest.
 CREATE VIEW IF NOT EXISTS weekly_matchups_latest AS
 SELECT m.*
   FROM weekly_matchups m
   JOIN (
-        SELECT week, roster_id, sleeper_id, MAX(observed_at) AS mx
-          FROM weekly_matchups
-         GROUP BY week, roster_id, sleeper_id
+        SELECT week, roster_id, MAX(observed_at) AS mx
+          FROM weekly_matchup_teams
+         GROUP BY week, roster_id
        ) t
     ON t.week = m.week
    AND t.roster_id = m.roster_id
-   AND t.sleeper_id = m.sleeper_id
    AND t.mx = m.observed_at;
 
 CREATE VIEW IF NOT EXISTS weekly_matchup_teams_latest AS
@@ -420,6 +493,11 @@ CREATE TABLE IF NOT EXISTS recommendations (
     ev_pass         REAL,
     win_prob_delta  REAL,
     rationale       TEXT,
+    -- The run this row belongs to (digest_runs.run_id). Rows are inserted,
+    -- never replaced: two runs in one second used to share `generated_at` and
+    -- merge under OR REPLACE, so a page could show half of each (review 12).
+    run_id          TEXT,
+    expires_utc     TEXT,            -- a call's deadline: his next tipoff
     PRIMARY KEY (generated_at, week, sleeper_id, action, for_day)
 );
 
@@ -453,11 +531,66 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     -- it reads yesterday's box scores, makes confident calls, and says nothing.
     last_ingest_at      TEXT,
     note                TEXT,
+    -- Provenance: enough to say what a recommendation was computed from.
+    run_id              TEXT,            -- unique per run; recommendations join on it
+    state_source        TEXT,            -- supplied / inferred / assumed
+    opponent_state      TEXT,            -- inferred / stand-in
+    poll_observed_at    TEXT,            -- the poll the state was read from
+    ingest_run_id       INTEGER,         -- the completed ingest_runs row it read
+    n_sims              INTEGER,
+    seed                INTEGER,
+    model               TEXT,            -- lockin version and projection parameters
+    abstained           INTEGER,         -- 1 if it declined to advise
     PRIMARY KEY (generated_at, roster_id)
+);
+
+-- What a run treated as banked, per player. The total alone cannot be audited.
+CREATE TABLE IF NOT EXISTS digest_banked (
+    run_id          TEXT NOT NULL,
+    sleeper_id      TEXT NOT NULL,
+    score           REAL NOT NULL,
+    PRIMARY KEY (run_id, sleeper_id)
+);
+
+-- The warnings a run printed. The notification carried them and the page did
+-- not, so the one warning with a deadline — a final-game DNP risk — vanished
+-- the moment the notification was dismissed.
+CREATE TABLE IF NOT EXISTS digest_warnings (
+    run_id          TEXT NOT NULL,
+    sleeper_id      TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    detail          TEXT NOT NULL,
+    short           TEXT,
+    PRIMARY KEY (run_id, sleeper_id, kind)
 );
 
 
 -- ------------------------------------------------------------------ bookkeeping
+
+-- Data migrations that have run, by name (lockin/store/db.py). Additive column
+-- changes need no record — they are detectable from PRAGMA table_info — but a
+-- migration that rewrites data must run exactly once, and must be visible
+-- afterwards as having run.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name            TEXT PRIMARY KEY,
+    applied_at      TEXT NOT NULL
+);
+
+-- One row per `lockin ingest` run: started, then completed — or not.
+--
+-- Freshness used to be the newest finished row of `ingest_log`, which records
+-- sub-steps. A players refresh this morning after a stats fetch yesterday read
+-- as fresh stats; a run that failed after committing its first week read as
+-- a complete one (review finding 9). A run is `complete` only when every step
+-- finished, and only a complete run covering the week vouches for the digest.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    run_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT,            -- NULL until complete
+    weeks           TEXT NOT NULL,   -- JSON array of fantasy weeks fetched
+    status          TEXT NOT NULL,   -- running / complete
+    slate_through   TEXT             -- the last night it expected to be final
+);
 
 CREATE TABLE IF NOT EXISTS ingest_log (
     source          TEXT NOT NULL,

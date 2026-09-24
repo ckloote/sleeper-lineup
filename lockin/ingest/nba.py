@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import time
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 from lockin.ingest.validate import SchemaDriftError
 from lockin.store.db import log_ingest, now_iso
@@ -37,6 +37,35 @@ SKIPPED_GAME_TYPES = frozenset({PRESEASON, ALL_STAR})
 
 # ScheduleLeagueV2's gameStatus: 1 scheduled, 2 in progress, 3 final.
 GAME_STATUS_SCHEDULED = 1
+
+
+class NbaFeed(Protocol):
+    """Where the NBA's schedule comes from.
+
+    The one seam in this module. `nba_api` is the only implementation that talks
+    to the network; tests pass a feed that returns payloads they built, which is
+    what lets a fresh season be ingested end to end without the NBA's servers —
+    and lets it be a season that has not finished, which is the case every live
+    path depends on and the recorded 2025-26 database cannot represent.
+    """
+
+    def schedule(self, season_label: str) -> dict: ...
+
+    def scoreboard(self, game_date: str) -> list[dict]: ...
+
+
+class NbaApiFeed:
+    """The real feed: ScheduleLeagueV2 and ScoreboardV3 through `nba_api`."""
+
+    def schedule(self, season_label: str) -> dict:
+        from nba_api.stats.endpoints import scheduleleaguev2
+
+        return scheduleleaguev2.ScheduleLeagueV2(season=season_label, league_id="00").get_dict()
+
+    def scoreboard(self, game_date: str) -> list[dict]:
+        from nba_api.stats.endpoints import scoreboardv3
+
+        return scoreboardv3.ScoreboardV3(game_date=game_date).get_dict()["scoreboard"]["games"]
 
 
 class ScheduleIngest(NamedTuple):
@@ -59,7 +88,9 @@ def _season_label(season: str) -> str:
     return f"{start}-{str(start + 1)[-2:]}"
 
 
-def ingest_schedule(conn: sqlite3.Connection, season: str) -> ScheduleIngest:
+def ingest_schedule(
+    conn: sqlite3.Connection, season: str, *, feed: NbaFeed | None = None
+) -> ScheduleIngest:
     """Fetch the season's fixtures, including games that have not been played.
 
     **This used to read LeagueGameFinder, which is a results feed wearing a
@@ -110,11 +141,9 @@ def ingest_schedule(conn: sqlite3.Connection, season: str) -> ScheduleIngest:
     date Sleeper still lists — which is what keeps `reconcile`'s postponement
     check meaningful.
     """
-    from nba_api.stats.endpoints import scheduleleaguev2
-
     started = now_iso()
     label = _season_label(season)
-    payload = scheduleleaguev2.ScheduleLeagueV2(season=label, league_id="00").get_dict()
+    payload = (feed or NbaApiFeed()).schedule(label)
 
     game_dates = (payload.get("leagueSchedule") or {}).get("gameDates")
     if game_dates is None:
@@ -152,18 +181,28 @@ def ingest_schedule(conn: sqlite3.Connection, season: str) -> ScheduleIngest:
                     f"game {gid}: gameDateEst is {game.get('gameDateEst')!r}, expected a date"
                 ) from exc
 
+            status = game.get("gameStatus")
             conn.execute(
                 "INSERT INTO nba_schedule"
-                " (nba_game_id, season, game_date, tipoff_utc, home_team, away_team)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                " (nba_game_id, season, game_date, tipoff_utc, home_team, away_team, status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(nba_game_id) DO UPDATE SET"
                 "   season=excluded.season, game_date=excluded.game_date,"
                 "   home_team=excluded.home_team, away_team=excluded.away_team,"
                 # Never let a re-fetch blank out a tipoff we already know. A
                 # rescheduled game briefly carries no time, and the digest needs
                 # one to say when tonight's lock window closes.
-                "   tipoff_utc=COALESCE(excluded.tipoff_utc, nba_schedule.tipoff_utc)",
-                (gid, season, date, game.get("gameDateTimeUTC") or None, home, away),
+                "   tipoff_utc=COALESCE(excluded.tipoff_utc, nba_schedule.tipoff_utc),"
+                "   status=COALESCE(excluded.status, nba_schedule.status)",
+                (
+                    gid,
+                    season,
+                    date,
+                    game.get("gameDateTimeUTC") or None,
+                    home,
+                    away,
+                    status if isinstance(status, int) else None,
+                ),
             )
             written += 1
             if game.get("gameStatus") == GAME_STATUS_SCHEDULED:
@@ -174,7 +213,11 @@ def ingest_schedule(conn: sqlite3.Connection, season: str) -> ScheduleIngest:
 
 
 def ingest_scoreboard(
-    conn: sqlite3.Connection, season: str, only_missing: bool = True
+    conn: sqlite3.Connection,
+    season: str,
+    only_missing: bool = True,
+    *,
+    feed: NbaFeed | None = None,
 ) -> tuple[int, int]:
     """Sweep ScoreboardV3 by date to fill tipoff times and backfill missing games.
 
@@ -199,8 +242,7 @@ def ingest_scoreboard(
     Tolerant by design: a date that fails is skipped rather than aborting the
     run. Returns (tipoffs_filled, games_backfilled).
     """
-    from nba_api.stats.endpoints import scoreboardv3
-
+    feed = feed or NbaApiFeed()
     started = now_iso()
     if only_missing:
         # Dates where something is still missing: an unlinked Sleeper fixture,
@@ -223,7 +265,7 @@ def ingest_scoreboard(
     filled = backfilled = 0
     for date in dates:
         try:
-            games = scoreboardv3.ScoreboardV3(game_date=date).get_dict()["scoreboard"]["games"]
+            games = feed.scoreboard(date)
         except Exception:  # noqa: BLE001 - a missing date is not fatal
             time.sleep(PAUSE_SECONDS)
             continue
@@ -243,6 +285,11 @@ def ingest_scoreboard(
             )
             if cur.rowcount:
                 filled += 1
+            status = g.get("gameStatus")
+            if isinstance(status, int):
+                conn.execute(
+                    "UPDATE nba_schedule SET status = ? WHERE nba_game_id = ?", (status, gid)
+                )
         time.sleep(PAUSE_SECONDS)
 
     backfilled = conn.execute(
@@ -322,13 +369,18 @@ def link_games(conn: sqlite3.Connection, season: str) -> tuple[int, int]:
     # annotating the old one, so a game Sleeper still lists on its original date
     # appears only on the date it was replayed — checked against all three of
     # 2025-26's postponements. Counting those as unlinked would be wrong.
+    #
+    # So only a fixture somebody actually played counts as unlinked. Asked of the
+    # stat lines directly rather than of `state`, which is classified *from* the
+    # link and would make this question circular.
     linked = conn.execute(
         "SELECT COUNT(*) c FROM game_links WHERE nba_game_id IS NOT NULL"
     ).fetchone()["c"]
     unlinked = conn.execute(
-        "SELECT COUNT(*) c FROM game_links"
-        " WHERE nba_game_id IS NULL AND COALESCE(occurred, 1) = 1"
-        "   AND COALESCE(is_exhibition, 0) = 0"
+        "SELECT COUNT(*) c FROM game_links g"
+        " WHERE g.nba_game_id IS NULL AND COALESCE(g.is_exhibition, 0) = 0"
+        "   AND EXISTS (SELECT 1 FROM box_scores b"
+        "                WHERE b.sleeper_game_id = g.sleeper_game_id AND b.played = 1)"
     ).fetchone()["c"]
     log_ingest(conn, "nba", f"link_games:{season}", linked, started)
     return linked, unlinked

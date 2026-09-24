@@ -104,6 +104,10 @@ def infer_lock(counted: float, games: list[Game], *, tolerance: float = TOLERANC
     """
     n = len(games)
     if n == 0:
+        # No game, so the slot counts 0.0. Anything else is evidence nothing
+        # here explains, and must not be labelled resolved (review 2026-09-23).
+        if abs(counted) > tolerance:
+            return LockInference(LockStatus.UNRESOLVED, 0, None, (), 0.0, None)
         return LockInference(LockStatus.NO_GAMES, 0, None, (), 1.0, None)
 
     candidates = tuple(g.index for g in games if g.played and abs(g.score - counted) <= tolerance)
@@ -111,8 +115,14 @@ def infer_lock(counted: float, games: list[Game], *, tolerance: float = TOLERANC
     last_index = games[-1].index
 
     if n == 1:
-        # Nothing to decide: the one game counts whether or not it was locked.
-        return LockInference(LockStatus.SINGLE_GAME, n, games[0].index, candidates, 1.0, None)
+        # Nothing to decide: the one game counts whether or not it was locked —
+        # provided the counted value is that game's. A zero against a played game
+        # is a player not in his slot when it tipped; anything else is unexplained.
+        if rides:
+            return LockInference(LockStatus.SINGLE_GAME, n, games[0].index, candidates, 1.0, None)
+        if abs(counted) <= tolerance:
+            return LockInference(LockStatus.NO_LOCKABLE_GAME, n, None, (), 1.0, None)
+        return LockInference(LockStatus.UNRESOLVED, n, None, (), 0.0, None)
 
     if rides:
         # Riding explains it. An earlier game with the identical score would too,

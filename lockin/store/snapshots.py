@@ -96,6 +96,49 @@ def save(
     return path
 
 
+FINALIZED = "FINALIZED"
+"""Marker file in a week's directory: when the week was first seen scored.
+
+Its first line is a snapshot-style stamp. Snapshots stamped at or after it
+observed the week *final*; earlier ones observed it in progress, where an early
+zero or an interim score is an ordinary reading rather than corruption. Kept
+beside the archive rather than in the database, which is disposable — a rebuild
+must not forget which evidence `lockin repair` may use.
+"""
+
+
+def finalized_at(root: Path, kind: str, season: str, week: int) -> str | None:
+    marker = week_dir(root, kind, season, week) / FINALIZED
+    if not marker.is_file():
+        return None
+    return marker.read_text().split("\n", 1)[0].strip() or None
+
+
+def mark_finalized(
+    root: Path, kind: str, season: str, week: int, *, stamp: str, note: str = ""
+) -> bool:
+    """Record when a week was first seen final. Returns True if newly written.
+
+    Never moves an existing marker: the first sighting is the boundary, and a
+    later one would silently discard evidence gathered in between.
+    """
+    d = week_dir(root, kind, season, week)
+    marker = d / FINALIZED
+    if marker.exists():
+        return False
+    d.mkdir(parents=True, exist_ok=True)
+    marker.write_text(stamp + ("\n" + note if note else "") + "\n")
+    return True
+
+
+def final_snapshots(root: Path, kind: str, season: str, week: int) -> list[Path]:
+    """Snapshots taken once the week was final, oldest first. Empty while open."""
+    boundary = finalized_at(root, kind, season, week)
+    if boundary is None:
+        return []
+    return [p for p in list_snapshots(root, kind, season, week) if p.stem >= boundary]
+
+
 def counted_values(payload: Any) -> dict[tuple[int, str], float]:
     """Flatten a matchups payload to {(roster_id, sleeper_id): counted_points}.
 

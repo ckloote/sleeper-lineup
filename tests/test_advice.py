@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -32,12 +33,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 AS_OF = "2026-01-08"
+MORNING = datetime(2026, 1, 8, 14, tzinfo=UTC)
+"""When that run's page is read: its calls' windows are open. Rendering against
+the real clock would show every January deadline as passed — true, and a
+different test."""
 BANKED = {"1000": 46.0, "1787": 47.5}
 
 
 @pytest.fixture(scope="module")
-def source_conn():
-    c = sqlite3.connect(cfg.db_path)
+def source_conn(season_db):
+    c = sqlite3.connect(season_db)
     c.row_factory = sqlite3.Row
     apply_schema(c)
     yield c
@@ -138,7 +143,7 @@ def test_a_player_missing_from_the_reference_table_degrades_to_his_id(tmp_path, 
         run = advice.latest_run(conn, report.roster_id)
     assert run.items
     assert all(i.name == i.sleeper_id for i in run.items)
-    assert "None" not in advice.render(run, today=AS_OF)
+    assert "None" not in advice.render(run, today=AS_OF, now=MORNING)
 
 
 # ----------------------------------------------------------------- which run
@@ -229,7 +234,7 @@ def test_the_staleness_banner_precedes_the_advice(stored):
 
 def test_a_fresh_page_is_not_dressed_as_a_warning(stored):
     _, run = stored
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert 'class="banner fresh"' in page
     # Two warnings share the look, so target the one this test is about.
     assert 'data-warning="age"' in page
@@ -242,7 +247,7 @@ def test_a_fresh_page_is_not_dressed_as_a_warning(stored):
 def test_the_page_is_self_contained(stored):
     """Opened from a phone. No network, no build step."""
     _, run = stored
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert "http://" not in page
     assert "https://" not in page
     assert "<script" not in page.lower()
@@ -251,7 +256,7 @@ def test_the_page_is_self_contained(stored):
 
 def test_every_call_and_rule_reaches_the_page(stored, report):
     _, run = stored
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     for item in run.items:
         assert item.name in page
 
@@ -260,7 +265,7 @@ def test_player_names_are_escaped(stored):
     """They come from Sleeper, which is to say from other users."""
     _, run = stored
     hostile = replace(run.items[0], name="<img src=x onerror=1>")
-    page = advice.render(replace(run, items=(hostile,)), today=AS_OF)
+    page = advice.render(replace(run, items=(hostile,)), today=AS_OF, now=MORNING)
     assert "<img src=x" not in page
     assert "&lt;img" in page
 
@@ -293,7 +298,7 @@ def test_an_inferred_state_is_disclosed_on_the_page(tmp_path, source_conn):
         run = advice.latest_run(conn, roster_id)
 
     assert run.state_supplied is False
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert "--locked" in page
     assert "least stable" in page
 
@@ -306,7 +311,7 @@ def test_an_all_pass_night_does_not_tell_you_to_act(stored):
     to do something when the correct move was to do nothing."""
     _, run = stored
     assert all(i.action == "PASS" for i in run.calls), "this date should be all pass"
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert "Nothing to lock" in page
     assert "Lock now" not in page
     assert "No action needed" in page
@@ -316,7 +321,7 @@ def test_a_night_with_a_lock_says_so_in_the_heading(stored):
     """The heading is what gets scanned, so it carries the verdict."""
     _, run = stored
     with_lock = replace(run, items=(replace(run.calls[0], action="LOCK"), *run.items[1:]))
-    page = advice.render(with_lock, today=AS_OF)
+    page = advice.render(with_lock, today=AS_OF, now=MORNING)
     assert "Lock now" in page
     assert "Nothing to lock" not in page
     assert "before his next game tips" in page
@@ -325,10 +330,11 @@ def test_a_night_with_a_lock_says_so_in_the_heading(stored):
 def test_the_heading_tracks_the_calls_not_the_count(stored):
     """One lock among several passes is still a night you must act on."""
     _, run = stored
-    only_passes = advice.render(run, today=AS_OF)
+    only_passes = advice.render(run, today=AS_OF, now=MORNING)
     one_lock = advice.render(
         replace(run, items=(replace(run.calls[-1], action="LOCK"), *run.items[:-1])),
         today=AS_OF,
+        now=MORNING,
     )
     assert "Nothing to lock" in only_passes
     assert "Lock now" in one_lock
@@ -340,7 +346,7 @@ def test_the_heading_tracks_the_calls_not_the_count(stored):
 def test_where_the_matchup_stands_comes_before_the_advice(stored):
     """Context is read first; it was doing no work at the bottom of the page."""
     _, run = stored
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert page.index("class=state") < page.index("<h2>")
     assert page.index("class=pwin") < page.index("Nothing to lock")
 
@@ -407,7 +413,7 @@ def test_a_few_missed_days_are_not_treated_as_failure(stored):
 
 def test_the_prompt_reaches_the_page_and_sits_below_the_advice(stored):
     _, run = stored
-    page = advice.render(_at(run, week=advice.REVISIT_WEEK, recent=28), today=AS_OF)
+    page = advice.render(_at(run, week=advice.REVISIT_WEEK, recent=28), today=AS_OF, now=MORNING)
     assert 'class="callout prompt"' in page
     # Matched on the element, not the bare word: `.callout` is also a CSS rule
     # in the <style> block, which precedes everything and would make any
@@ -418,7 +424,7 @@ def test_the_prompt_reaches_the_page_and_sits_below_the_advice(stored):
 
 def test_no_callout_appears_when_there_is_nothing_to_say(stored):
     _, run = stored
-    page = advice.render(_at(run, week=3, recent=28), today=AS_OF)
+    page = advice.render(_at(run, week=3, recent=28), today=AS_OF, now=MORNING)
     assert '<p class="callout' not in page
 
 
@@ -467,14 +473,14 @@ def test_a_failed_ingest_is_reported_on_the_page(tmp_path, report):
     warning = advice.ingest_warning(run)
     assert warning is not None
     assert "check the ingest cron" in warning
-    page = advice.render(run, today=AS_OF)
+    page = advice.render(run, today=AS_OF, now=MORNING)
     assert 'data-warning="ingest"' in page
 
 
 def test_a_recent_ingest_says_nothing(stored):
     _, run = stored
     assert advice.ingest_warning(run) is None
-    assert 'data-warning="ingest"' not in advice.render(run, today=AS_OF)
+    assert 'data-warning="ingest"' not in advice.render(run, today=AS_OF, now=MORNING)
 
 
 def test_no_ingest_at_all_is_reported_rather_than_assumed_fine(tmp_path, report):

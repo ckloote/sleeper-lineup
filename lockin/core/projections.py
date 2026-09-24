@@ -118,6 +118,15 @@ class ProjectionParams:
     n_paths: int = 1000
     """Default paths for a joint week simulation. Separate from ``n_draws``
     because a path costs one draw per remaining game, not one in total."""
+    min_pool_rows: int = 400
+    """Played league rows needed before any projection is trusted to advise.
+
+    Measured on 2025-26 with no burn-in (`lockin calibrate --cold-start`): below
+    400 prior rows — the first six days of the season — the right tail is
+    badly under-predicted, P(score > predicted q0.99) 4.6-8.3% against 1%, which
+    is exactly the tail a lock decision is made in. From 400 every bin is within
+    the Phase 3 gate's tolerance. Below it the digest abstains rather than
+    advise on a distribution known to be wrong (review finding 3)."""
 
 
 DEFAULT_PARAMS = ProjectionParams()
@@ -349,6 +358,18 @@ class PlayerHistory:
         )
 
 
+def _empty_history(sleeper_id: str) -> PlayerHistory:
+    return PlayerHistory(
+        sleeper_id=sleeper_id,
+        day=np.empty(0, dtype=np.int64),
+        week=np.empty(0, dtype=np.int64),
+        played=np.empty(0, dtype=bool),
+        minutes=np.empty(0),
+        components=np.empty((0, N_COMPONENTS)),
+        pos_group=np.empty(0, dtype=np.int64),
+    )
+
+
 @dataclass(slots=True)
 class SeasonPanel:
     """Every player's history, flattened once so point-in-time slicing is cheap.
@@ -361,6 +382,13 @@ class SeasonPanel:
 
     histories: dict[str, PlayerHistory]
     params: ProjectionParams = DEFAULT_PARAMS
+    unplayed: dict[str, int] = field(default_factory=dict)
+    """Position group of each rostered player with no observed game yet.
+
+    Early in a season, and whenever a team has not played yet this week, a
+    starter has no history at all. He is still projectable — from the league
+    pool, by role — and `history` answers for him with an empty history rather
+    than refusing, which the caller used to turn into a certain 0.0."""
 
     day: np.ndarray = field(init=False)
     played: np.ndarray = field(init=False)
@@ -437,7 +465,19 @@ class SeasonPanel:
         try:
             return self.histories[sleeper_id]
         except KeyError:
+            if sleeper_id in self.unplayed:
+                return _empty_history(sleeper_id)
             raise InsufficientHistory(f"no history for player {sleeper_id}") from None
+
+    def group_of(self, sleeper_id: str, hist: PlayerHistory) -> int:
+        """His role: from his latest game, or from his listing before he has one."""
+        if len(hist):
+            return int(hist.pos_group[-1])
+        return self.unplayed.get(sleeper_id, POS_FORWARD)
+
+    def pool_size(self, as_of: int) -> int:
+        """Played rows league-wide strictly before ``as_of`` — how much the pool knows."""
+        return int((self.played & (self.day < as_of)).sum())
 
     def pool_rows(self, bucket: int, group: int, as_of: int) -> np.ndarray:
         """League-pool donor rows in a (bucket, group), strictly before as_of."""
@@ -583,7 +623,7 @@ class EWMAProjectionSource:
         """
         p = self.params
         own = np.nonzero(hist.played)[0]
-        group = int(hist.pos_group[-1]) if len(hist) else POS_FORWARD
+        group = self.panel.group_of(sleeper_id, hist)
 
         minutes = self._draw_minutes(hist, own, as_of, rng, n)
         use_own = rng.random(n) < self._own_weight(len(own))
