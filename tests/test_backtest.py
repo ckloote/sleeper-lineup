@@ -9,8 +9,11 @@ looks too large is only enforceable if something is actually measuring it.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import numpy as np
 import pytest
+from live_fixture import OPENING, SyntheticSeason, config_for, connect, ingest
 
 from lockin import backtest
 from lockin import backtest as bt_mod
@@ -322,3 +325,106 @@ def test_points_sacrifice_is_allowed_but_bounded():
     check = backtest.check_rollout_trades_points_for_wins(spread(heavy))
     assert not check.passed
     assert "mispriced opponent" in check.offenders[0]
+
+
+# ------------------------------------- one replay is one draw (2026-09-24, §21 W8)
+
+STRONG = [(300.0, 200.0, 250.0)] * 12 + [(200.0, 300.0, 250.0)] * 2  # +12/-2, z=2.67
+WEAK = [(300.0, 200.0, 250.0)] + [(300.0, 300.0, 250.0)] * 9  # +1/-0, z=1.00
+BEHIND = [(200.0, 300.0, 250.0)] * 10
+
+
+def replay(results: list[tuple[float, float, float]], seed: int, week: int = 20) -> BacktestResult:
+    result = matchup_rows(results, week=week)
+    result.seed = seed
+    return result
+
+
+def test_over_several_replays_rollout_must_out_win_greedy_in_every_one():
+    check = backtest.check_rollout_beats_greedy_on_wins(
+        [replay(STRONG, 1), replay(STRONG, 2), replay(BEHIND, 3)]
+    )
+    assert not check.passed
+    assert "1 of 3 replays (seeds 3)" in check.offenders[0]
+
+
+def test_the_median_replay_decides_significance_not_the_luckiest():
+    """At 400 paths the gate passed in 14 of 40 seeds on identical data."""
+    one_weak = [replay(STRONG, 1), replay(STRONG, 2), replay(WEAK, 3)]
+    two_weak = [replay(STRONG, 1), replay(WEAK, 2), replay(WEAK, 3)]
+    assert backtest.check_rollout_beats_greedy_on_wins(one_weak).passed
+    check = backtest.check_rollout_beats_greedy_on_wins(two_weak)
+    assert not check.passed and "median" in check.offenders[0]
+    assert "median z=+1.00" in check.detail
+
+
+def test_the_holdout_direction_is_the_mean_over_replays():
+    lead, behind = [(300.0, 200.0, 250.0)] * 2, [(200.0, 300.0, 250.0)] * 2
+    check = backtest.check_rollout_holdout_direction(
+        [replay(lead, 1), replay(lead, 2), replay(behind, 3)], 18
+    )
+    assert check.passed and "behind in 1" in check.detail
+    assert not backtest.check_rollout_holdout_direction(
+        [replay(lead, 1), replay(behind, 2), replay(behind, 3)], 18
+    ).passed
+
+
+def test_the_points_trade_is_judged_on_the_mean_over_replays():
+    heavy = dict(BASE5, **{ROLLOUT: 230.0})
+    assert backtest.check_rollout_trades_points_for_wins([spread(BASE5), spread(heavy)]).passed
+    assert not backtest.check_rollout_trades_points_for_wins([spread(heavy), spread(heavy)]).passed
+
+
+def test_run_judges_the_rollout_gate_over_every_replay():
+    checks, first = backtest.run(
+        None,
+        "2025",
+        holdout_from=18,
+        result=replay(STRONG, 1),
+        extra=[replay(WEAK, 2), replay(WEAK, 3)],
+    )
+    gate = next(c for c in checks if c.name.startswith("rollout beats greedy"))
+    assert first.seed == 1 and not gate.passed
+
+
+def points(result: BacktestResult) -> dict:
+    return {(r.week, r.roster_id): r.points for r in result.rows}
+
+
+@pytest.fixture(scope="module")
+def synthetic(tmp_path_factory):
+    """Four synthetic weeks, final: a season small enough to replay in half a second."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=26))
+    cfg = config_for(tmp_path_factory.mktemp("replay"), season)
+    ingest(season, cfg, weeks=[1, 2, 3, 4])
+    return season, cfg
+
+
+def test_a_change_in_one_week_does_not_reseed_the_others(synthetic, tmp_path):
+    """Everything used to come from one generator, in order, so any change to any
+    input reshuffled every later draw. The Phase 5 gate moved from z=+2.06 to
+    +1.15 that way, with no code change. Here the change is the order of one
+    roster's week-1 starters: the same players, drawn in a different order."""
+    season, cfg = synthetic
+    copy = config_for(tmp_path, season)
+    copy.db_path.write_bytes(cfg.db_path.read_bytes())
+    with connect(copy) as conn:
+        before = points(backtest.run_backtest(conn, season.season, n_paths=50, seed=1))
+        conn.execute(
+            "UPDATE weekly_matchups SET slot_index = 5 - slot_index"
+            " WHERE week = 1 AND roster_id = 1 AND is_starter = 1"
+        )
+        conn.commit()
+        after = points(backtest.run_backtest(conn, season.season, n_paths=50, seed=1))
+
+    later = {k for k in before if k[0] > 1}
+    assert later and {k: before[k] for k in later} == {k: after[k] for k in later}
+
+
+def test_a_replay_is_the_same_in_a_worker_process(synthetic):
+    season, cfg = synthetic
+    here = backtest.run_seeds(cfg.db_path, season.season, [1, 2], n_paths=50, workers=1)
+    there = backtest.run_seeds(cfg.db_path, season.season, [1, 2], n_paths=50, workers=2)
+    assert [r.seed for r in there] == [1, 2] and [r.n_paths for r in there] == [50, 50]
+    assert [points(r) for r in here] == [points(r) for r in there]

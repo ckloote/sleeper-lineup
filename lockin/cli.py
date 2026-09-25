@@ -546,25 +546,51 @@ def calibrate(as_json: bool, draws: int, holdout_from: int, cold_start: bool) ->
 
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
-@click.option("--paths", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option(
+    "--paths",
+    default=backtest_mod.DEFAULT_PATHS,
+    show_default=True,
+    help="Simulated paths per decision, for greedy and rollout alike.",
+)
+@click.option(
+    "--seeds",
+    default=backtest_mod.DEFAULT_SEEDS,
+    show_default=True,
+    help="Independent replays the rollout gates are judged over.",
+)
+@click.option(
+    "--workers", type=int, default=None, help="Processes to replay in. Default: every core."
+)
 @click.option(
     "--holdout-from",
     default=backtest_mod.DEFAULT_HOLDOUT_FROM,
     show_default=True,
     help="First held-out fantasy week.",
 )
-def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
-    """Replay every roster under each stopping policy. Nonzero on failure."""
+def backtest(as_json: bool, paths: int, seeds: int, workers: int | None, holdout_from: int) -> None:
+    """Replay every roster under each stopping policy. Nonzero on failure.
+
+    The season is replayed once per seed, in parallel. One replay is one draw of
+    the policies' own Monte Carlo, and a single draw used to decide the Phase 5
+    gate (implementation-plan.md §15).
+    """
+    if seeds < 1:
+        raise click.BadParameter("need at least one seed", param_hint="--seeds")
     cfg = Config.from_env()
-    with _season(cfg) as conn:
-        checks, result = backtest_mod.run(
-            conn, cfg.season, n_paths=paths, holdout_from=holdout_from
-        )
-        held = result.holdout(holdout_from)
+    with _season(cfg):
+        pass  # the identity check and the schema, before any worker opens the file
+    seed_list = [backtest_mod.DEFAULT_SEED + i for i in range(seeds)]
+    replays = backtest_mod.run_seeds(
+        cfg.db_path, cfg.season, seed_list, n_paths=paths, workers=workers
+    )
+    checks, result = backtest_mod.run(
+        None, cfg.season, holdout_from=holdout_from, result=replays[0], extra=replays[1:]
+    )
+    held = result.holdout(holdout_from)
 
     if not as_json:
         click.echo(
-            f"replayed {len(result.rows)} roster-weeks;"
+            f"replayed {len(result.rows)} roster-weeks {seeds} time(s) at {paths} paths;"
             f" {len(held.rows)} held out (weeks {holdout_from}-25),"
             f" {held.starters()} starter-weeks\n"
         )
@@ -598,19 +624,27 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
                 f"  {'actual':<12} {sum(actual) / len(actual):>8.1f} {'-':>8} {'-':>8} {'-':>9}"
                 "   advisory: reads the field Sleeper rewrote"
             )
-        click.echo("\n  wins are head-to-head with the opponent left on never-lock.")
-
-        pairs, clusters = backtest_mod.head_to_head_by_matchup(
-            result, backtest_mod.ROLLOUT, backtest_mod.GREEDY
-        )
-        b, c, z = backtest_mod.mcnemar(pairs)
-        z_matchup = backtest_mod.clustered_mcnemar(pairs, clusters)
         click.echo(
-            f"\n  rollout vs greedy, both against a greedy opponent, all ten rosters:"
-            f"\n    {len(pairs)} team-weeks — rollout {int(pairs[:, 0].sum())} wins,"
-            f" greedy {int(pairs[:, 1].sum())}; flipped +{b}/-{c}, McNemar z={z:+.2f}"
-            f"\n    each matchup seen from both sides, so also by matchup: z={z_matchup:+.2f}\n"
+            "\n  wins are head-to-head with the opponent left on never-lock."
+            f"\n  the table is the first replay (seed {result.seed})."
         )
+
+        click.echo(
+            "\n  rollout vs greedy, both against a greedy opponent, all ten rosters."
+            "\n  each matchup is seen from both sides, so z is also given by matchup:"
+        )
+        for replay in replays:
+            pairs, clusters = backtest_mod.head_to_head_by_matchup(
+                replay, backtest_mod.ROLLOUT, backtest_mod.GREEDY
+            )
+            b, c, z = backtest_mod.mcnemar(pairs)
+            z_matchup = backtest_mod.clustered_mcnemar(pairs, clusters)
+            click.echo(
+                f"    seed {replay.seed}  rollout {int(pairs[:, 0].sum())},"
+                f" greedy {int(pairs[:, 1].sum())} of {len(pairs)};"
+                f" flipped +{b}/-{c}, z={z:+.2f}, by matchup {z_matchup:+.2f}"
+            )
+        click.echo("")
 
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
 
@@ -818,7 +852,12 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
 @click.option("--date", "as_of", default=None, help="As-of date, YYYY-MM-DD. Default: today.")
 @click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable output.")
-@click.option("--sims", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option(
+    "--sims",
+    default=backtest_mod.DEFAULT_PATHS,
+    show_default=True,
+    help="Simulated paths per decision.",
+)
 @click.option("--notify", is_flag=True, help="Send the digest as a push notification.")
 @click.option("--no-write", is_flag=True, help="Do not record the advice in `recommendations`.")
 @click.option(
@@ -944,8 +983,8 @@ def digest(
             source += ".\n  Opponent's locks: the greedy base policy stands in (no poll)"
         click.echo(
             f"\n  {source}."
-            f"\n  Thresholds carry 1-3 points of Monte Carlo noise at --sims {sims};"
-            f"\n  the lock/pass calls above are stable from 400."
+            f"\n  Thresholds carry about a point of Monte Carlo noise at --sims 2000,"
+            f"\n  and a close lock/pass call can flip below it (§21 W8). This ran {sims}."
             f"\n  {written} row(s) written to recommendations."
         )
     if notify:
@@ -1142,7 +1181,12 @@ def dashboard(out: Path, names: bool) -> None:
 @click.argument("player")
 @click.option("--date", "as_of", default=None, help="As-of date, YYYY-MM-DD. Default: today.")
 @click.option("--roster", type=int, default=None, help="Roster id. Default: yours.")
-@click.option("--sims", default=400, show_default=True, help="Simulated paths per decision.")
+@click.option(
+    "--sims",
+    default=backtest_mod.DEFAULT_PATHS,
+    show_default=True,
+    help="Simulated paths per decision.",
+)
 @click.option(
     "--locked",
     default=None,

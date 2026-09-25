@@ -147,15 +147,14 @@ uv run --frozen lockin calibrate
 uv run --frozen lockin backtest
 ```
 
-**Pass:** five × `all gates passed`. `backtest` is the slow one — minutes of Monte Carlo —
-and is the single best evidence that the Pi is a working host. If it passes there, nothing
-about the digest will surprise you.
+**Pass:** five × `all gates passed`. `backtest` is the slow one. It replays the season
+five times at 2,000 paths, one process per core, which takes about two minutes on a Pi 5.
+It is also the single best evidence that the Pi is a working host. If it passes there,
+nothing about the digest will surprise you.
 
-> **Known failure since 2026-09-24.** On the current 2025-26 file, `backtest` fails two
-> gates: `rollout beats greedy on wins` (z = +1.15) and its held-out direction check. The
-> Phase 5 code fails them identically on the same file, so this is a change in the data,
-> not a broken host (implementation-plan.md §15 and §21, W6). For a deployment check,
-> passing means every other backtest gate passes and these two report the numbers above.
+It judges the rollout gates over all five replays, because one replay is one draw of the
+policy's Monte Carlo (implementation-plan.md §15, §21 W8). Expect one replay's z to be
+low now and then. The gate is the median.
 
 Then populate the dashboard, which reads what this stores:
 
