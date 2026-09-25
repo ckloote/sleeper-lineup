@@ -43,6 +43,27 @@ def test_single_game_not_played():
     assert inf.status is LockStatus.SINGLE_GAME
 
 
+# Review 2026-09-23: the degenerate weeks were labelled resolved whatever the
+# counted value said, so `locks` could claim confidence in inconsistent input.
+
+
+def test_a_value_with_no_game_to_explain_it_is_unresolved():
+    inf = infer_lock(12.0, [])
+    assert inf.status is LockStatus.UNRESOLVED
+    assert not is_resolved(inf)
+
+
+def test_a_single_game_that_does_not_explain_the_value_is_unresolved():
+    inf = infer_lock(12.0, [g(0, 30.0)])
+    assert inf.status is LockStatus.UNRESOLVED
+    assert not is_resolved(inf)
+
+
+def test_a_zero_against_a_single_played_game_is_a_player_out_of_his_slot():
+    inf = infer_lock(0.0, [g(0, 30.0)])
+    assert inf.status is LockStatus.NO_LOCKABLE_GAME
+
+
 # --- riding -----------------------------------------------------------------
 
 
