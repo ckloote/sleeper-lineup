@@ -600,12 +600,16 @@ def backtest(as_json: bool, paths: int, holdout_from: int) -> None:
             )
         click.echo("\n  wins are head-to-head with the opponent left on never-lock.")
 
-        pairs = backtest_mod.head_to_head(result, backtest_mod.ROLLOUT, backtest_mod.GREEDY)
+        pairs, clusters = backtest_mod.head_to_head_by_matchup(
+            result, backtest_mod.ROLLOUT, backtest_mod.GREEDY
+        )
         b, c, z = backtest_mod.mcnemar(pairs)
+        z_matchup = backtest_mod.clustered_mcnemar(pairs, clusters)
         click.echo(
             f"\n  rollout vs greedy, both against a greedy opponent, all ten rosters:"
             f"\n    {len(pairs)} team-weeks — rollout {int(pairs[:, 0].sum())} wins,"
-            f" greedy {int(pairs[:, 1].sum())}; flipped +{b}/-{c}, McNemar z={z:+.2f}\n"
+            f" greedy {int(pairs[:, 1].sum())}; flipped +{b}/-{c}, McNemar z={z:+.2f}"
+            f"\n    each matchup seen from both sides, so also by matchup: z={z_matchup:+.2f}\n"
         )
 
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
@@ -716,6 +720,7 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
         labels = _manager_labels(cfg, conn, refresh=names)
 
     ranked = report.ranked()
+    holds = managers_mod.rank_stability(report)
     if as_json:
         click.echo(
             json.dumps(
@@ -733,6 +738,7 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
                         "divergent_right_rate": s.divergent_right_rate,
                         "upside_share": s.upside_share,
                         "rode_to_zero": s.rode_to_zero,
+                        "p_above_next": holds.get(s.roster_id),
                     }
                     for i, s in enumerate(ranked, 1)
                 ],
@@ -749,14 +755,16 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
     )
     click.echo(
         f"  {'#':>2} {'roster':>6} {'manager':<16} {'squander':>9} {'wrong':>7} {'stake':>7}"
-        f" {'regret':>8} {'n':>5} {'hi-lev':>7} {'pts cap':>8} {'zeros':>6}"
+        f" {'regret':>8} {'n':>5} {'hi-lev':>7} {'pts cap':>8} {'zeros':>6} {'holds':>6}"
     )
     for i, s in enumerate(ranked, 1):
+        held = holds.get(s.roster_id)
         click.echo(
             f"  {i:>2} {s.roster_id:>6} {labels.get(s.roster_id, ''):<16}"
             f" {s.squandered_share:>8.1%} {1 - s.right_rate:>6.1%} {s.mean_stake:>6.2%}"
             f" {s.mean_regret:>7.3%} {s.decisions:>5}"
             f" {s.divergent_right_rate:>6.0%} {s.upside_share:>7.1%} {s.rode_to_zero:>6}"
+            f" {'' if held is None else f'{held:.0%}':>6}"
         )
     click.echo(
         f"\n  'squander' is regret as a share of what was at stake, which divides out"
@@ -769,6 +777,8 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
         f"\n  'hi-lev' is the right-side rate on just those decisions."
         f"\n  'pts cap' is the older points-capture metric, shown for contrast only —"
         f" it scores correct\n  variance-taking as a blunder, which is why it is not the ranking."
+        f"\n  'holds' is how often a manager stays ahead of the one below, resampling whole"
+        f"\n  weeks (a week's decisions share one matchup). 50% is a coin flip."
         f"\n\n  Reads the field Sleeper rewrote (§12): this is how the current data makes"
         f"\n  each manager look, not a certified record. Do not benchmark the engine on"
         f"\n  this scale — it is graded by its own model."

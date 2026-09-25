@@ -9,7 +9,7 @@ history, kept for the reasoning.
 
 | Work | Status | Where |
 |---|---|---|
-| Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete | §9-§11, §13-§15 |
+| Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete. The Phase 5 wins gate no longer passes on today's data: an open decision | §9-§11, §13-§15; §21 W6 |
 | Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
 | Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
 | The review's remaining items, and one bug found auditing it | In progress, on branch `review-followups` | §21, "What remains" |
@@ -1836,6 +1836,24 @@ pairs is printed so nobody reads `z=+1.00` as evidence of anything. Weeks 1-17 i
 the projection layer's hyperparameters, but both policies consume the same projections, so
 the *comparison* is not obviously advantaged by that.
 
+> **Re-run 2026-09-24 (§21, W6): on today's data this gate fails.** The current 2025-26
+> file gives rollout 123 v greedy 118, flipped +12/−7, z = +1.15. The held-out block goes
+> 31 v 33, the wrong direction on 4 discordant pairs. The Phase 5 commit's own code
+> (`2b07bf1`) gives the same numbers on the same file, and so does the code from just
+> before the review fixes (`66a1d99`). Removing the 2026-09-20 repair rows changes
+> nothing either. The code did not move this; the data did, somewhere between 2026-08-08
+> and 2026-09-23. In that window the file was re-ingested repeatedly, and Sleeper rewrote
+> the completed season (§12). No copy from the window survives to show which change it
+> was. Counting each matchup once, since both of its rows share one greedy-v-greedy game,
+> gives z = +1.21, which also fails.
+>
+> So the evidence that rollout beats greedy on wins is **not robust**. It was +2.06 on one
+> version of this season and +1.15 on another, and those versions differ only by upstream
+> rewrites and re-ingest. Nothing here shows rollout is worse. It still zeroes fewer slots
+> and gives up about two points a week, as designed. But the gate that justified it no
+> longer passes. The digest's calls come from the rollout policy, so whether to keep it,
+> fall back to greedy, or re-gate it on 2026-27 is an open decision (§21, "What remains").
+
 ### The finding that made the first build fail: a lineup slot is evidence
 
 The first working rollout scored **worse** than the policy it was meant to improve on —
@@ -2037,6 +2055,21 @@ bands overlap from roughly rank 2 through rank 8, so the table should be read as
 groups rather than an ordering. The most interesting single result is roster 10, who ties
 for first on points capture and is *last* in the league on divergent decisions (31.8%) —
 excellent at the points game, blind to the matchup.
+
+**Resampled by week, 2026-09-24 (§21, W6).** The bands used to resample single decisions.
+A roster's decisions in one week share a matchup and a set of simulations, so the review
+asked whether that made them too narrow. Now they resample whole weeks, with the same
+weeks drawn for every roster. On the current file (2,302 decisions, 10 managers) the
+answer is barely. Mean band width on `squandered_share` went from 11.0 to 11.3 points.
+Individual widths moved both ways, by at most 3.8 points: roster 9 widened from
+[18.0, 34.1] to [16.3, 36.2], and roster 6 narrowed from [12.5, 23.5] to [13.4, 21.9].
+Within-week correlation of regret is weak in this season, so the earlier reading stands.
+
+What the weeks add is a direct answer to "is this order real". `lockin managers` and the
+dashboard now print **holds**: how often each manager stays ahead of the one ranked
+below, across the same replicates. Down the table it runs 78%, 66%, 74%, 82%, 62%, 60%,
+79%, 57% and 62%. No adjacent pair holds nine times in ten, so no single step in the
+ranking is established. The three-groups reading above is as far as the data goes.
 
 ### Teams on paper, which is a different question
 
@@ -3156,10 +3189,30 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
   Start/sit needs this before it pins anything. Today's only caller (`managers.py`)
   passes no pins, so no historical number moves. `infer_lock()`'s single-game and no-game
   refusals now have tests (`test_policy.py`, `test_locks.py`).
-- **W6. Uncertainty that respects dependence.** Manager intervals resample weeks, not
-  decisions, and report how stable the ranking is. The Phase 5 McNemar is also computed
-  on one side per matchup. If §15's conclusion does not survive, that is written up as a
-  correction; the gate is not loosened.
+- **W6. Uncertainty that respects dependence.** ✅ Done.
+  - **Manager bands** resample whole weeks, with one draw shared by every roster. Rosters
+    that meet share their week, so a comparison must draw the same weeks for both.
+    `lockin managers` and the dashboard also print **holds**: P(a manager stays ahead of
+    the one below). On this season the bands barely moved, but no adjacent pair holds
+    nine times in ten. Figures are in §16.
+  - **The Phase 5 McNemar** is also computed with each matchup as one unit. The plan said
+    "one side per matchup", but choosing a side is arbitrary. A clustered statistic
+    uses both sides and reduces to the plain z when there is one. The gate now needs
+    **both** z values to clear 1.64, so the correction cannot become a way to pass. On
+    this season it makes no difference: +1.15 plain, +1.21 by matchup.
+  - **Found on the way:** that gate already fails on today's data, with the Phase 5
+    commit's own code too. §15 has the account. It is not caused by W6 or by the review
+    fixes.
+- **Open decision: the rollout policy.** The digest's calls come from rollout, and the
+  evidence that it beats greedy on wins has gone from z = +2.06 to +1.15 on the same
+  season, through data changes alone. Three options:
+  - keep rollout, since nothing shows it is worse, and re-gate it on 2026-27's matchups;
+  - switch the digest to greedy thresholds until it is re-gated;
+  - re-run the backtest over several seeds and path counts, to see how much of the gap
+    between +2.06 and +1.15 is Monte Carlo noise, before choosing.
+
+  This is a judgement about the product, not a fix, so it is left for a decision. Until
+  then `lockin backtest` fails two gates on the 2025-26 file (deployment.md says so).
 - **W7. Reader tests on the synthetic season.** The advice-page and server suites run
   from `tests/live_fixture.py`, so a clean checkout tests them. Suites about the recorded
   season stay as they are, and say so when they skip.

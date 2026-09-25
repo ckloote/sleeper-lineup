@@ -151,6 +151,12 @@ uv run --frozen lockin backtest
 and is the single best evidence that the Pi is a working host. If it passes there, nothing
 about the digest will surprise you.
 
+> **Known failure since 2026-09-24.** On the current 2025-26 file, `backtest` fails two
+> gates: `rollout beats greedy on wins` (z = +1.15) and its held-out direction check. The
+> Phase 5 code fails them identically on the same file, so this is a change in the data,
+> not a broken host (implementation-plan.md §15 and §21, W6). For a deployment check,
+> passing means every other backtest gate passes and these two report the numbers above.
+
 Then populate the dashboard, which reads what this stores:
 
 ```bash

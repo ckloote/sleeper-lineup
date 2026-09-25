@@ -145,8 +145,8 @@ def test_bootstrap_band_brackets_the_mean():
 
     rng = np.random.default_rng(0)
     ds = [
-        decision(roster_id=7, chose_lock=True, p_win_lock=0.5 - x, p_win_pass=0.5)
-        for x in rng.uniform(0, 0.2, 300)
+        decision(week=1 + i % 24, roster_id=7, chose_lock=True, p_win_lock=0.5 - x, p_win_pass=0.5)
+        for i, x in enumerate(rng.uniform(0, 0.2, 300))
     ]
     report = ManagerReport(decisions=ds)
     lo, hi = bootstrap_regret(report, 7)
@@ -158,6 +158,59 @@ def test_bootstrap_is_empty_safe():
     from lockin.managers import bootstrap_regret
 
     assert bootstrap_regret(ManagerReport(), 3) == (0.0, 0.0)
+
+
+def test_decisions_that_move_together_within_a_week_widen_the_band():
+    """Review 2026-09-23: a week's decisions share a matchup and its simulations.
+
+    Ten identical decisions a week are one piece of evidence, not ten. Resampled
+    one decision at a time, the band came out about sqrt(10) times too narrow.
+    """
+    from lockin.managers import bootstrap_regret
+
+    rng = np.random.default_rng(3)
+    ds = [
+        decision(week=w, roster_id=7, chose_lock=True, p_win_lock=0.5 - x, p_win_pass=0.5)
+        for w, x in enumerate(rng.uniform(0, 0.2, 24), 1)
+        for _ in range(10)
+    ]
+    lo, hi = bootstrap_regret(ManagerReport(decisions=ds), 7)
+
+    values = np.array([d.regret for d in ds])
+    draws = np.random.default_rng(1).integers(0, len(values), (2000, len(values)))
+    means = values[draws].mean(axis=1)
+    naive = np.percentile(means, 95) - np.percentile(means, 5)
+    assert hi - lo > 2 * naive
+
+
+def test_rank_stability_says_how_often_each_neighbour_order_holds():
+    from lockin.managers import Scorecard, rank_stability
+
+    rng = np.random.default_rng(4)
+
+    def manager(roster_id: int, wrong: float) -> list[Decision]:
+        return [
+            decision(
+                week=w,
+                roster_id=roster_id,
+                chose_lock=bool(rng.random() >= wrong),
+                p_win_lock=0.6,
+                p_win_pass=0.4,
+            )
+            for w in range(1, 25)
+            for _ in range(8)
+        ]
+
+    ds = manager(1, 0.05) + manager(2, 0.05) + manager(3, 0.6)
+    cards = [
+        Scorecard(r, 192, share, 0.2, 0.0, 0.0, 0, 0.0, 0.0, 0, 0)
+        for r, share in ((1, 0.05), (2, 0.051), (3, 0.6))
+    ]
+    holds = rank_stability(ManagerReport(decisions=ds, scorecards=cards))
+
+    assert set(holds) == {1, 2}, "the last-ranked has no one below it"
+    assert 0.2 < holds[1] < 0.8, "two equal managers: close to a coin flip"
+    assert holds[2] > 0.99, "a clear gap holds in nearly every replicate"
 
 
 # ------------------------------------------------------------- persistence
@@ -227,7 +280,14 @@ def test_stored_scorecard_carries_the_uncertainty_band():
 
     rng = np.random.default_rng(2)
     ds = [
-        decision(roster_id=4, day=739000 + i, chose_lock=True, p_win_lock=0.5 - x, p_win_pass=0.5)
+        decision(
+            week=1 + i % 24,
+            roster_id=4,
+            day=739000 + i,
+            chose_lock=True,
+            p_win_lock=0.5 - x,
+            p_win_pass=0.5,
+        )
         for i, x in enumerate(rng.uniform(0, 0.2, 200))
     ]
     persist(

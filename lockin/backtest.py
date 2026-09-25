@@ -549,13 +549,26 @@ def head_to_head(
     Raw win counts would not resolve an effect this size — which is the whole
     substance of implementation-plan.md §7.1.
     """
+    return head_to_head_by_matchup(result, policy, against, opponent)[0]
+
+
+def head_to_head_by_matchup(
+    result: BacktestResult, policy: str, against: str, opponent: str = GREEDY
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """`head_to_head`, with the matchup each row came from.
+
+    Every matchup contributes two rows, one per side, and they are not
+    independent: both sides' `against` column is the same greedy-v-greedy game
+    read from opposite ends (review 2026-09-23). `clustered_mcnemar` needs to
+    know which rows belong together.
+    """
     by_matchup: dict[tuple[int, int], list[RosterWeek]] = defaultdict(list)
     for row in result.rows:
         if row.matchup_id is not None:
             by_matchup[(row.week, row.matchup_id)].append(row)
 
-    pairs = []
-    for entries in by_matchup.values():
+    pairs, clusters = [], []
+    for key, entries in by_matchup.items():
         if len(entries) != 2:
             continue
         for me, them in (entries, entries[::-1]):
@@ -566,7 +579,8 @@ def head_to_head(
                         me.points[against] > them.points[opponent],
                     )
                 )
-    return np.array(pairs, dtype=bool).reshape(-1, 2)
+                clusters.append(key)
+    return np.array(pairs, dtype=bool).reshape(-1, 2), clusters
 
 
 def mcnemar(pairs: np.ndarray) -> tuple[int, int, float]:
@@ -584,6 +598,25 @@ def mcnemar(pairs: np.ndarray) -> tuple[int, int, float]:
     return b, c, float(z)
 
 
+def clustered_mcnemar(pairs: np.ndarray, clusters: list) -> float:
+    """McNemar's z with each matchup's two rows taken as one unit.
+
+    The ordinary statistic is Σd / sqrt(Σd²) over rows, d = +1, -1 or 0 for
+    each discordance. Summing d within a matchup first and squaring the sums
+    lets the two sides' correlation — whichever sign it has — reach the
+    variance, and reduces to the ordinary z when every matchup has one row.
+    """
+    if len(pairs) == 0:
+        return 0.0
+    d = pairs[:, 0].astype(int) - pairs[:, 1].astype(int)
+    per: dict = defaultdict(int)
+    for key, value in zip(clusters, d, strict=True):
+        per[key] += int(value)
+    sums = np.array(list(per.values()), dtype=float)
+    denom = np.sqrt((sums**2).sum())
+    return float(sums.sum() / denom) if denom else 0.0
+
+
 def check_rollout_beats_greedy_on_wins(result: BacktestResult) -> Check:
     """The Phase 5 exit criterion, restated to be measurable (§7.1).
 
@@ -592,25 +625,32 @@ def check_rollout_beats_greedy_on_wins(result: BacktestResult) -> Check:
     modest effect cannot clear — the gate would be decided by coin flips. §7.1's
     adopted fix is to replay **all ten rosters**, turning 21 matchups into 105
     and making a paired test possible at all.
+
+    Those 236 team-weeks are 118 matchups seen from both sides, and the two
+    sides are not independent (review 2026-09-23). The z is also computed with
+    each matchup as one unit, and the gate needs **both** to clear 1.64: the
+    correction must not become a way to pass.
     """
-    pairs = head_to_head(result, ROLLOUT, GREEDY)
+    pairs, clusters = head_to_head_by_matchup(result, ROLLOUT, GREEDY)
     b, c, z = mcnemar(pairs)
+    z_matchup = clustered_mcnemar(pairs, clusters)
     wins_rollout, wins_greedy = int(pairs[:, 0].sum()), int(pairs[:, 1].sum())
 
     offenders = []
     if wins_rollout <= wins_greedy:
         offenders.append(f"rollout wins {wins_rollout}, greedy wins {wins_greedy}")
-    elif z < 1.64:
+    elif min(z, z_matchup) < 1.64:
         offenders.append(
             f"rollout leads {wins_rollout}-{wins_greedy} but the paired test is"
-            f" inconclusive (z={z:.2f}, needs 1.64)"
+            f" inconclusive (z={z:.2f}, by matchup {z_matchup:.2f}; both need 1.64)"
         )
     return Check(
         name="rollout beats greedy on wins, all ten rosters, paired",
         passed=not offenders,
         detail=(
-            f"{len(pairs)} team-weeks: rollout {wins_rollout} wins, greedy {wins_greedy};"
-            f" flipped +{b}/-{c}, McNemar z={z:+.2f}"
+            f"{len(pairs)} team-weeks in {len(set(clusters))} matchups: rollout"
+            f" {wins_rollout} wins, greedy {wins_greedy}; flipped +{b}/-{c},"
+            f" McNemar z={z:+.2f}, by matchup z={z_matchup:+.2f}"
         ),
         offenders=offenders,
     )
