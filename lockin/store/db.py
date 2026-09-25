@@ -126,7 +126,13 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
     # Without it, two rosters digested on the same day interleave into one
     # undistinguishable list. Nullable, so the rows written before it survive.
-    "recommendations": {"roster_id": "INTEGER", "run_id": "TEXT", "expires_utc": "TEXT"},
+    "recommendations": {
+        "roster_id": "INTEGER",
+        "run_id": "TEXT",
+        "expires_utc": "TEXT",
+        "p_clear": "REAL",
+        "games_after": "INTEGER",
+    },
     "digest_runs": {
         "last_ingest_at": "TEXT",
         "run_id": "TEXT",

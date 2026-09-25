@@ -49,6 +49,8 @@ class Item:
     rationale: str
     expires_utc: str | None = None
     """When the call stops meaning anything: his next tip."""
+    p_clear: float | None = None
+    """A standing rule's chance of firing, as the notification printed it."""
 
     def expired(self, now: datetime) -> bool:
         return self.expires_utc is not None and _utc(self.expires_utc) <= now
@@ -184,6 +186,7 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
             ev_pass=r["ev_pass"],
             rationale=r["rationale"] or "",
             expires_utc=r["expires_utc"] if "expires_utc" in r.keys() else None,
+            p_clear=r["p_clear"] if "p_clear" in r.keys() else None,
         )
         for r in conn.execute(
             f"""
@@ -448,14 +451,15 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             "<tr>"
             f"<td class=who>{html.escape(i.name)}</td>"
             f"<td class=num><strong>{i.threshold:.0f}</strong></td>"
+            f"<td class=num>{'' if i.p_clear is None else f'{i.p_clear:.0%}'}</td>"
             "</tr>"
             for i in sorted(by_night[day], key=lambda x: -(x.threshold or 0))
         )
         parts.append(
             f"<h2>{html.escape(label)}</h2>"
-            "<p class=hint>Lock him if he clears this.</p>"
+            "<p class=hint>Lock him if he clears this. Chance: how likely he is to.</p>"
             "<table><thead><tr><th>Player</th>"
-            "<th class=num>Clears</th></tr></thead>"
+            "<th class=num>Clears</th><th class=num>Chance</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
 

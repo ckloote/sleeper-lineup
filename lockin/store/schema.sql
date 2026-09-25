@@ -498,6 +498,11 @@ CREATE TABLE IF NOT EXISTS recommendations (
     -- merge under OR REPLACE, so a page could show half of each (review 12).
     run_id          TEXT,
     expires_utc     TEXT,            -- a call's deadline: his next tipoff
+    -- A standing rule's chance of firing, and the games he has after that night.
+    -- The notification prints the chance beside the threshold; without it here
+    -- the page showed a threshold with no sense of whether it could be met.
+    p_clear         REAL,
+    games_after     INTEGER,
     PRIMARY KEY (generated_at, week, sleeper_id, action, for_day)
 );
 
