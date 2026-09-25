@@ -630,13 +630,21 @@ def build(
     known_through = day - 1
     week = resolve_week(conn, ctx.season, as_of)
     if week is None:
+        note = "no scheduled games on or after this date; the season is over"
+        if calendar.opening_night(conn, ctx.season) is None:
+            # Without the schedule a week is found from box scores dated on or
+            # after this morning, which a season in progress does not have yet.
+            note = (
+                "no NBA schedule ingested, so this morning's week cannot be found."
+                " Run `lockin ingest` without --skip-nba."
+            )
         return Digest(
             as_of=as_of,
             week=0,
             roster_id=roster_id,
             opponent_roster_id=None,
             known_through=known_through,
-            note="no scheduled games on or after this date; the season is over",
+            note=note,
         )
 
     starters = ctx.lineup_ids(week, roster_id)
@@ -691,10 +699,20 @@ def build(
         digest.warnings.append(
             Warning(
                 sleeper_id=pid,
-                name=names.get(pid, pid) or "schedule",
+                name=names.get(pid, pid),
                 kind="schedule disagreement",
                 detail=detail,
                 short="schedule? check",
+            )
+        )
+    if not (mine_slate.scheduled and theirs_slate.scheduled):
+        digest.warnings.append(
+            Warning(
+                sleeper_id="",
+                name="schedule",
+                kind="no schedule",
+                detail="no NBA schedule ingested; the rest of the week was read from box scores",
+                short="no NBA schedule",
             )
         )
     if not mine or not theirs:
@@ -1143,9 +1161,15 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
         "INSERT INTO digest_banked (run_id, sleeper_id, score) VALUES (?, ?, ?)",
         [(run_id, pid, score) for pid, score in digest.banked.items()],
     )
+    # One row per (player, kind), the table's key. A second warning under the
+    # same key used to abort the whole insert — run header, calls and all — so
+    # the first is kept and the repeat dropped.
+    warnings: dict[tuple[str, str], Warning] = {}
+    for w in digest.warnings:
+        warnings.setdefault((w.sleeper_id, w.kind), w)
     conn.executemany(
         "INSERT INTO digest_warnings (run_id, sleeper_id, kind, detail, short)"
         " VALUES (?, ?, ?, ?, ?)",
-        [(run_id, w.sleeper_id, w.kind, w.detail, w.short) for w in digest.warnings],
+        [(run_id, w.sleeper_id, w.kind, w.detail, w.short) for w in warnings.values()],
     )
     return len(rows)

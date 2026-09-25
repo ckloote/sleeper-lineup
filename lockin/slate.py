@@ -48,7 +48,12 @@ class WeekSlate:
     — in progress, or unknown. Their outcome is not in the panel, so a digest
     reading this morning's state must not proceed as though it were."""
     warnings: list[tuple[str, str]] = field(default_factory=list)
-    """(sleeper_id, detail) where the schedule sources disagree; "" for the whole slate."""
+    """(sleeper_id, detail) where the schedule sources disagree about a player."""
+    scheduled: bool = True
+    """False when no NBA schedule is ingested, and the rest of the week was read
+    from box scores. A fact about the run, not about a player: carried as one
+    flag so a digest reports it once, not once per team (and not twice to a
+    table keyed on the player)."""
 
     def next_tipoff(self, sleeper_id: str, after_day: int) -> str | None:
         """When his next game after ``after_day`` tips — when a lock window closes."""
@@ -115,7 +120,7 @@ def week_slate(
                 slate.games[pid] = [
                     g if g.day <= known_through else Game(g.index, g.day, False, 0.0) for g in games
                 ]
-        slate.warnings.append(("", "no NBA schedule ingested; future games read from box scores"))
+        slate.scheduled = False
         return slate
 
     monday, sunday = calendar.week_bounds(week, opening)

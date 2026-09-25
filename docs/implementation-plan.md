@@ -3102,9 +3102,11 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
 
 **Before opening night**
 
-- **W1. Save a digest that has no schedule.** The missing-schedule notice becomes one
-  flag per slate, emitted once per digest under its own kind. `persist()` drops duplicate
-  warnings rather than losing the whole run to one.
+- **W1. Save a digest that has no schedule.** ✅ Done. `WeekSlate.scheduled` is a flag,
+  and the digest emits one `no schedule` warning, not one per team. `persist()` keeps the
+  first warning per key rather than losing the whole run to a repeat. Fixed alongside it:
+  without a schedule, a season in progress used to be reported as over. It now says the
+  week cannot be found, and why (`test_runs.py`).
 - **W2. The clearing chance on the page.** `recommendations` gains `p_clear` and
   `games_after`. `lockin advice` prints the chance beside each standing rule, as the
   notification already does.
