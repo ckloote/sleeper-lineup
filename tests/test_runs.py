@@ -220,3 +220,40 @@ def test_a_database_no_recording_ingest_has_touched_uses_the_old_log(tmp_path):
         )
         assert not runs.any_recorded(conn)
         assert digest_mod.last_ingest_at(conn) == "2026-10-28T10:31:00+00:00"
+
+
+def test_a_run_that_skipped_the_nba_does_not_vouch_for_a_live_digest(tmp_path):
+    """--skip-nba finishes every step it attempts, and so used to count as
+    complete. Without the NBA's statuses nothing it wrote says last night is final."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=8))
+    cfg = config_for(tmp_path, season)
+    ingest(season, cfg, weeks=[1, 2])
+    season.play_through(OPENING + timedelta(days=9))
+    ingest(season, cfg, weeks=[1, 2], skip_nba=True)
+
+    today = season.today.isoformat()
+    now = datetime.combine(season.today, datetime.min.time(), UTC) + timedelta(hours=13)
+    with connect(cfg) as conn:
+        newest, vouching = runs.latest_complete(conn, 2), runs.latest_complete(conn, 2, live=True)
+        report = digest_mod.morning(conn, season.season, 1, today, live=True, now=now)
+
+    assert runs.skipped(newest) == {"nba"} and vouching["run_id"] < newest["run_id"]
+    assert report.abstained and "--skip-nba" in report.note
+
+
+def test_the_page_says_how_old_each_input_was(tmp_path):
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=8))
+    cfg = config_for(tmp_path, season)
+    ingest(season, cfg, weeks=[1, 2])
+
+    with connect(cfg) as conn:
+        digest_mod.persist(conn, a_digest(week=2))
+        row = conn.execute("SELECT schedule_at, status_at FROM digest_runs").fetchone()
+        run = advice.latest_run(conn, 1)
+
+    page = advice.render(run, today="2026-10-28", now=datetime(2026, 10, 28, 14, tzinfo=UTC))
+    assert row["schedule_at"] and row["status_at"]
+    assert "Inputs: box scores" in page and "designations" in page
+    assert "not recorded" not in page, page[page.index("Inputs:") :][:300]

@@ -144,7 +144,10 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "seed": "INTEGER",
         "model": "TEXT",
         "abstained": "INTEGER",
+        "schedule_at": "TEXT",
+        "status_at": "TEXT",
     },
+    "ingest_runs": {"skipped": "TEXT"},
 }
 
 

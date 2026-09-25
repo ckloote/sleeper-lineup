@@ -489,9 +489,15 @@ def stale_ingest(conn: sqlite3.Connection, week: int, known_through: int) -> str
     of the newest log line: a players refresh today on top of a stats fetch
     yesterday, or a run that died after committing its first week, looked fresh
     to the old check (review finding 9). It must have finished after last
-    night's games did.
+    night's games did, and must not have skipped the NBA step that says they had.
     """
-    run = runs.latest_complete(conn, week)
+    newest = runs.latest_complete(conn, week)
+    if newest is not None and runs.skipped(newest) & runs.LIVE_REQUIRES:
+        return (
+            "the last ingest skipped the NBA schedule (--skip-nba), which is what says"
+            " last night is final. Run `lockin ingest` without it."
+        )
+    run = runs.latest_complete(conn, week, live=True)
     if run is None:
         return f"no complete ingest covering week {week}. Run `lockin ingest --weeks current`."
     if run["finished_at"] < slate_final_at(known_through):
@@ -1055,8 +1061,9 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
     Enough is kept to audit a call later without recomputing it — which §20
     says would give a different answer and §12 says the inputs no longer
     support: where the banked state came from and what it was, per player; the
-    poll and the ingest it read; the simulation count, seed and model; and the
-    warnings the notification carried.
+    poll and the ingest it read, and how old the schedule and designations were;
+    the simulation count, seed and model; and the warnings the notification
+    carried.
 
     Written even when there are no calls — "no matchup this week" and "no
     advice today, and why" are real answers, and a page that showed nothing at
@@ -1072,8 +1079,8 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
              projected, opponent_projected, margin_p10, margin_p50, margin_p90,
              banked_total, banked_slots, state_supplied, last_ingest_at, note,
              run_id, state_source, opponent_state, poll_observed_at, ingest_run_id,
-             n_sims, seed, model, abstained)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             n_sims, seed, model, abstained, schedule_at, status_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -1101,6 +1108,8 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             digest.seed,
             digest.model,
             int(digest.abstained),
+            runs.schedule_fetched_at(conn),
+            runs.designations_read_at(conn),
         ),
     )
 

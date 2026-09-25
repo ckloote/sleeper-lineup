@@ -151,7 +151,7 @@ def run_ingest(
 
     if skip_nba:
         _classify(conn, today, echo)
-        runs.finish(conn, ingest_run)
+        runs.finish(conn, ingest_run, skipped=["nba"])
         return
 
     sched = nba_ingest.ingest_schedule(conn, cfg.season, feed=feed)
@@ -171,7 +171,7 @@ def run_ingest(
     linked, unlinked = nba_ingest.link_games(conn, cfg.season)
     echo(f"  game links  {linked} linked, {unlinked} unlinked")
     _classify(conn, today, echo)
-    runs.finish(conn, ingest_run)
+    runs.finish(conn, ingest_run, skipped=["tipoffs"] if skip_tipoffs else [])
 
 
 def _classify(conn: sqlite3.Connection, today: str, echo: Callable[[str], None]) -> None:
