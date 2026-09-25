@@ -122,6 +122,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "mean_stake": "REAL",
         "share_lo": "REAL",
         "share_hi": "REAL",
+        "p_above_next": "REAL",
     },
     "roster_strength": {"availability": "REAL", "points_per_game_played": "REAL"},
     # Without it, two rosters digested on the same day interleave into one

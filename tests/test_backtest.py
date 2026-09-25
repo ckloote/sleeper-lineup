@@ -260,6 +260,28 @@ def test_mcnemar_is_empty_safe():
     assert backtest.mcnemar(np.zeros((0, 2), dtype=bool)) == (0, 0, 0.0)
 
 
+def test_the_matchup_z_is_the_plain_z_when_no_matchup_repeats():
+    pairs = np.array([[1, 0]] * 9 + [[0, 1]] * 3 + [[1, 1]] * 5, dtype=bool)
+    assert backtest.clustered_mcnemar(pairs, list(range(len(pairs)))) == pytest.approx(
+        backtest.mcnemar(pairs)[2]
+    )
+
+
+def test_the_two_sides_of_one_matchup_are_counted_as_one_unit():
+    """Review 2026-09-23: both sides of a matchup are two rows, not two samples.
+
+    Six matchups that each flip one side for rollout and the other for greedy
+    say nothing about either policy. The plain z sees twelve discordant rows
+    that happen to balance. By matchup, the six contribute nothing.
+    """
+    even = np.array([[1, 0], [0, 1]] * 6, dtype=bool)
+    lean = np.array([[1, 0]] * 4, dtype=bool)
+    pairs = np.vstack([even, lean])
+    clusters = [i // 2 for i in range(12)] + [100 + i for i in range(4)]
+    assert backtest.mcnemar(pairs)[2] == pytest.approx(4 / np.sqrt(16))
+    assert backtest.clustered_mcnemar(pairs, clusters) == pytest.approx(4 / np.sqrt(4))
+
+
 def test_phase5_gate_fails_when_rollout_loses_on_wins():
     result = matchup_rows([(200.0, 300.0, 250.0)] * 10)
     check = backtest.check_rollout_beats_greedy_on_wins(result)

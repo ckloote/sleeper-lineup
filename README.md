@@ -294,6 +294,13 @@ replayed 250 roster-weeks; 80 held out (weeks 18-25), 480 starter-weeks
     236 team-weeks — rollout 127 wins, greedy 118; flipped +14/-5, McNemar z=+2.06
 ```
 
+> **Re-run 2026-09-24:** this output is from Phase 5 (2026-08-08). On today's 2025-26 file
+> the comparison reads 123 v 118, flipped +12/−7, z = +1.15, and +1.21 counting each matchup
+> once. The rollout gate and its held-out check now fail. The Phase 5 code gives the same
+> numbers on today's file, so the data changed, not the code. Whether the digest keeps the
+> rollout policy is an open decision
+> ([implementation-plan.md §15, §21 W6](docs/implementation-plan.md)).
+
 Each roster's **actual lineup is held fixed** and only the stopping rule varies. That is
 what isolates the decision the engine makes; letting the policy pick lineups too would
 confound stopping with assignment and compare against lineups nobody fielded.

@@ -660,13 +660,14 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
             for d in report.decisions
         ],
     )
+    stability = rank_stability(report)
     conn.execute("DELETE FROM manager_scorecards")
     conn.executemany(
         "INSERT INTO manager_scorecards"
         " (roster_id, decisions, squandered_share, mean_stake, mean_regret, right_rate,"
         "  regret_lo, regret_hi, share_lo, share_hi, divergent, divergent_right_rate,"
-        "  upside_share, upside_decisions, rode_to_zero, computed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  upside_share, upside_decisions, rode_to_zero, computed_at, p_above_next)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 s.roster_id,
@@ -683,6 +684,7 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
                 s.upside_decisions,
                 s.rode_to_zero,
                 stamp,
+                stability.get(s.roster_id),
             )
             for s in report.scorecards
         ],
@@ -690,24 +692,78 @@ def persist(conn: sqlite3.Connection, report: ManagerReport) -> tuple[int, int]:
     return len(report.decisions), len(report.scorecards)
 
 
-def bootstrap_regret(
-    report: ManagerReport, roster_id: int, *, resamples: int = 2000, seed: int = 1
-) -> tuple[float, float]:
-    """90% interval on a manager's mean regret.
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 2
 
-    Around 220 decisions each is not many. Without this the middle of the table
-    reads as an ordering when it is really a tie.
+
+def _week_draws(report: ManagerReport, resamples: int, seed: int) -> tuple[list[int], np.ndarray]:
+    """Weeks drawn with replacement, one row per replicate, shared by every roster.
+
+    **Weeks, not decisions** (review 2026-09-23). A roster's decisions in one week
+    share one matchup, one opponent and one set of simulated paths, so they are
+    not independent draws. Resampling them one at a time treats 220 correlated
+    decisions as 220 separate pieces of evidence and draws the band too narrow.
+    A week is the unit that is roughly independent.
+
+    **One draw for all rosters.** Two rosters facing each other share their
+    week, so a comparison between rosters must resample the same weeks for both.
     """
-    values = np.array([d.regret for d in report.decisions if d.roster_id == roster_id])
-    if len(values) == 0:
-        return 0.0, 0.0
+    weeks = sorted({d.week for d in report.decisions})
     rng = np.random.default_rng(seed)
-    means = [values[rng.integers(0, len(values), len(values))].mean() for _ in range(resamples)]
+    return weeks, rng.integers(0, len(weeks), (resamples, len(weeks)))
+
+
+def _block_ratio(
+    report: ManagerReport,
+    roster_id: int,
+    numerator,
+    denominator,
+    *,
+    resamples: int,
+    seed: int,
+) -> np.ndarray:
+    """One roster's ratio of per-week sums, in every bootstrap replicate.
+
+    A week the roster made no decision in contributes zeros to both sums.
+    """
+    weeks, draws = _week_draws(report, resamples, seed)
+    index = {w: i for i, w in enumerate(weeks)}
+    num, den = np.zeros(len(weeks)), np.zeros(len(weeks))
+    for d in report.decisions:
+        if d.roster_id == roster_id:
+            num[index[d.week]] += numerator(d)
+            den[index[d.week]] += denominator(d)
+    top, bottom = num[draws].sum(axis=1), den[draws].sum(axis=1)
+    return np.divide(top, bottom, out=np.zeros_like(top), where=bottom > 0)
+
+
+def bootstrap_regret(
+    report: ManagerReport,
+    roster_id: int,
+    *,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float]:
+    """90% interval on a manager's mean regret, resampling weeks.
+
+    Around 220 decisions each is not many, and they come in about 24 correlated
+    weekly blocks. Without this the middle of the table reads as an ordering
+    when it is really a tie.
+    """
+    if not any(d.roster_id == roster_id for d in report.decisions):
+        return 0.0, 0.0
+    means = _block_ratio(
+        report, roster_id, lambda d: d.regret, lambda d: 1.0, resamples=resamples, seed=seed
+    )
     return float(np.percentile(means, 5)), float(np.percentile(means, 95))
 
 
 def bootstrap_squandered(
-    report: ManagerReport, roster_id: int, *, resamples: int = 2000, seed: int = 2
+    report: ManagerReport,
+    roster_id: int,
+    *,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
 ) -> tuple[float, float]:
     """90% interval on the quantity the table is actually **sorted** by.
 
@@ -720,17 +776,38 @@ def bootstrap_squandered(
     Resampled as a ratio of sums, matching how the statistic is computed:
     resampling numerator and denominator separately would break the pairing
     between a decision's regret and the stake it was taken at, and that pairing
-    is the entire point of the normalisation.
+    is the entire point of the normalisation. The unit resampled is the week
+    (`_week_draws`).
     """
-    pairs = [(d.regret, d.stake) for d in report.decisions if d.roster_id == roster_id]
-    if not pairs:
+    if not any(d.roster_id == roster_id for d in report.decisions):
         return 0.0, 0.0
-    regret = np.array([r for r, _ in pairs])
-    stake = np.array([s for _, s in pairs])
-    rng = np.random.default_rng(seed)
-    shares = []
-    for _ in range(resamples):
-        draw = rng.integers(0, len(pairs), len(pairs))
-        total = stake[draw].sum()
-        shares.append(regret[draw].sum() / total if total else 0.0)
+    shares = _block_ratio(
+        report, roster_id, lambda d: d.regret, lambda d: d.stake, resamples=resamples, seed=seed
+    )
     return float(np.percentile(shares, 5)), float(np.percentile(shares, 95))
+
+
+def rank_stability(
+    report: ManagerReport,
+    *,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> dict[int, float]:
+    """For each roster but the last, P(it ranks above the one ranked below it).
+
+    Overlapping bands say two managers *might* be in either order; this says how
+    often they are, across the same week-resampled replicates as the bands. It
+    answers the question a reader of a ranking actually asks, one neighbour at a
+    time. 0.5 is a coin flip.
+    """
+    ranked = [s.roster_id for s in report.ranked()]
+    shares = {
+        r: _block_ratio(
+            report, r, lambda d: d.regret, lambda d: d.stake, resamples=resamples, seed=seed
+        )
+        for r in ranked
+    }
+    return {
+        above: float(np.mean(shares[above] < shares[below]))
+        for above, below in zip(ranked, ranked[1:], strict=False)
+    }

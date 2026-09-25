@@ -432,7 +432,10 @@ CREATE TABLE IF NOT EXISTS manager_scorecards (
     upside_share         REAL NOT NULL,   -- points capture, for contrast only
     upside_decisions     INTEGER NOT NULL,
     rode_to_zero         INTEGER NOT NULL,
-    computed_at          TEXT NOT NULL
+    computed_at          TEXT NOT NULL,
+    -- P(this roster ranks above the next one down), across the same
+    -- week-resampled replicates as the bands. NULL for the last.
+    p_above_next         REAL
 );
 
 

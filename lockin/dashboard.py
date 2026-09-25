@@ -81,6 +81,8 @@ class Row:
     ceiling: float | None
     lineup_gap: float | None
     availability: float | None
+    p_above_next: float | None = None
+    """How often this manager stays ahead of the next one down, weeks resampled."""
 
 
 def load(conn: sqlite3.Connection, labels: dict[int, str] | None = None) -> list[Row]:
@@ -109,6 +111,7 @@ def load(conn: sqlite3.Connection, labels: dict[int, str] | None = None) -> list
             ceiling=r["ceiling"],
             lineup_gap=r["lineup_gap"],
             availability=r["availability"],
+            p_above_next=r["p_above_next"] if "p_above_next" in r.keys() else None,
         )
         for r in conn.execute(
             """
@@ -197,6 +200,7 @@ def render(rows: list[Row], *, stamp: str | None = None) -> str:
             f"<td class=who>{who}</td>"
             f"<td class=num><strong>{row.squandered_share:.1%}</strong></td>"
             f"<td class=bar>{_bar(row, lo, hi)}</td>"
+            f"<td class=num>{'' if row.p_above_next is None else f'{row.p_above_next:.0%}'}</td>"
             f"<td class=num>{1 - row.right_rate:.1%}</td>"
             f"<td class=num>{row.mean_stake:.2%}</td>"
             f"<td class=num>{row.decisions}</td>"
@@ -280,6 +284,7 @@ Lower is better &mdash; but read the bars, not the ranks:
     <th class=num>#</th><th>Manager</th>
     <th class=num>Squan&shy;dered</th>
     <th class=bar>90% band</th>
+    <th class=num>Holds</th>
     <th class=num>Wrong</th><th class=num>Stake</th><th class=num>n</th>
     <th class=num>Pts cap</th><th class=num>Zeros</th>
     <th class=num>Ceiling</th><th class=num>Lineup cost</th>
@@ -289,6 +294,11 @@ Lower is better &mdash; but read the bars, not the ranks:
 </div>
 
 <div class=notes>
+<p><strong>Holds</strong> is how often a manager stays ahead of the one ranked
+below, across the same resamples as the bands. 50% is a coin flip. Both resample
+whole weeks, not single decisions: a week's decisions share one matchup, so they
+are closer to one piece of evidence than to a dozen.</p>
+
 <p><strong>Squandered</strong> is regret as a share of the win probability that
 was at stake, which divides out circumstance: a hopeless matchup carries a mean
 stake of 3.0% against 10.4% in a live one, so being blown out repeatedly earns a
