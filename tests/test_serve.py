@@ -25,32 +25,21 @@ import urllib.request
 from collections.abc import Iterator
 
 import pytest
+from live_fixture import advising_morning
 
 from lockin import digest as digest_mod
 from lockin import serve
-from lockin.config import Config
-from lockin.store.db import apply_schema, connect_readonly, session
-
-cfg = Config.from_env()
-pytestmark = pytest.mark.skipif(
-    not cfg.db_path.exists(), reason=f"no database at {cfg.db_path}; run `lockin ingest`"
-)
-
-AS_OF = "2026-01-08"
-BANKED = {"1000": 46.0, "1787": 47.5}
+from lockin.store.db import connect_readonly, session
 
 
 @pytest.fixture(scope="module")
-def report(season_db):
-    conn = sqlite3.connect(season_db)
-    conn.row_factory = sqlite3.Row
-    apply_schema(conn)
-    try:
-        ctx = digest_mod.load_context(conn, cfg.season)
-        roster_id = digest_mod.roster_for_user(conn, cfg.user_id)
-        return digest_mod.build(ctx, roster_id, AS_OF, n_sims=150, n_paths=150, locked=dict(BANKED))
-    finally:
-        conn.close()
+def report(tmp_path_factory):
+    """A live digest from the synthetic season, so a clean checkout runs this suite.
+
+    It used to replay the recorded 2025-26 season, which is gitignored: without
+    it, the only part of the project that listens on a network went untested.
+    """
+    return advising_morning(tmp_path_factory.mktemp("serve"))[2]
 
 
 @pytest.fixture
@@ -181,7 +170,7 @@ def test_a_new_digest_shows_up_without_restarting(served, report):
             "INSERT OR REPLACE INTO digest_runs"
             " (generated_at, roster_id, as_of, week, p_win, state_supplied)"
             " VALUES ('2099-01-01T00:00:00+00:00', ?, ?, ?, 0.07, 1)",
-            (report.roster_id, AS_OF, report.week),
+            (report.roster_id, report.as_of, report.week),
         )
 
     after = fetch(f"{base}/")[1]

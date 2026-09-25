@@ -38,7 +38,9 @@ def season_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """
     cfg = Config.from_env()
     if not cfg.db_path.exists():
-        pytest.skip(f"no database at {cfg.db_path}; run `lockin ingest`")
+        # By design, not by accident: these suites test against a real season.
+        # The live paths run on the synthetic one (tests/live_fixture.py).
+        pytest.skip(f"recorded-season suite: no 2025-26 database at {cfg.db_path} (LOCKIN_DB)")
     dst = tmp_path_factory.mktemp("season") / cfg.db_path.name
     src = sqlite3.connect(f"file:{cfg.db_path}?mode=ro", uri=True)
     out = sqlite3.connect(dst)
