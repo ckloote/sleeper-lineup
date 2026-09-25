@@ -274,32 +274,38 @@ in.
 Replays every roster under each stopping policy. Exits nonzero on any gate failure.
 
 ```bash
-uv run lockin backtest
-uv run lockin backtest --paths 1000 --json
+uv run lockin backtest                      # 5 replays at 2,000 paths, ~2 minutes on a Pi 5
+uv run lockin backtest --seeds 1 --json     # one replay: quick, and not a gate
 ```
 
 ```
-replayed 250 roster-weeks; 80 held out (weeks 18-25), 480 starter-weeks
+replayed 250 roster-weeks 5 time(s) at 2000 paths; 80 held out (weeks 18-25), 480 starter-weeks
 
   means over the 66 of 80 held-out roster-weeks where every policy ran
   policy         points   zeroed   locked      wins
   never_lock      213.6       30        0     33/66
   lock_first      233.5        9      387     42/66
-  greedy          289.5       13      303     61/66
-  rollout         284.1       15      264     59/66
+  greedy          288.9       13      304     61/66
+  rollout         285.4       16      271     59/66
   oracle          310.0        9        -         -   perfect foresight, not attainable
-  actual          244.1        -        -         -   advisory: reads the field Sleeper rewrote
+  actual          245.1        -        -         -   advisory: reads the field Sleeper rewrote
 
-  rollout vs greedy, both against a greedy opponent, all ten rosters:
-    236 team-weeks — rollout 127 wins, greedy 118; flipped +14/-5, McNemar z=+2.06
+  rollout vs greedy, both against a greedy opponent, all ten rosters.
+  each matchup is seen from both sides, so z is also given by matchup:
+    seed 20260808  rollout 126, greedy 118 of 236; flipped +12/-4, z=+2.00, by matchup +2.31
+    seed 20260809  rollout 130, greedy 118 of 236; flipped +14/-2, z=+3.00, by matchup +3.00
+    seed 20260810  rollout 129, greedy 118 of 236; flipped +14/-3, z=+2.67, by matchup +2.84
+    seed 20260811  rollout 130, greedy 118 of 236; flipped +16/-4, z=+2.68, by matchup +3.00
+    seed 20260812  rollout 121, greedy 118 of 236; flipped +11/-8, z=+0.69, by matchup +0.77
 ```
 
-> **Re-run 2026-09-24:** this output is from Phase 5 (2026-08-08). On today's 2025-26 file
-> the comparison reads 123 v 118, flipped +12/−7, z = +1.15, and +1.21 counting each matchup
-> once. The rollout gate and its held-out check now fail. The Phase 5 code gives the same
-> numbers on today's file, so the data changed, not the code. Whether the digest keeps the
-> rollout policy is an open decision
-> ([implementation-plan.md §15, §21 W6](docs/implementation-plan.md)).
+**Why five replays.** Each replay is one draw of the policies' own Monte Carlo, and rollout
+decides close lock/pass calls by comparing two simulated win probabilities. One replay at
+the old 400 paths decided the Phase 5 gate. It passed in August (z = +2.06) and failed in
+September (+1.15) with no code change, and across 40 seeds on the same data it passed in
+14. The last replay above shows the same thing at 2,000 paths. The gate now needs rollout
+to out-win greedy in every replay, and the median z to clear 1.64
+([implementation-plan.md §15, §21 W8](docs/implementation-plan.md)).
 
 Each roster's **actual lineup is held fixed** and only the stopping rule varies. That is
 what isolates the decision the engine makes; letting the policy pick lineups too would
@@ -320,17 +326,18 @@ about 75%. Greedy sits just under the theoretical ceiling for a policy with no f
 which is where a correct one belongs and where a leaking one could not. That comparison is
 a gate, not a comment.
 
-**Rollout gives up points and gains wins.** Paired over the same roster-weeks it scores
-1.7 fewer points than greedy across the season (5.4 fewer on the held-out block) and wins
-nine more matchups. Every mean in the table above is taken over the roster-weeks where
-*all* policies ran — rollout needs an opponent, so it is absent from weeks 23-24's
-eliminated teams and from unscored week 25, and averaging each policy over its own rows
-would compare different sets of weeks. That is the objective working: the engine
-maximises P(win), not points, and the two diverge exactly where it matters — trailing
-badly, the right play is to take variance and pass on a safe score; leading comfortably,
-it is to bank everything. A rollout that matched greedy on points would be evidence it was
-ignoring the opponent. It also zeroes 15 starter slots against greedy's 38, because a
-zeroed slot loses a week outright rather than shaving a margin.
+**Rollout gives up points and gains wins.** Paired over the same roster-weeks, averaged
+over the five replays, it scores 1.8 fewer points than greedy per roster-week and wins 9.2
+more of the 236 team-weeks (3 to 12, depending on the replay). Every mean in the table
+above is taken over the roster-weeks where *all* policies ran — rollout needs an opponent,
+so it is absent from weeks 23-24's eliminated teams and from unscored week 25, and
+averaging each policy over its own rows would compare different sets of weeks. That is the
+objective working: the engine maximises P(win), not points, and the two diverge exactly
+where it matters — trailing badly, the right play is to take variance and pass on a safe
+score; leading comfortably, it is to bank everything. A rollout that matched greedy on
+points would be evidence it was ignoring the opponent. It also zeroes 16 starter slots
+against greedy's 37, because a zeroed slot loses a week outright rather than shaving a
+margin.
 
 The win comparison pools **all ten rosters** — one roster's held-out block is five or six
 matchups, which cannot resolve an effect this size. The held-out block is still reported,

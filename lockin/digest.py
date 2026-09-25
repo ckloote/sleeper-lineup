@@ -50,7 +50,7 @@ from datetime import UTC, datetime
 import numpy as np
 
 from lockin import __version__, calendar, clock
-from lockin.backtest import greedy_thresholds, starter_dnp_scale
+from lockin.backtest import DEFAULT_PATHS, greedy_thresholds, starter_dnp_scale
 from lockin.core.policy import Game
 from lockin.core.projections import (
     EWMAProjectionSource,
@@ -573,7 +573,7 @@ def morning(
     roster_id: int,
     as_of: str,
     *,
-    n_sims: int = 400,
+    n_sims: int = DEFAULT_PATHS,
     locked: dict[str, float] | None = None,
     live: bool = False,
     now: datetime | None = None,
@@ -606,8 +606,8 @@ def build(
     roster_id: int,
     as_of: str,
     *,
-    n_sims: int = 400,
-    n_paths: int = 400,
+    n_sims: int = DEFAULT_PATHS,
+    n_paths: int = DEFAULT_PATHS,
     seed: int = 20260815,
     forward_nights: int = FORWARD_NIGHTS,
     locked: dict[str, float] | None = None,
@@ -1003,7 +1003,7 @@ def render(digest: Digest, *, compact: bool = False) -> str:
         for rule in sorted(by_night[night], key=lambda r: -r.threshold):
             chance = "" if np.isnan(rule.p_clear) else f"  {rule.p_clear:.0%}"
             # Whole points. The Monte Carlo standard deviation on a threshold is
-            # 1-3 points at the default 400 sims, so a decimal place would be
+            # about a point at the default 2,000 sims, so a decimal place would be
             # advertising precision that is not there — and this is a number the
             # user applies from memory on a phone.
             out.append(f"  {_short(rule.name, 20):<20}{rule.threshold:>7.0f}{chance}")

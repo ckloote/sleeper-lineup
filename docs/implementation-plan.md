@@ -9,10 +9,10 @@ history, kept for the reasoning.
 
 | Work | Status | Where |
 |---|---|---|
-| Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete. The Phase 5 wins gate no longer passes on today's data: an open decision | §9-§11, §13-§15; §21 W6 |
+| Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete. The Phase 5 gate is judged over five replays since 2026-09-24 | §9-§11, §13-§15; §21 W8 |
 | Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
 | Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
-| The review's remaining items, and one bug found auditing it | W1-W7 done on branch `review-followups`, not yet merged or deployed; one open decision (the rollout policy) | §21, "What remains" |
+| The review's remaining items, and one bug found auditing it | W1-W8 done on branch `review-followups`, not yet merged or deployed | §21, "What remains" |
 | Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
 | 2026-27 season | Opens 2026-10-20 | `day-one.md` |
 
@@ -1836,23 +1836,48 @@ pairs is printed so nobody reads `z=+1.00` as evidence of anything. Weeks 1-17 i
 the projection layer's hyperparameters, but both policies consume the same projections, so
 the *comparison* is not obviously advantaged by that.
 
-> **Re-run 2026-09-24 (§21, W6): on today's data this gate fails.** The current 2025-26
-> file gives rollout 123 v greedy 118, flipped +12/−7, z = +1.15. The held-out block goes
-> 31 v 33, the wrong direction on 4 discordant pairs. The Phase 5 commit's own code
-> (`2b07bf1`) gives the same numbers on the same file, and so does the code from just
-> before the review fixes (`66a1d99`). Removing the 2026-09-20 repair rows changes
-> nothing either. The code did not move this; the data did, somewhere between 2026-08-08
-> and 2026-09-23. In that window the file was re-ingested repeatedly, and Sleeper rewrote
-> the completed season (§12). No copy from the window survives to show which change it
-> was. Counting each matchup once, since both of its rows share one greedy-v-greedy game,
-> gives z = +1.21, which also fails.
+> **Re-run 2026-09-24 (§21, W6, W8): one replay was one draw, and that is resolved.**
 >
-> So the evidence that rollout beats greedy on wins is **not robust**. It was +2.06 on one
-> version of this season and +1.15 on another, and those versions differ only by upstream
-> rewrites and re-ingest. Nothing here shows rollout is worse. It still zeroes fewer slots
-> and gives up about two points a week, as designed. But the gate that justified it no
-> longer passes. The digest's calls come from the rollout policy, so whether to keep it,
-> fall back to greedy, or re-gate it on 2026-27 is an open decision (§21, "What remains").
+> *What happened.* On today's 2025-26 file this gate failed: rollout 123 v greedy 118,
+> flipped +12/−7, z = +1.15, where this section recorded +2.06. The Phase 5 commit's own
+> code (`2b07bf1`) gave the same numbers on the same file, and removing the 2026-09-20
+> repair rows changed nothing. So the code had not moved it. What had moved it was that
+> every roster-week drew from **one random stream, in order**. Any change to any input
+> shifted every later draw and reseeded the whole replay. The file was re-ingested
+> repeatedly between August and September (§12), and that was enough.
+>
+> *What it meant.* The 19 discordant team-weeks that decide the test include several won
+> or lost by under three points. At z ≥ 1.64 the gate needs rollout to take 14 of 19. One
+> close team-week changing hands decides it. Run under 40 seeds on identical data at the
+> 400 paths used above, the gate passed in **14 of 40**, with z anywhere from 0.00 to
+> +3.05. The +2.06 here and the +1.15 in September are both ordinary draws.
+>
+> Greedy was never the noisy one: it won 117 or 118 in every seed. Rollout decides close
+> lock/pass calls by comparing two simulated win probabilities, and at 400 paths the noise
+> in those estimates decides some of them. More paths made it **better**, not just
+> steadier:
+>
+> | 12 seeds each | 400 paths | 2,000 paths |
+> |---|---:|---:|
+> | rollout − greedy wins, mean (range) | +3.7 (0 to +9) | +8.7 (+5 to +11) |
+> | z, mean (range) | +0.86 (0.00 to +2.14) | +2.04 (+1.29 to +2.67) |
+> | gate passes | 4 of 12 | 9 of 12 |
+> | rollout loses the held-out block | 4 of 12 | 0 of 12 |
+> | points given up per roster-week | 3.5 | 2.2 |
+>
+> These are from the replay after W8, with its keyed streams. The sweep on the replay
+> before W8 said the same: 14 of 40 at 400 paths, 10 of 12 at 2,000. At 5,000 paths the
+> figures move within their own noise (8 seeds: rollout +9.1 wins, z +2.20, 8 of 8
+> passing, 2.2 points) at 3.2 times the cost, so 2,000 is the default. The "1.74 points and nine wins" above
+> were one favourable draw at 400.
+>
+> *What changed (W8).* Each roster-week now draws from its own stream. Both policies use
+> 2,000 paths. The gate is judged over five replays: rollout must out-win greedy in every
+> one, and the median z must clear 1.64 both plain and by matchup. On today's file the
+> five replays give rollout +3 to +12 wins (mean +9.2), median z +2.67 (+2.84 by matchup),
+> the held-out block +1 to +5, and 1.84 points a roster-week. **All gates pass.** One of
+> the five, alone, has z = +0.69, which is why one replay is not a gate. The decision it
+> settles: **the digest keeps rollout**, and now runs it at 2,000 simulations too.
 
 ### The finding that made the first build fail: a lineup slot is evidence
 
@@ -3200,19 +3225,38 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
     uses both sides and reduces to the plain z when there is one. The gate now needs
     **both** z values to clear 1.64, so the correction cannot become a way to pass. On
     this season it makes no difference: +1.15 plain, +1.21 by matchup.
-  - **Found on the way:** that gate already fails on today's data, with the Phase 5
-    commit's own code too. §15 has the account. It is not caused by W6 or by the review
-    fixes.
-- **Open decision: the rollout policy.** The digest's calls come from rollout, and the
-  evidence that it beats greedy on wins has gone from z = +2.06 to +1.15 on the same
-  season, through data changes alone. Three options:
-  - keep rollout, since nothing shows it is worse, and re-gate it on 2026-27's matchups;
-  - switch the digest to greedy thresholds until it is re-gated;
-  - re-run the backtest over several seeds and path counts, to see how much of the gap
-    between +2.06 and +1.15 is Monte Carlo noise, before choosing.
+  - **Found on the way:** that gate failed on today's data, with the Phase 5 commit's
+    own code too. It was not caused by W6 or by the review fixes. W8 explains it and
+    fixes the measurement.
+- **W8. The Phase 5 gate measures the policy, not one draw.** ✅ Done. This replaces the
+  open decision about the rollout policy that W6 raised. §15 has the evidence: at 400
+  paths, one replay's pass or fail was a draw that went rollout's way about a third of
+  the time. Rollout itself was never worse than greedy, and at 2,000 paths it is clearly
+  better.
+  - **Keyed random streams.** `backtest.stream` gives each roster-week, and each
+    player's greedy thresholds, a stream keyed by seed, week and roster or player. On a
+    synthetic replay, reordering one roster's week-1 starters used to change 8 of the 12
+    later roster-weeks. Now it changes none (`test_backtest.py`).
+  - **One path count for both policies.** `--paths` (default 2,000) now sets rollout's
+    simulations too. Before, `n_sims` stayed at 400 whatever `--paths` said.
+  - **Five replays, in parallel.** `--seeds` (5) and `--workers` (every core). It takes
+    about 2 minutes on the Pi. The rollout gates are judged over every replay: out-win
+    greedy in all of them; median z ≥ 1.64 plain and by matchup; mean held-out direction
+    not negative; mean points cost within bounds. A replay in a worker process matches
+    the same replay in-process exactly (`test_backtest.py`).
+  - **The digest and `lockin explain` default to 2,000 simulations.** Measured over five
+    seeds on three 2025-26 mornings:
+    - the spread of a standing threshold across seeds halves, from 1.5 to 0.8 points;
+    - the calls that flipped between seeds at 400 (3 of 12) no longer flip;
+    - a digest takes 0.2-0.3 s.
 
-  This is a judgement about the product, not a fix, so it is left for a decision. Until
-  then `lockin backtest` fails two gates on the 2025-26 file (deployment.md says so).
+    Two of those mornings replayed without a poll, so part of the flipping came from
+    reconstructing banked state, which the live path reads instead.
+  - **Decision: keep rollout.** All eight backtest gates pass on today's file.
+  - **Residual risk, stated.** Judged by the median of five, the gate can still fail on
+    this season now and then: a single replay at 2,000 passes about three times in four,
+    and the effect sits near the threshold. `--seeds 9` narrows that if it happens. A
+    failure with every replay's rollout still ahead is noise, not a regression.
 - **W7. Reader tests on the synthetic season.** ✅ Done.
   - `test_serve.py` runs on a live synthetic morning
     (`live_fixture.advising_morning`). Nothing in it was about 2025-26, and it covers
@@ -3226,6 +3270,12 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
     The server and the page are no longer among them.
 
 **Deferred, and why**
+
+- **Manager evaluation still simulates at 300** (`lockin managers --sims`). Its regret
+  comes from the same kind of P(win) comparison W8 found noisy at 400. W6's bands
+  resample weeks, not simulations, so they do not show that noise. Re-run at 2,000
+  before reading anything into the middle of the ranking. It is retrospective and
+  gates nothing live, so it waits.
 
 - **Start/sit** (§19; day-one.md step 8). Needs eligibility validated against current
   Sleeper metadata, a reader that takes designations strictly before each decision, and

@@ -34,9 +34,15 @@ cutoff.
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
+import statistics
+import zlib
 from collections import defaultdict
+from collections.abc import Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -49,9 +55,25 @@ from lockin.core.projections import (
 )
 from lockin.projections import load_panel, observed_scores
 from lockin.rollout import SimulationCache, replay_week
+from lockin.store.db import connect_readonly
 from lockin.verify import Check, scoring_settings
 
 DEFAULT_HOLDOUT_FROM = 18
+
+DEFAULT_PATHS = 2000
+"""Simulated paths per decision, for greedy's thresholds and rollout's P(win) alike.
+
+400 until 2026-09-24. Across 40 seeds at 400, rollout beat greedy by 5.3 wins
+and the Phase 5 gate passed in 14 of 40; at 2,000 it beat greedy by 8.8 and
+passed in 10 of 12, giving up fewer points. Greedy won 117 or 118 in every run:
+the noise was rollout's own, deciding near-tied lock/pass calls on two noisy
+estimates (implementation-plan.md §15, §21 W8)."""
+
+DEFAULT_SEED = 20260808
+
+DEFAULT_SEEDS = 5
+"""Independent replays the Phase 5 gate is judged over. One replay is one draw of
+the policy's own Monte Carlo, and at 400 paths that draw decided the gate."""
 """Same contiguous holdout as Phase 3. The projection layer's hyperparameters
 were chosen on weeks 1-17, and the greedy policy is built on that layer, so
 scoring it on those weeks would inherit the tuning."""
@@ -96,11 +118,15 @@ class BacktestResult:
     decisions: int = 0
     """Player-weeks where a real choice existed — two or more countable games."""
     skipped: int = 0
+    seed: int | None = None
+    n_paths: int | None = None
 
     def holdout(self, holdout_from: int) -> BacktestResult:
         return BacktestResult(
             rows=[r for r in self.rows if r.week >= holdout_from],
             decisions=self.decisions,
+            seed=self.seed,
+            n_paths=self.n_paths,
         )
 
     def points(self, policy: str) -> np.ndarray:
@@ -228,23 +254,44 @@ def greedy_thresholds(
     return thresholds
 
 
+GREEDY_STREAM, ROLLOUT_STREAM = 1, 2
+
+
+def stream(seed: int, kind: int, week: int, key: int | str) -> np.random.Generator:
+    """The random draws for one piece of the replay, independent of every other.
+
+    The replay used to draw everything from one generator, in order. Any change
+    to any input — a revised box score in week 3 — then shifted every draw after
+    it, which is a reseed of the whole season. The Phase 5 gate went from z=+2.06
+    to +1.15 that way with no code change (implementation-plan.md §15). Keyed
+    streams keep a change inside the roster-week it touches.
+    """
+    part = zlib.crc32(key.encode()) if isinstance(key, str) else key
+    return np.random.default_rng([seed, kind, week, part])
+
+
 def run_backtest(
     conn: sqlite3.Connection,
     season: str,
     *,
     params: ProjectionParams | None = None,
-    n_paths: int = 400,
-    n_sims: int = 400,
-    seed: int = 20260808,
+    n_paths: int = DEFAULT_PATHS,
+    n_sims: int | None = None,
+    seed: int = DEFAULT_SEED,
     panel: SeasonPanel | None = None,
 ) -> BacktestResult:
-    """Replay all ten rosters, all weeks, under every policy."""
+    """Replay all ten rosters, all weeks, under every policy.
+
+    ``n_sims``, rollout's paths per P(win) estimate, defaults to ``n_paths``.
+    They used to default separately, so ``--paths`` sharpened greedy's
+    thresholds and left rollout's decisions exactly as noisy as before.
+    """
+    n_sims = n_paths if n_sims is None else n_sims
     scoring = scoring_settings(conn)
     panel = panel or load_panel(conn, season, params=params)
     source = EWMAProjectionSource(panel, scoring, params)
     scores = observed_scores(panel, scoring)
     panel_weeks = np.concatenate([h.week for h in panel.histories.values()])
-    rng = np.random.default_rng(seed)
 
     lineups: dict[tuple[int, int], list[str]] = defaultdict(list)
     matchups: dict[tuple[int, int], int | None] = {}
@@ -290,7 +337,12 @@ def run_backtest(
         key = (sleeper_id, week)
         if key not in threshold_cache:
             threshold_cache[key] = greedy_thresholds(
-                source, sleeper_id, games_for(sleeper_id, week), week, rng, n_paths
+                source,
+                sleeper_id,
+                games_for(sleeper_id, week),
+                week,
+                stream(seed, GREEDY_STREAM, week, sleeper_id),
+                n_paths,
             )
         return threshold_cache[key]
 
@@ -326,7 +378,7 @@ def run_backtest(
         source=source, n_sims=n_sims, dnp_scale=dnp_scale, ride_unprojectable=True
     )
 
-    result = BacktestResult(rows=[])
+    result = BacktestResult(rows=[], seed=seed, n_paths=n_paths)
     for (week, roster_id), starters in sorted(lineups.items()):
         entry = RosterWeek(
             week=week,
@@ -376,7 +428,7 @@ def run_backtest(
                 {pid: thresholds_for(pid, week) for pid in theirs},
                 week,
                 cache,
-                rng,
+                stream(seed, ROLLOUT_STREAM, week, roster_id),
             )
             totals[ROLLOUT] = outcome.total
             zeros[ROLLOUT] = sum(1 for v in outcome.counted.values() if v == 0.0)
@@ -617,7 +669,15 @@ def clustered_mcnemar(pairs: np.ndarray, clusters: list) -> float:
     return float(sums.sum() / denom) if denom else 0.0
 
 
-def check_rollout_beats_greedy_on_wins(result: BacktestResult) -> Check:
+Replays = BacktestResult | Sequence[BacktestResult]
+"""One replay of the season, or several under different seeds."""
+
+
+def _replays(result: Replays) -> list[BacktestResult]:
+    return [result] if isinstance(result, BacktestResult) else list(result)
+
+
+def check_rollout_beats_greedy_on_wins(result: Replays) -> Check:
     """The Phase 5 exit criterion, restated to be measurable (§7.1).
 
     The architecture doc asks for "rollout beats greedy on wins in held-out
@@ -630,59 +690,124 @@ def check_rollout_beats_greedy_on_wins(result: BacktestResult) -> Check:
     sides are not independent (review 2026-09-23). The z is also computed with
     each matchup as one unit, and the gate needs **both** to clear 1.64: the
     correction must not become a way to pass.
+
+    **Judged over several replays** (2026-09-24). One replay is one draw of the
+    policies' own Monte Carlo, and at 400 paths that draw decided the gate: it
+    passed in 14 of 40 seeds on identical data. Over several, rollout must out-win
+    greedy in *every* replay, and the *median* z must clear 1.64 both ways.
     """
-    pairs, clusters = head_to_head_by_matchup(result, ROLLOUT, GREEDY)
-    b, c, z = mcnemar(pairs)
-    z_matchup = clustered_mcnemar(pairs, clusters)
-    wins_rollout, wins_greedy = int(pairs[:, 0].sum()), int(pairs[:, 1].sum())
+    runs = []
+    for one in _replays(result):
+        pairs, clusters = head_to_head_by_matchup(one, ROLLOUT, GREEDY)
+        b, c, z = mcnemar(pairs)
+        runs.append(
+            {
+                "seed": one.seed,
+                "rollout": int(pairs[:, 0].sum()),
+                "greedy": int(pairs[:, 1].sum()),
+                "b": b,
+                "c": c,
+                "z": z,
+                "z_matchup": clustered_mcnemar(pairs, clusters),
+                "rows": len(pairs),
+                "matchups": len(set(clusters)),
+            }
+        )
+    z_mid = statistics.median(r["z"] for r in runs)
+    zm_mid = statistics.median(r["z_matchup"] for r in runs)
+    behind = [r for r in runs if r["rollout"] <= r["greedy"]]
 
     offenders = []
-    if wins_rollout <= wins_greedy:
-        offenders.append(f"rollout wins {wins_rollout}, greedy wins {wins_greedy}")
-    elif min(z, z_matchup) < 1.64:
-        offenders.append(
-            f"rollout leads {wins_rollout}-{wins_greedy} but the paired test is"
-            f" inconclusive (z={z:.2f}, by matchup {z_matchup:.2f}; both need 1.64)"
+    if len(runs) == 1:
+        (only,) = runs
+        if behind:
+            offenders.append(f"rollout wins {only['rollout']}, greedy wins {only['greedy']}")
+        elif min(z_mid, zm_mid) < 1.64:
+            offenders.append(
+                f"rollout leads {only['rollout']}-{only['greedy']} but the paired test is"
+                f" inconclusive (z={z_mid:.2f}, by matchup {zm_mid:.2f}; both need 1.64)"
+            )
+        detail = (
+            f"{only['rows']} team-weeks in {only['matchups']} matchups: rollout"
+            f" {only['rollout']} wins, greedy {only['greedy']}; flipped +{only['b']}/-{only['c']},"
+            f" McNemar z={only['z']:+.2f}, by matchup z={only['z_matchup']:+.2f}"
+        )
+    else:
+        if behind:
+            offenders.append(
+                f"rollout does not out-win greedy in {len(behind)} of {len(runs)} replays"
+                f" (seeds {', '.join(str(r['seed']) for r in behind)})"
+            )
+        elif min(z_mid, zm_mid) < 1.64:
+            offenders.append(
+                f"rollout leads in every replay but the median paired test is inconclusive"
+                f" (z={z_mid:.2f}, by matchup {zm_mid:.2f}; both need 1.64)"
+            )
+        leads = [r["rollout"] - r["greedy"] for r in runs]
+        zs = [r["z"] for r in runs]
+        detail = (
+            f"{len(runs)} replays of {runs[0]['rows']} team-weeks in {runs[0]['matchups']}"
+            f" matchups: rollout out-wins greedy by {min(leads):+d} to {max(leads):+d}"
+            f" (mean {statistics.mean(leads):+.1f}); median z={z_mid:+.2f}"
+            f" (range {min(zs):+.2f} to {max(zs):+.2f}), by matchup {zm_mid:+.2f}"
         )
     return Check(
         name="rollout beats greedy on wins, all ten rosters, paired",
         passed=not offenders,
-        detail=(
-            f"{len(pairs)} team-weeks in {len(set(clusters))} matchups: rollout"
-            f" {wins_rollout} wins, greedy {wins_greedy}; flipped +{b}/-{c},"
-            f" McNemar z={z:+.2f}, by matchup z={z_matchup:+.2f}"
-        ),
+        detail=detail,
         offenders=offenders,
     )
 
 
-def check_rollout_holdout_direction(result: BacktestResult, holdout_from: int) -> Check:
+def check_rollout_holdout_direction(result: Replays, holdout_from: int) -> Check:
     """The held-out block on its own — directional, and honest about power.
 
     §7.1 predicted this exact situation: a contiguous holdout leaves too few
     matchups to resolve a modest effect. It is checked for *direction* rather
     than significance, and the achievable power is printed so nobody reads a
-    passing z as evidence it was not.
+    passing z as evidence it was not. Over several replays the direction is the
+    mean one: four discordant pairs each is too few for any single replay to
+    decide it.
     """
-    pairs = head_to_head(result.holdout(holdout_from), ROLLOUT, GREEDY)
-    b, c, z = mcnemar(pairs)
-    wins_rollout, wins_greedy = int(pairs[:, 0].sum()), int(pairs[:, 1].sum())
+    runs = []
+    for one in _replays(result):
+        pairs = head_to_head(one.holdout(holdout_from), ROLLOUT, GREEDY)
+        b, c, z = mcnemar(pairs)
+        runs.append((int(pairs[:, 0].sum()), int(pairs[:, 1].sum()), b, c, z, len(pairs)))
+    leads = [r[0] - r[1] for r in runs]
     offenders = []
-    if wins_rollout < wins_greedy:
-        offenders.append(f"rollout loses on held-out wins: {wins_rollout} vs {wins_greedy}")
+    if len(runs) == 1:
+        wins_rollout, wins_greedy, b, c, z, n = runs[0]
+        if wins_rollout < wins_greedy:
+            offenders.append(f"rollout loses on held-out wins: {wins_rollout} vs {wins_greedy}")
+        detail = (
+            f"{n} team-weeks: rollout {wins_rollout}, greedy {wins_greedy};"
+            f" flipped +{b}/-{c}, z={z:+.2f}"
+            f" — only {b + c} discordant pairs, too few to resolve significance (§7.1)"
+        )
+    else:
+        if statistics.mean(leads) < 0:
+            offenders.append(
+                f"rollout loses on held-out wins on average: {statistics.mean(leads):+.2f}"
+                f" across {len(runs)} replays"
+            )
+        discordant = statistics.mean(r[2] + r[3] for r in runs)
+        detail = (
+            f"{len(runs)} replays of {runs[0][5]} team-weeks: rollout − greedy"
+            f" {min(leads):+d} to {max(leads):+d} (mean {statistics.mean(leads):+.2f}),"
+            f" behind in {sum(x < 0 for x in leads)}"
+            f" — about {discordant:.0f} discordant pairs each, too few to resolve"
+            f" significance (§7.1)"
+        )
     return Check(
         name=f"rollout does not lose on wins in held-out weeks {holdout_from}+",
         passed=not offenders,
-        detail=(
-            f"{len(pairs)} team-weeks: rollout {wins_rollout}, greedy {wins_greedy};"
-            f" flipped +{b}/-{c}, z={z:+.2f}"
-            f" — only {b + c} discordant pairs, too few to resolve significance (§7.1)"
-        ),
+        detail=detail,
         offenders=offenders,
     )
 
 
-def check_rollout_trades_points_for_wins(result: BacktestResult) -> Check:
+def check_rollout_trades_points_for_wins(result: Replays) -> Check:
     """Rollout should give up points. That is the objective working, not failing.
 
     Architecture doc §4: maximise P(win), not expected points. The two agree
@@ -692,19 +817,30 @@ def check_rollout_trades_points_for_wins(result: BacktestResult) -> Check:
     evidence it was ignoring the opponent.
 
     The band is one-sided in spirit: giving up a little is expected, giving up a
-    lot means the win-probability estimate is wrong rather than sharp.
+    lot means the win-probability estimate is wrong rather than sharp. Over
+    several replays it is the mean cost that is judged.
     """
-    mean, se, t = _paired(result, ROLLOUT, GREEDY)
+    per = [_paired(one, ROLLOUT, GREEDY) for one in _replays(result)]
+    mean = float(statistics.mean(p[0] for p in per))
     offenders = []
     if mean < -25.0:
         offenders.append(
             f"rollout sacrifices {-mean:.1f} points per roster-week; that is too much"
             f" to be explained by the objective and suggests a mispriced opponent"
         )
+    if len(per) == 1:
+        _, se, t = per[0]
+        detail = f"{mean:+.2f} points per roster-week against greedy (se {se:.2f}, t={t:.2f})"
+    else:
+        means = [p[0] for p in per]
+        detail = (
+            f"{mean:+.2f} points per roster-week against greedy, mean of {len(per)} replays"
+            f" (range {min(means):+.2f} to {max(means):+.2f})"
+        )
     return Check(
         name="rollout trades points for win probability, as the objective intends",
         passed=not offenders,
-        detail=f"{mean:+.2f} points per roster-week against greedy (se {se:.2f}, t={t:.2f})",
+        detail=detail,
         offenders=offenders,
     )
 
@@ -736,21 +872,63 @@ def wins_flipped(
     return wins, games
 
 
+def _replay(job: tuple[str, str, int, int, ProjectionParams | None]) -> BacktestResult:
+    """One seed's replay, in a worker process with its own read-only connection."""
+    db_path, season, seed, n_paths, params = job
+    conn = connect_readonly(Path(db_path))
+    try:
+        return run_backtest(conn, season, params=params, n_paths=n_paths, seed=seed)
+    finally:
+        conn.close()
+
+
+def run_seeds(
+    db_path: Path,
+    season: str,
+    seeds: Sequence[int],
+    *,
+    n_paths: int = DEFAULT_PATHS,
+    params: ProjectionParams | None = None,
+    workers: int | None = None,
+) -> list[BacktestResult]:
+    """Replay the season once per seed, in parallel. Results come back in seed order.
+
+    Replays are independent and CPU-bound, so each runs in its own process: five
+    at 2,000 paths take about as long as two on the Pi's four cores. Workers are
+    spawned rather than forked, so none inherits a connection or a thread.
+    """
+    jobs = [(str(db_path), season, s, n_paths, params) for s in seeds]
+    workers = min(len(jobs), workers or multiprocessing.cpu_count())
+    if workers <= 1:
+        return [_replay(job) for job in jobs]
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+        return list(pool.map(_replay, jobs))
+
+
 def run(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     season: str,
     *,
     params: ProjectionParams | None = None,
-    n_paths: int = 400,
+    n_paths: int = DEFAULT_PATHS,
     holdout_from: int = DEFAULT_HOLDOUT_FROM,
-    seed: int = 20260808,
+    seed: int = DEFAULT_SEED,
     result: BacktestResult | None = None,
+    extra: Sequence[BacktestResult] = (),
 ) -> tuple[list[Check], BacktestResult]:
+    """Every gate. Returns the checks and the first replay.
+
+    The points and zeroing gates are read from the first replay: greedy, never-lock
+    and lock-first barely move with the seed, and neither does their margin. The
+    rollout gates are judged over ``result`` and every ``extra`` replay together.
+    """
     full = (
         result
         if result is not None
         else run_backtest(conn, season, params=params, n_paths=n_paths, seed=seed)
     )
+    replays = [full, *extra]
     held = full.holdout(holdout_from)
     if not held.rows:
         raise RuntimeError(f"no roster-weeks in weeks >= {holdout_from}")
@@ -762,8 +940,8 @@ def run(
         check_lock_rate_is_selective(held),
         # Phase 5. Pooled over all ten rosters per §7.1, because a contiguous
         # holdout on its own cannot resolve an effect this size.
-        check_rollout_beats_greedy_on_wins(full),
-        check_rollout_holdout_direction(full, holdout_from),
-        check_rollout_trades_points_for_wins(full),
+        check_rollout_beats_greedy_on_wins(replays),
+        check_rollout_holdout_direction(replays, holdout_from),
+        check_rollout_trades_points_for_wins(replays),
     ]
     return checks, full
