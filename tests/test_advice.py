@@ -20,6 +20,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
+from live_fixture import advising_morning, connect
 
 from lockin import advice
 from lockin import digest as digest_mod
@@ -27,10 +28,10 @@ from lockin.config import Config
 from lockin.projections import date_of, day_index
 from lockin.store.db import apply_schema, now_iso, session
 
+# Most of this suite replays a real morning of the recorded 2025-26 season, and
+# skips through `season_db` when that file is absent. The round trip at the end
+# runs on the synthetic season instead, so a clean checkout still tests the page.
 cfg = Config.from_env()
-pytestmark = pytest.mark.skipif(
-    not cfg.db_path.exists(), reason=f"no database at {cfg.db_path}; run `lockin ingest`"
-)
 
 AS_OF = "2026-01-08"
 MORNING = datetime(2026, 1, 8, 14, tzinfo=UTC)
@@ -501,3 +502,42 @@ def test_a_late_cron_is_not_treated_as_a_failure(tmp_path, report):
     generated = run.generated_at
     fresh = dc_replace(run, last_ingest_at=generated)
     assert advice.ingest_warning(fresh) is None
+
+
+# ------------------------------------------------- the round trip, on a live morning
+
+
+@pytest.fixture(scope="module")
+def live(tmp_path_factory):
+    """A live synthetic morning, persisted as the cron would and read back."""
+    _, cfg_, report, now = advising_morning(tmp_path_factory.mktemp("live"))
+    with connect(cfg_) as conn:
+        digest_mod.persist(conn, report, now=now)
+        run = advice.latest_run(conn, report.roster_id)
+    return report, run, now
+
+
+def test_a_live_digest_reads_back_exactly(live):
+    report, run, _ = live
+    calls = {(i.sleeper_id, i.for_day): i for i in run.calls}
+    assert set(calls) == {(c.sleeper_id, c.day) for c in report.calls}
+    for call in report.calls:
+        item = calls[(call.sleeper_id, call.day)]
+        assert item.action == ("LOCK" if call.lock else "PASS")
+        assert item.expires_utc == call.expires_utc
+    rules = {(i.sleeper_id, i.for_day): (i.threshold, i.p_clear) for i in run.rules}
+    assert rules == {
+        (r.sleeper_id, r.night): (r.threshold, pytest.approx(r.p_clear)) for r in report.rules
+    }
+    assert run.state_source == "inferred" and run.poll_observed_at == report.poll_observed_at
+
+
+def test_a_live_page_names_its_players_deadlines_and_inputs(live):
+    report, run, now = live
+    page = advice.render(run, today=report.as_of, now=now)
+
+    assert all(not i.name.isdigit() for i in run.items), [i.name for i in run.items]
+    assert "Advice for this morning" in page
+    assert page.count(" tip</div>") == len(run.calls), "every call shows the tip that closes it"
+    assert "read from the matchup poll" in page
+    assert "Inputs: box scores" in page and "not recorded" not in page

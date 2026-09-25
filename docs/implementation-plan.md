@@ -12,7 +12,7 @@ history, kept for the reasoning.
 | Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete. The Phase 5 wins gate no longer passes on today's data: an open decision | §9-§11, §13-§15; §21 W6 |
 | Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
 | Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
-| The review's remaining items, and one bug found auditing it | In progress, on branch `review-followups` | §21, "What remains" |
+| The review's remaining items, and one bug found auditing it | W1-W7 done on branch `review-followups`, not yet merged or deployed; one open decision (the rollout policy) | §21, "What remains" |
 | Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
 | 2026-27 season | Opens 2026-10-20 | `day-one.md` |
 
@@ -3117,7 +3117,7 @@ the item closed.
 | `infer_lock()` resolves impossible evidence | Fixed, **untested** | `core/locks.py` returns `UNRESOLVED`, but no test covers a single-game or no-game week whose counted score is unexplained. W5 |
 | Opponent stand-in kept explicit | Fixed | `opponent_state` is `inferred` or `stand-in`, persisted and printed |
 | Portable, representative tests | **Partly open** | `tests/live_fixture.py` covers every scenario the review listed. The advice-page and server suites still skip without the gitignored database. W7 |
-| One current status table | Fixed | the header of this document |
+| One current status table | Fixed with this audit | the header of this document, which had two contradictory status lines |
 | Sequence 1-3: capture, actionability, lifecycle rehearsal | Done | above; `test_lifecycle.py` |
 | Sequence 4: shadow mode | **Open** | only day-one.md step 7's manual comparison. W4 |
 | Sequence 5: start/sit after valid data | Deferred by design | §19; day-one.md step 8 |
@@ -3213,9 +3213,17 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
 
   This is a judgement about the product, not a fix, so it is left for a decision. Until
   then `lockin backtest` fails two gates on the 2025-26 file (deployment.md says so).
-- **W7. Reader tests on the synthetic season.** The advice-page and server suites run
-  from `tests/live_fixture.py`, so a clean checkout tests them. Suites about the recorded
-  season stay as they are, and say so when they skip.
+- **W7. Reader tests on the synthetic season.** ✅ Done.
+  - `test_serve.py` runs on a live synthetic morning
+    (`live_fixture.advising_morning`). Nothing in it was about 2025-26, and it covers
+    the only code that listens on a network.
+  - `test_advice.py` keeps its recorded-season replay, because several of its tests
+    rest on facts of that season: an all-pass night, and a week-25 with no matchup. It
+    gains a synthetic round trip, and loses a module-level skip that its database
+    fixture already did, more precisely.
+  - Suites about the recorded season now say so when they skip.
+  - Without the 2025-26 file, the suite now skips 103 tests where `main` skipped 126.
+    The server and the page are no longer among them.
 
 **Deferred, and why**
 

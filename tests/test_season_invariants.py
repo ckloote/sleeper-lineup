@@ -19,7 +19,8 @@ from lockin.store.db import apply_schema
 
 cfg = Config.from_env()
 pytestmark = pytest.mark.skipif(
-    not cfg.db_path.exists(), reason=f"no database at {cfg.db_path}; run `lockin ingest`"
+    not cfg.db_path.exists(),
+    reason=f"recorded-season suite: no 2025-26 database at {cfg.db_path} (LOCKIN_DB)",
 )
 
 

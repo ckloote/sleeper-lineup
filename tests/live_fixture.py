@@ -35,13 +35,15 @@ import sqlite3
 import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 
+from lockin import digest as digest_mod
 from lockin.config import Config
+from lockin.core.projections import ProjectionParams
 from lockin.core.scoring import line_from_stats, score_line
 from lockin.ingest import run as ingest_run
 from lockin.store.db import session
@@ -623,3 +625,32 @@ def connect(cfg: Config) -> sqlite3.Connection:
     conn = sqlite3.connect(cfg.db_path)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+ADVISING = OPENING + timedelta(days=8)
+"""Wednesday of week 2: the first morning the scaled cold-start gate lets advice through."""
+
+SCALED = ProjectionParams(min_pool_rows=60)
+"""The cold-start gate scaled to this four-roster league (see tests/test_lifecycle.py)."""
+
+
+def advising_morning(
+    tmp_path: Path, day: date = ADVISING
+) -> tuple[SyntheticSeason, Config, digest_mod.Digest, datetime]:
+    """One live morning with advice in it: the ingest, then the 09:00 digest.
+
+    For suites that read what the digest wrote — the page, the server — and
+    need a real digest to read without the recorded 2025-26 database.
+    Returns the season, its config, the digest, and the moment it ran.
+    """
+    season = SyntheticSeason()
+    cfg = config_for(tmp_path, season)
+    season.play_through(day - timedelta(days=1))
+    ingest(season, cfg, weeks=range(1, week_of(day) + 1))
+    now = datetime.combine(day, datetime.min.time(), UTC) + timedelta(hours=13)
+    with connect(cfg) as conn:
+        report = digest_mod.morning(
+            conn, season.season, 1, day.isoformat(), n_sims=100, live=True, now=now, params=SCALED
+        )
+    assert not report.abstained, report.note
+    return season, cfg, report, now
