@@ -13,7 +13,7 @@ import math
 import numpy as np
 import pytest
 
-from lockin.core.eligibility import NoValidLineup, assign_slots
+from lockin.core.eligibility import InvalidPin, NoValidLineup, assign_slots
 from lockin.core.policy import (
     Game,
     continuation_value,
@@ -176,6 +176,23 @@ def test_locked_players_keep_their_slot():
     out = assign_slots(SLOTS, list(positions), positions, values, locked={"C": "p0"})
     assert out["C"] == "p0"
     assert sorted(out.values()) == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    "locked, says",
+    [
+        ({"SF": "p0"}, "not among"),  # no such slot: came back as a seventh
+        ({"C": "p0", "PG": "p0"}, "more than one slot"),  # one player, two slots
+        ({"C": "guard"}, "cannot fill C"),  # a lineup Sleeper would not accept
+    ],
+)
+def test_a_pin_no_lineup_could_have_is_refused(locked, says):
+    positions = {f"p{i}": ["PG", "SG", "SF", "PF", "C"] for i in range(6)}
+    positions["guard"] = ["PG"]
+    values = {p: float(i) for i, p in enumerate(positions)}
+    with pytest.raises(InvalidPin, match=says):
+        assign_slots(SLOTS, list(positions), positions, values, locked=locked)
+    assert not issubclass(InvalidPin, NoValidLineup), "callers catch NoValidLineup as routine"
 
 
 def test_assignment_refuses_when_no_legal_lineup_exists():

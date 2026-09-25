@@ -3059,7 +3059,9 @@ season over.
 
 Checked item by item against the code on 2026-09-24, not taken from the commit message.
 Every numbered finding is fixed. What is left is in the review's "additional" list and its
-recommended sequence, plus one bug that auditing them turned up.
+recommended sequence, plus one bug that auditing them turned up. The table is that audit,
+as it stood. Each open row names its item under "What remains" below, which records when
+the item closed.
 
 | Review item | Status | Evidence |
 |---|---|---|
@@ -3147,10 +3149,13 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
 
 **Any time**
 
-- **W5. Core inputs are checked.** `assign_slots()` refuses a pin to an unknown slot, a
-  player pinned twice, or a pin the eligibility rule forbids. Start/sit needs this before
-  it pins anything. Today's only caller passes no pins, so no historical number moves.
-  `infer_lock()`'s single-game and no-game refusals get the tests they lack.
+- **W5. Core inputs are checked.** ✅ Done. `assign_slots()` raises `InvalidPin` for a
+  pin to a slot that does not exist, a player pinned twice, or a pin his positions forbid.
+  Before, those came back as a seventh slot, one player in two slots, and an illegal
+  lineup. It is deliberately not a `NoValidLineup`, which callers catch as routine.
+  Start/sit needs this before it pins anything. Today's only caller (`managers.py`)
+  passes no pins, so no historical number moves. `infer_lock()`'s single-game and no-game
+  refusals now have tests (`test_policy.py`, `test_locks.py`).
 - **W6. Uncertainty that respects dependence.** Manager intervals resample weeks, not
   decisions, and report how stable the ranking is. The Phase 5 McNemar is also computed
   on one side per matchup. If §15's conclusion does not survive, that is written up as a

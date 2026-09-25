@@ -28,6 +28,7 @@ C/PF-eligible players can fill it, and only C or UTIL will take them.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -123,6 +124,11 @@ class NoValidLineup(ValueError):
     """No way to fill every slot from the available players."""
 
 
+class InvalidPin(ValueError):
+    """A pinned assignment no real lineup could have. Not a `NoValidLineup`: that
+    one callers catch as "no legal lineup tonight", and this is a caller's bug."""
+
+
 def assign_slots(
     slots: Sequence[str],
     candidates: Sequence[str],
@@ -145,12 +151,19 @@ def assign_slots(
     mechanic a player must stay in his starting slot for his banked score to
     stand (§7.6), so once he is locked his slot is no longer free — the nightly
     assignment is a real commitment, not an option to be resolved later.
+
+    A pin describes a lineup Sleeper already accepted, so one no lineup could
+    have — a slot that does not exist, a player in two slots, a player his
+    positions keep out of his slot — raises `InvalidPin` rather than being
+    optimised around. Unchecked, the first came back as a seventh slot, the
+    second as one player in two slots, and the third as an illegal lineup.
     """
     locked = dict(locked or {})
 
     # Slot identity has to survive duplicates: this league starts two UTILs, and
     # a dict keyed on the bare name would silently drop one.
     keys = [_slot_key(slots, i) for i in range(len(slots))]
+    _check_pins(slots, keys, locked, positions, extra_slots)
     open_keys = [k for k in keys if k not in locked]
     open_slots = [slots[keys.index(k)] for k in open_keys]
 
@@ -188,6 +201,26 @@ def assign_slots(
             raise NoValidLineup(f"no legal lineup: {open_slots[i]} cannot be filled")
         out[open_keys[i]] = free[j]
     return out
+
+
+def _check_pins(
+    slots: Sequence[str],
+    keys: list[str],
+    locked: Mapping[str, str],
+    positions: Mapping[str, Iterable[str]],
+    extra_slots: Mapping[str, frozenset[str]],
+) -> None:
+    unknown = sorted(set(locked) - set(keys))
+    if unknown:
+        raise InvalidPin(f"pinned to slot(s) {unknown}, which are not among {keys}")
+    twice = sorted(p for p, n in Counter(locked.values()).items() if n > 1)
+    if twice:
+        raise InvalidPin(f"pinned to more than one slot: {twice}")
+    for key, player in locked.items():
+        held = list(positions.get(player, ()))
+        slot = slots[keys.index(key)]
+        if not eligible(slot, held, sleeper_id=player, extra_slots=extra_slots):
+            raise InvalidPin(f"{player} ({'/'.join(held) or 'no positions'}) cannot fill {key}")
 
 
 def _slot_key(slots: Sequence[str], index: int) -> str:
