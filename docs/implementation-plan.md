@@ -3114,12 +3114,16 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
 
 **Before the digest advises**
 
-- **W3. Freshness per source.** `ingest_runs` records which steps a run skipped. A run
-  that skipped the NBA schedule no longer vouches for a live digest, because fixture
-  states come from the schedule. Each run stores and shows the age of each input: stats,
-  schedule, poll and designations. Policy: stale stats, a stale poll or a skipped
-  schedule means abstain. Stale designations are shown only, because nothing in the model
-  reads them yet.
+- **W3. Freshness per source.** ✅ Done. `ingest_runs.skipped` records the steps a run
+  left out. A live digest after a `--skip-nba` run abstains and names the flag, because
+  the NBA step fetches the statuses that say last night is final (`runs.LIVE_REQUIRES`).
+  Each run stores when the schedule was fetched and when designations were read
+  (`digest_runs.schedule_at`, `status_at`). The page's footer gives the age of all four
+  inputs: box scores, lineup poll, schedule and designations (`test_runs.py`).
+  **Abstention policy:** stale box scores, a stale or missing poll, or a skipped NBA step
+  means no advice. A stale schedule or stale designations are shown, not acted on. The
+  schedule is published a season ahead, and nothing in the model reads designations yet.
+  The durability warning uses the projected chance he does not play.
 - **W4. `lockin shadow`.** A read-only report over finalized weeks, covering four things.
   First, each call against what the polls show was done: followed, overridden or unknown.
   Second, each run's `BANKED` list against the locks inferred afterwards, which does

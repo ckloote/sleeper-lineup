@@ -383,7 +383,7 @@ def test_from_the_revisit_week_it_prompts_for_the_start_sit_gate(stored):
     assert "start/sit gate" in message
     assert "20.4 points a week" in message
     # It must say this is work, not a switch to flip.
-    assert "player_status" in message
+    assert "reads the designations yet" in message
     assert "moves the lock thresholds" in message
 
 

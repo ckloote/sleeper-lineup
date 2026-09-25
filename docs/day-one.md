@@ -340,9 +340,10 @@ was locked; last night's locks are not in it by design, because last night's gam
 calls. A disagreement means the reading is wrong: pass `--locked` and fix `lockin/state.py`
 before relying on it.
 
-A live run also declines when last night's games are not final yet, or when the last
+A live run also declines when last night's games are not final yet, when the last
 *complete* ingest finished before they did — a cron that died half-way no longer vouches
-for the data (review findings 7 and 9). Each says so in the notification.
+for the data (review findings 7 and 9) — or when the last ingest ran with `--skip-nba`.
+Each says so in the notification.
 
 Then render the page, which is how a missed notification stays readable:
 
@@ -353,7 +354,8 @@ uv run lockin advice
 **Pass:** a green banner saying the advice is for this morning, and each call showing the
 tip it must be acted on before. A red banner means the digest did not run today — check
 `logs/digest.log` before trusting anything on the page. A greyed call is one whose tip has
-passed.
+passed. The footer's `Inputs:` line gives the age of the box scores, the lineup poll, the NBA
+schedule and the designations. All four should be from this morning's ingest.
 
 If `lockin-serve` is running on the Pi, the same page is at `http://<pi>:8080/` and is
 rendered fresh on each request, so it cannot lag behind the digest.

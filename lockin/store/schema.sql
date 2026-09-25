@@ -546,6 +546,10 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     seed                INTEGER,
     model               TEXT,            -- lockin version and projection parameters
     abstained           INTEGER,         -- 1 if it declined to advise
+    -- The age of the two inputs `last_ingest_at` does not cover: when the NBA
+    -- schedule was last fetched, and when designations were last read.
+    schedule_at         TEXT,
+    status_at           TEXT,
     PRIMARY KEY (generated_at, roster_id)
 );
 
@@ -594,7 +598,11 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     finished_at     TEXT,            -- NULL until complete
     weeks           TEXT NOT NULL,   -- JSON array of fantasy weeks fetched
     status          TEXT NOT NULL,   -- running / complete
-    slate_through   TEXT             -- the last night it expected to be final
+    slate_through   TEXT,            -- the last night it expected to be final
+    -- JSON list of the steps a complete run left out ("nba", "tipoffs"). A run
+    -- under --skip-nba finishes every step it attempts, but without the NBA's
+    -- statuses nothing it wrote says last night is final.
+    skipped         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS ingest_log (

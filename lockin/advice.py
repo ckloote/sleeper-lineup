@@ -98,6 +98,10 @@ class Run:
     recent_availability_days: int = 0
     """The same, within the last 30 days — the number that says whether the
     capture is still *running*, as opposed to having run once in October."""
+    schedule_at: str | None = None
+    """When the NBA schedule was last fetched, as of this run."""
+    status_at: str | None = None
+    """When designations were last read, as of this run."""
 
     @property
     def calls(self) -> list[Item]:
@@ -242,6 +246,8 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         state_source=get("state_source"),
         poll_observed_at=get("poll_observed_at"),
         abstained=bool(get("abstained")),
+        schedule_at=get("schedule_at"),
+        status_at=get("status_at"),
         banked=banked,
         warnings=warnings,
         **availability_coverage(conn, row["as_of"]),
@@ -323,7 +329,7 @@ def modelling_prompt(run: Run) -> tuple[str, str] | None:
         f" accumulated. That is enough to attempt the start/sit gate &mdash; value every"
         f" rostered player point-in-time, pick the best legal six, and check whether it"
         f" now beats the managers it lost to by 20.4 points a week (&sect;19). Nothing"
-        f" reads <code>player_status</code> yet, so this is real work, and it moves the"
+        f" reads the designations yet, so this is real work, and it moves the"
         f" lock thresholds too.",
     )
 
@@ -371,11 +377,34 @@ def _freshness(run: Run, today: str | None = None) -> tuple[str, str]:
     return "stale", f"This is {age} days old ({run.as_of}). Re-run `lockin digest`."
 
 
+def _local(stamp: str) -> str:
+    """A UTC stamp as the weekday and time it was here: "Thu 7:30pm"."""
+    local = _utc(stamp).astimezone(clock.zone())
+    return f"{local.strftime('%a')} {local.strftime('%I:%M%p').lstrip('0').lower()}"
+
+
+def _inputs(run: Run) -> str:
+    """How old each input under the advice was, in one line.
+
+    The banners judge only the box scores. The lineup poll, the schedule and the
+    designations can each go stale on their own — a cron that stopped fetching
+    one of them leaves the others fresh — so each one's age is shown.
+    """
+    ages = [
+        ("box scores", run.last_ingest_at),
+        ("lineup poll", run.poll_observed_at),
+        ("NBA schedule", run.schedule_at),
+        ("designations", run.status_at),
+    ]
+    return "Inputs: " + " &middot; ".join(
+        f"{name} {_local(at) if at else 'not recorded'}" for name, at in ages
+    )
+
+
 def _deadline(item: Item, now: datetime) -> str:
     if item.expires_utc is None:
         return ""
-    local = _utc(item.expires_utc).astimezone(clock.zone())
-    when = f"{local.strftime('%a')} {local.strftime('%I:%M%p').lstrip('0').lower()}"
+    when = _local(item.expires_utc)
     if item.expired(now):
         return f"<div class=deadline>closed at {when} tip</div>"
     return f"<div class=deadline>by {when} tip</div>"
@@ -598,6 +627,7 @@ Read from <code>recommendations</code>, not recomputed &mdash; this is what the 
 actually said at {html.escape(run.generated_at)}, which recomputing would not reproduce
 (&sect;20) and which the upstream data no longer supports rebuilding (&sect;12).
 <br>{provenance}
+<br>{_inputs(run)}.
 <br>No start/sit advice: the model&rsquo;s lineup picks are worse than yours (&sect;16).
 </footer>
 """
