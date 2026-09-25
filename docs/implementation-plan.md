@@ -3107,9 +3107,10 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
   first warning per key rather than losing the whole run to a repeat. Fixed alongside it:
   without a schedule, a season in progress used to be reported as over. It now says the
   week cannot be found, and why (`test_runs.py`).
-- **W2. The clearing chance on the page.** `recommendations` gains `p_clear` and
-  `games_after`. `lockin advice` prints the chance beside each standing rule, as the
-  notification already does.
+- **W2. The clearing chance on the page.** ✅ Done. `recommendations` gains `p_clear` and
+  `games_after`, added in place for existing files. `lockin advice` prints the chance
+  beside each standing rule, as the notification already does, and leaves it blank when
+  it is unknown rather than printing 0% (`test_runs.py`).
 
 **Before the digest advises**
 

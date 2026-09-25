@@ -1127,6 +1127,8 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             ),
             run_id,
             call.expires_utc,
+            None,
+            None,
         )
         for call in digest.calls
     ] + [
@@ -1145,6 +1147,8 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
             f" {rule.threshold:.0f} ({rule.idle_nights} idle night(s) assumed, §7.2)",
             run_id,
             None,
+            finite(rule.p_clear),
+            rule.games_after,
         )
         for rule in digest.rules
     ]
@@ -1152,8 +1156,9 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
         """
         INSERT INTO recommendations
             (generated_at, week, roster_id, sleeper_id, action, for_day, threshold,
-             ev_lock, ev_pass, win_prob_delta, rationale, run_id, expires_utc)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ev_lock, ev_pass, win_prob_delta, rationale, run_id, expires_utc,
+             p_clear, games_after)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )

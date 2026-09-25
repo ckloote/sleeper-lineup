@@ -18,7 +18,7 @@ from live_fixture import OPENING, FakeSleeperClient, SyntheticSeason, config_for
 
 from lockin import advice
 from lockin import digest as digest_mod
-from lockin.digest import Digest, LockCall, Warning
+from lockin.digest import Digest, LockCall, StandingRule, Warning
 from lockin.store import runs
 from lockin.store.db import session
 
@@ -108,6 +108,28 @@ def test_the_warnings_the_notification_carried_reach_the_page(tmp_path):
     page = advice.render(run, today="2026-10-28", now=datetime(2026, 10, 28, 14, tzinfo=UTC))
     assert run.warnings == (("1004", "final-game DNP risk", "unlocked, 40% DNP"),)
     assert "final-game DNP risk" in page and "unlocked, 40% DNP" in page
+
+
+def test_the_page_shows_the_chance_the_notification_printed(tmp_path):
+    """A threshold alone does not say whether it can be met. The notification
+    printed the chance beside it; the page used to drop it."""
+    night = datetime(2026, 10, 28).toordinal()
+    rules = [
+        StandingRule("1001", "Player 1001", night, 44.0, 0.23, 0, 2),
+        StandingRule("1002", "Player 1002", night, 51.0, float("nan"), 0, 1),
+    ]
+    report = a_digest(rules=rules)
+    with session(tmp_path / "t.db") as conn:
+        digest_mod.persist(conn, report)
+        stored = conn.execute(
+            "SELECT sleeper_id, p_clear, games_after FROM recommendations ORDER BY sleeper_id"
+        ).fetchall()
+        run = advice.latest_run(conn, 1)
+
+    page = advice.render(run, today="2026-10-28", now=datetime(2026, 10, 28, 14, tzinfo=UTC))
+    assert [tuple(r) for r in stored] == [("1001", 0.23, 2), ("1002", None, 1)]
+    assert "23%" in digest_mod.render(report) and "<td class=num>23%</td>" in page
+    assert "<td class=num></td>" in page, "an unknown chance is blank, not 0%"
 
 
 def test_a_repeated_warning_is_stored_once_not_fatal(tmp_path):
