@@ -1048,7 +1048,13 @@ def last_ingest_at(conn: sqlite3.Connection, week: int | None = None) -> str | N
     return row["f"] if row else None
 
 
-def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = False) -> int:
+def persist(
+    conn: sqlite3.Connection,
+    digest: Digest,
+    *,
+    state_supplied: bool = False,
+    now: datetime | None = None,
+) -> int:
     """Write the digest: one immutable run, and every row it produced.
 
     **Inserted, never replaced.** `generated_at` used to resolve to the second
@@ -1068,9 +1074,13 @@ def persist(conn: sqlite3.Connection, digest: Digest, *, state_supplied: bool = 
     Written even when there are no calls — "no matchup this week" and "no
     advice today, and why" are real answers, and a page that showed nothing at
     all would be indistinguishable from a cron that never ran.
+
+    ``now`` stamps the run; the clock by default. A rehearsal passes its
+    synthetic morning, so `lockin shadow` can tell a run made that morning from
+    a replay made afterwards.
     """
     run_id = uuid.uuid4().hex
-    generated_at = datetime.now(UTC).isoformat(timespec="microseconds")
+    generated_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="microseconds")
     ingest = runs.latest_complete(conn, digest.week) if runs.any_recorded(conn) else None
     conn.execute(
         """

@@ -33,7 +33,7 @@ from lockin.verify import Check, scoring_settings
 RESOLVED_THRESHOLD = 0.95
 
 
-def _game_sequence(conn: sqlite3.Connection, season: str) -> dict[tuple[str, int], list[dict]]:
+def game_sequence(conn: sqlite3.Connection, season: str) -> dict[tuple[str, int], list[dict]]:
     """Every player's week, as an ordered list of games that count.
 
     Excludes postponed fixtures (they never happened), exhibitions (the All-Star
@@ -63,7 +63,7 @@ def _game_sequence(conn: sqlite3.Connection, season: str) -> dict[tuple[str, int
 def run_inference(conn: sqlite3.Connection, season: str) -> tuple[int, int]:
     """Infer and persist every starter's lock decision. Returns (rows, resolved)."""
     scoring = scoring_settings(conn)
-    seq = _game_sequence(conn, season)
+    seq = game_sequence(conn, season)
 
     starters = conn.execute(
         """

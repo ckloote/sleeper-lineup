@@ -54,6 +54,7 @@ from lockin import projections as projections_mod
 from lockin import reconcile as reconcile_mod
 from lockin import repair as repair_mod
 from lockin import serve as serve_mod
+from lockin import shadow as shadow_mod
 from lockin import verify as verify_mod
 from lockin.config import ALL_STAT_WEEKS, Config, load_env_file
 from lockin.core import projections as core_projections
@@ -1012,6 +1013,21 @@ def advice(out: Path, roster: int | None) -> None:
     )
     if age > 0:
         click.echo("  the page says so in a red banner; re-run `lockin digest` to refresh.")
+
+
+@main.command()
+def shadow() -> None:
+    """Compare what the digest said with what was then done, week by week.
+
+    For each week the league has finished scoring: whether each call was
+    followed, whether each morning's BANKED list matched the locks the final
+    scores reveal, P(win) against results, and calls that changed between runs.
+    Ends with the day-one.md step 7 gate. Writes nothing.
+    """
+    cfg = Config.from_env()
+    with _season(cfg) as conn:
+        report = shadow_mod.build(conn, cfg.season)
+    click.echo(shadow_mod.render(report))
 
 
 @main.command()

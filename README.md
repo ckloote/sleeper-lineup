@@ -467,6 +467,23 @@ the digest describes and stated in colour before any advice appears.
 It shows the latest run only. That is deliberate: the question is "what am I supposed to
 do", and a date picker invites reading a stale answer on purpose.
 
+### `lockin shadow`
+
+What the digest said, against what was then done, for every week the league has finished
+scoring.
+
+```bash
+uv run lockin shadow
+```
+
+The final scores show which game each starter banked, which is Phase 2's lock inference.
+From that the report tells whether each call was followed, overridden, or moot. It checks
+every morning's `BANKED` list against the locks that were knowable that morning, reports
+P(win) against results, and lists calls that changed between runs. Only runs made on the
+morning they describe count: a replay run afterwards advised nobody. It ends with the gate
+in day-one.md step 7: two consecutive clean weeks before the cron is trusted without
+`--locked`. It writes nothing.
+
 ### `lockin serve`
 
 Both pages over HTTP, so a phone can read them.
@@ -884,12 +901,15 @@ lockin/
     policy.py      when to bank a score and when to ride
     winprob.py     P(win), the rollout decision, and the standing threshold
   ingest/
+    run.py         one ingest run, in order; the network is two arguments
     sleeper.py     league, rosters, players, matchups, box scores
     nba.py         schedule, tipoff times, exhibition detection
     validate.py    shape assertions; raises on drift, never warns
   store/
     schema.sql     the contract between ingest and every reader
-    db.py          single-writer SQLite
+    db.py          single-writer SQLite, and its migrations
+    identity.py    which league and season a file belongs to, enforced
+    runs.py        ingest runs: complete or not, and what they skipped
     snapshots.py   raw payload archive, outside the database
   reconcile.py     the Phase 0 gates — ingest completeness
   verify.py        the Phase 1 gates — scoring against the recorded season
@@ -899,7 +919,14 @@ lockin/
   rollout.py       walks a week under the rollout policy, with an opponent
   managers.py      ranks managers on decision quality, and teams on roster quality
   backtest.py      the Phase 4-5 gates — policy against policy over the season
+  calendar.py      which fantasy week a date is in, from the NBA schedule
+  slate.py         a starter's week: games played, then the schedule for the rest
+  state.py         what has been banked, read from the morning's poll
   digest.py        the Phase 6 product — the morning of a date, point-in-time
+  advice.py        the last digest as a page; reads, never recomputes
+  serve.py         both pages over HTTP, for a phone
+  shadow.py        the digest's calls against what was then done, once scored
+  repair.py        original locks recovered from the snapshot archive
   dashboard.py     the manager ranking as static HTML; reads, never computes
   notify.py        ntfy push; opt-in, and never fatal
   cli.py

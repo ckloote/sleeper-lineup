@@ -331,14 +331,34 @@ From then on it advises, reading what you have banked from the morning's matchup
 (`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
 `--locked` still overrides it whenever you give it.
 
-**Shadow-check the poll reading for the first week of advice**, before trusting the cron
-without `--locked`. The rule it applies — a locked player's counted score freezes, so an
-earlier lock shows once he has played again — is the architecture doc's §10 reading and has
-never been observed live. Each morning, compare the `BANKED` list with the locks you
-actually made. They should agree on every player whose next game has been played since he
-was locked; last night's locks are not in it by design, because last night's games are the
-calls. A disagreement means the reading is wrong: pass `--locked` and fix `lockin/state.py`
-before relying on it.
+**Run in shadow until `lockin shadow` passes its gate**, before trusting the cron without
+`--locked`. The rule the poll reading applies — a locked player's counted score freezes, so
+an earlier lock shows once he has played again — is the architecture doc's §10 reading, and
+it has never been observed live.
+
+Until the gate passes, check it by eye each morning, because the report can only judge a
+week once Sleeper has scored it. Compare the `BANKED` list with the locks you actually made.
+They should agree on every player whose next game has been played since he was locked. Last
+night's locks are not in it, by design: last night's games are the calls. A disagreement
+means the reading is wrong. Pass `--locked` and fix `lockin/state.py` before relying on it.
+
+Each Monday, once the week is scored:
+
+```bash
+uv run lockin shadow
+```
+
+For every finalized week it reports:
+- whether each call was followed, overridden, or moot because he had already banked;
+- every morning whose `BANKED` list disagreed with the locks the final scores reveal;
+- P(win) against results;
+- calls that changed between runs.
+
+**Gate:** two consecutive weeks marked `clean`. That means a live run every morning, no
+`BANKED` disagreement, and no call that changed on the same inputs (a digest is seeded, so
+that would be a bug). Once it passes, `--locked` is only an override and the daily check
+stops. Calibration is printed but not gated. Look at it again around week 6, when about
+thirty mornings have accumulated.
 
 A live run also declines when last night's games are not final yet, when the last
 *complete* ingest finished before they did — a cron that died half-way no longer vouches

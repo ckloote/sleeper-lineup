@@ -3124,14 +3124,26 @@ gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by
   means no advice. A stale schedule or stale designations are shown, not acted on. The
   schedule is published a season ahead, and nothing in the model reads designations yet.
   The durability warning uses the projected chance he does not play.
-- **W4. `lockin shadow`.** A read-only report over finalized weeks, covering four things.
-  First, each call against what the polls show was done: followed, overridden or unknown.
-  Second, each run's `BANKED` list against the locks inferred afterwards, which does
-  day-one.md step 7's comparison in code. Third, P(win) against results, reported but not
-  gated at about seven runs a week. Fourth, calls that changed between runs with no new
-  game in between. The gate replaces step 7's manual check: two consecutive finalized
-  weeks with no state disagreement, no such flip, and no digest failure from
-  `cron-guard`.
+- **W4. `lockin shadow`.** ✅ Done (`lockin/shadow.py`, `tests/test_shadow.py`). It
+  covers weeks up to `last_scored_leg`, and only runs made on the morning they describe;
+  a replay run afterwards advised nobody. It writes nothing. For each week:
+  - Each call's last word before its window closed, set against the final scores' lock
+    inference: followed, overridden, moot (he had already banked), or unknown (tied
+    scores, or a value nothing explains).
+  - Each poll-read `BANKED` list against the locks knowable that morning. A lock is
+    knowable once he has played again.
+  - P(win) against the result, as a Brier score and in bins. Reported, not gated.
+  - Calls that changed between runs, split into after new data and on the same ingest and
+    poll. The second is a bug, because a digest is seeded.
+
+  **The gate**, in day-one.md step 7, is two consecutive clean weeks. Clean means a live
+  run every morning, no `BANKED` disagreement, and no same-input flip. The plan said
+  "no digest failure from `cron-guard`". That became "a run every morning", which the
+  database can check: a failed digest leaves no run. Until the gate passes, the daily
+  check by eye stays, because a week can only be judged once it is scored. Tested on a
+  synthetic week with a user who takes the first LOCK call and ignores the rest. The
+  report reads both back, and catches a `BANKED` list with a lock deleted, a flipped
+  rerun, and a missing morning.
 
 **Any time**
 

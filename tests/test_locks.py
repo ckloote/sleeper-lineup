@@ -2,7 +2,7 @@
 
 `games` is always the already-filtered sequence: postponed fixtures and
 exhibitions removed, unplayed real games kept. That filtering is the caller's
-job (`lockin.locks._game_sequence`), and these tests assume it has happened.
+job (`lockin.locks.game_sequence`), and these tests assume it has happened.
 """
 
 from __future__ import annotations
