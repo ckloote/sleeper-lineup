@@ -28,12 +28,17 @@ uv run --frozen lockin verify     # exits nonzero on failure
 ```
 
 **Back up `data/lockin-2025.db` before the Pi first runs the code from the 2026-09-23
-review** (branch `live-state-correctness`). The first command to open the file migrates it:
-it adopts its league identity, completes the partial `lockin repair` polls so the new
-per-poll lineup view reads them whole, and classifies fixture states. All three are additive
-and were checked on a copy — `verify`, `reconcile` and `locks` were identical before and
-after, and `weekly_matchups_latest` row-for-row — but the file is the only copy of the
-season's derived tables, and the cron will do this unattended at 06:30.
+review.** ✅ Done 2026-09-23: `data/lockin-2025.pre-review.db`, two minutes before the
+first command to open the file migrated it (implementation-plan.md §21, "Deployed
+2026-09-24"). Keep the copy. The same backup, under a new name, comes before deploying
+any later change that migrates data.
+
+The migration adopted the file's league identity, completed the partial `lockin repair`
+polls so the new per-poll lineup view reads them whole, and classified fixture states. All
+three are additive and were checked on a copy: `verify`, `reconcile` and `locks` were
+identical before and after, and `weekly_matchups_latest` matched row for row. But the file
+is the only copy of the season's derived tables, and a cron job applies a migration
+unattended.
 
 ```bash
 uv run python -c "

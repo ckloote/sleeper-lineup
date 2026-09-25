@@ -1,14 +1,20 @@
 # Sleeper NBA Lock-In Engine — Implementation Plan
 
 **Companion to:** `sleeper-lockin-engine-architecture.md`
-**Status:** Approved — **Phases 0-5 complete** (§9, §10, §11, §13, §14, §15). Phases 3-5 were
-reassessed and taken on after Phases 0-2 landed, as §6 anticipated. Phase 6 (digest, deployment)
-remains, and is mostly live-only work that cannot be backtested.
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
-**Current status (2026-09-23):** Phase 6 shipped and deployed (§20). The 2026-09-23 code
-review (`docs/code-review-2026-09-23.md`) found the live paths assumed a completed season;
-§21 records the fixes, on branch `live-state-correctness`. That section is current; older
-status lines above and in §6 are history.
+
+**Status (2026-09-24).** This block is the only current status. Where an earlier section
+disagrees with it — §6's phase headings, §20's list of what is live-only — that section is
+history, kept for the reasoning.
+
+| Work | Status | Where |
+|---|---|---|
+| Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete | §9-§11, §13-§15 |
+| Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
+| Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
+| The review's remaining items, and one bug found auditing it | In progress, on branch `review-followups` | §21, "What remains" |
+| Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
+| 2026-27 season | Opens 2026-10-20 | `day-one.md` |
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
 against the live API, or proposes a change with the evidence for that change. Section 8
@@ -2884,6 +2890,12 @@ advice keeps coming from this one.
 
 ### What is still live-only, and therefore still unverified
 
+> **Superseded in part by §21 (2026-09-23).** Designations are now recorded as timestamped
+> changes in `player_status_events`, not in the date-keyed `player_status` item 1
+> describes. The digest reads the rest of the week from the NBA schedule
+> (`lockin/slate.py`), not from the panel as item 3 says. Item 2's poll is now read for
+> banked state (`lockin/state.py`). What is still live-only is at the end of §21.
+
 Unchanged from §15, and none of it is closable before October:
 
 1. **Today's injury designations.** The capture is built; there is no history yet.
@@ -3031,4 +3043,111 @@ morning at a time, asserting on the push text.
 
 **Still live-only:** the poll reading (§10), and whether Sleeper's week rolls over before
 the 06:30 ingest on a Monday (tolerated either way). Both are in day-one.md.
+
+### Deployed 2026-09-24
+
+`0e22e9c` and `05e260d` were merged to `main` late on 2026-09-23. The backup day-one.md
+step 0 asks for was taken first: `data/lockin-2025.pre-review.db`, at 22:32 local time.
+The Pi's copy of the season file was migrated two minutes later, at 02:34 UTC, when the
+first command to open it did so. `schema_migrations` records `coherent-polls` and
+`fixture-states`, and `db_identity` claimed league `1283214955830575104`, season 2025.
+The first run-recording ingest was the 06:30 cron (`ingest_runs` 1, `complete`). The
+09:00 digest wrote the first `digest_runs` row with a `run_id`. It correctly reports the
+season over.
+
+### Review item status
+
+Checked item by item against the code on 2026-09-24, not taken from the commit message.
+Every numbered finding is fixed. What is left is in the review's "additional" list and its
+recommended sequence, plus one bug that auditing them turned up.
+
+| Review item | Status | Evidence |
+|---|---|---|
+| 1 P1: upcoming games classified postponed | Fixed | `game_links.state`; `lockin/slate.py`; `lockin/calendar.py`; `test_fixture_states.py`, `test_slate.py` |
+| 2 P1: digest assumes its own calls were taken | Fixed | `lockin/state.py`; `test_lock_state.py` |
+| 3 P1: opening day projects certain zeroes | Fixed | `cold_start()` abstains below `min_pool_rows`; `test_cold_start.py` |
+| 4 P1: latest lineup keeps dropped players | Fixed | per-poll `weekly_matchups_latest`; `test_polls.py` |
+| 5 P1: season/league isolation unenforced | Fixed | `db_identity`, `lockin/store/identity.py`; `test_identity.py` |
+| 6 P2: calls chosen by team's last night | Fixed | per-player windows in `build()`; `test_lock_state.py` |
+| 7 P2: timing guard never invoked | Fixed | `unfinished_slate()`, `expires_utc`; `test_lock_state.py` |
+| 8 P2: cleared injuries kept, timing lost | Fixed | `status_captures`, `player_status_events`; `test_player_status.py` |
+| 9 P2: stale stats certified fresh | **Partly open** | `ingest_runs` fixed the case the review reproduced. But a `--skip-nba` run still finishes as `complete` and vouches for a live digest, and the run reports only one input's age. W3 |
+| 10 P2: repair overwrites live evolution | Fixed | `FINALIZED` markers; `test_repair.py` |
+| 11 P2: day-one gate cannot pass | Fixed | live/historical gates in `reconcile`; `test_day_one.py` |
+| 12 P2: recommendations not append-only | Fixed | `run_id`, inserts only; `test_runs.py` |
+| Persist warnings, clearing chance, banked scores | **Partly open** | Warnings and banked scores are stored. The clearing chance is not, so the page drops the percentage the notification prints beside each standing rule. W2 |
+| Threshold and action agree on ties | Fixed | "Tie semantics" above |
+| Bootstrap ignores correlated decisions | **Open** | `bootstrap_regret` / `bootstrap_squandered` resample single decisions; the all-roster McNemar counts both sides of a matchup. W6 |
+| Validate pinned assignments in `assign_slots()` | **Open** | `locked` is not checked at all. W5 |
+| `infer_lock()` resolves impossible evidence | Fixed, **untested** | `core/locks.py` returns `UNRESOLVED`, but no test covers a single-game or no-game week whose counted score is unexplained. W5 |
+| Opponent stand-in kept explicit | Fixed | `opponent_state` is `inferred` or `stand-in`, persisted and printed |
+| Portable, representative tests | **Partly open** | `tests/live_fixture.py` covers every scenario the review listed. The advice-page and server suites still skip without the gitignored database. W7 |
+| One current status table | Fixed | the header of this document |
+| Sequence 1-3: capture, actionability, lifecycle rehearsal | Done | above; `test_lifecycle.py` |
+| Sequence 4: shadow mode | **Open** | only day-one.md step 7's manual comparison. W4 |
+| Sequence 5: start/sit after valid data | Deferred by design | §19; day-one.md step 8 |
+
+**Found in the audit: a digest with no NBA schedule cannot be saved.** Without a schedule,
+`week_slate()` attaches the notice "no NBA schedule ingested" to each team's slate as a
+player warning with an empty id. `build()` copies both into the digest as `schedule
+disagreement`. `persist()` then fails on `digest_warnings`' primary key
+(`run_id, sleeper_id, kind`). Reproduced on an in-memory database. It is reachable from any
+`lockin digest` against a file built with `--skip-nba`. The cron never passes that flag,
+which is why nothing has hit it. W1.
+
+### What remains
+
+Ordered against two dates: opening night, 2026-10-20, and the first morning the cold-start
+gate lets the digest advise, about Monday 2026-10-26 (400 player-games, going by 2025-26).
+
+**Before opening night**
+
+- **W1. Save a digest that has no schedule.** The missing-schedule notice becomes one
+  flag per slate, emitted once per digest under its own kind. `persist()` drops duplicate
+  warnings rather than losing the whole run to one.
+- **W2. The clearing chance on the page.** `recommendations` gains `p_clear` and
+  `games_after`. `lockin advice` prints the chance beside each standing rule, as the
+  notification already does.
+
+**Before the digest advises**
+
+- **W3. Freshness per source.** `ingest_runs` records which steps a run skipped. A run
+  that skipped the NBA schedule no longer vouches for a live digest, because fixture
+  states come from the schedule. Each run stores and shows the age of each input: stats,
+  schedule, poll and designations. Policy: stale stats, a stale poll or a skipped
+  schedule means abstain. Stale designations are shown only, because nothing in the model
+  reads them yet.
+- **W4. `lockin shadow`.** A read-only report over finalized weeks, covering four things.
+  First, each call against what the polls show was done: followed, overridden or unknown.
+  Second, each run's `BANKED` list against the locks inferred afterwards, which does
+  day-one.md step 7's comparison in code. Third, P(win) against results, reported but not
+  gated at about seven runs a week. Fourth, calls that changed between runs with no new
+  game in between. The gate replaces step 7's manual check: two consecutive finalized
+  weeks with no state disagreement, no such flip, and no digest failure from
+  `cron-guard`.
+
+**Any time**
+
+- **W5. Core inputs are checked.** `assign_slots()` refuses a pin to an unknown slot, a
+  player pinned twice, or a pin the eligibility rule forbids. Start/sit needs this before
+  it pins anything. Today's only caller passes no pins, so no historical number moves.
+  `infer_lock()`'s single-game and no-game refusals get the tests they lack.
+- **W6. Uncertainty that respects dependence.** Manager intervals resample weeks, not
+  decisions, and report how stable the ranking is. The Phase 5 McNemar is also computed
+  on one side per matchup. If §15's conclusion does not survive, that is written up as a
+  correction; the gate is not loosened.
+- **W7. Reader tests on the synthetic season.** The advice-page and server suites run
+  from `tests/live_fixture.py`, so a clean checkout tests them. Suites about the recorded
+  season stay as they are, and say so when they skip.
+
+**Deferred, and why**
+
+- **Start/sit** (§19; day-one.md step 8). Needs eligibility validated against current
+  Sleeper metadata, a reader that takes designations strictly before each decision, and
+  a held-out gate of its own. Week 10 is the earliest review, not a ship date.
+- **The review's "useful additions."** A phone ledger of confirmed locks, a data-health
+  page (W3 is its minimum), league-lineage discovery, a recommendation history view,
+  lock-deadline reminders, and a warm-start prior from last season. The prior is worth
+  revisiting once 2026-27's first month has tested `min_pool_rows` out of sample. Before
+  then there is no evidence it would beat abstaining.
 
