@@ -110,6 +110,41 @@ def test_the_warnings_the_notification_carried_reach_the_page(tmp_path):
     assert "final-game DNP risk" in page and "unlocked, 40% DNP" in page
 
 
+def test_a_repeated_warning_is_stored_once_not_fatal(tmp_path):
+    warning = Warning("", "schedule", "no schedule", "no NBA schedule ingested", "no NBA schedule")
+    with session(tmp_path / "t.db") as conn:
+        digest_mod.persist(conn, a_digest(calls=[call("1001")], warnings=[warning, warning]))
+        stored = conn.execute("SELECT sleeper_id, kind FROM digest_warnings").fetchall()
+        run = advice.latest_run(conn, 1)
+
+    assert [tuple(r) for r in stored] == [("", "no schedule")]
+    assert [i.sleeper_id for i in run.calls] == ["1001"], "the run was saved, calls and all"
+    assert run.warnings[0][0] == "this run"
+
+
+def test_a_digest_with_no_schedule_says_so_once_and_is_saved(tmp_path):
+    """Both teams' slates used to report the missing schedule as a player warning
+    with an empty id — two rows for one key, and the whole run rolled back."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=8))
+    cfg = config_for(tmp_path, season)
+    ingest(season, cfg, weeks=[1, 2], skip_nba=True)
+    # Without a schedule only a past morning resolves to a week: one whose games
+    # are all in the box scores.
+    replay = (OPENING + timedelta(days=4)).isoformat()
+
+    with connect(cfg) as conn:
+        report = digest_mod.morning(conn, season.season, 1, replay, n_sims=50)
+        digest_mod.persist(conn, report)
+        stored = conn.execute("SELECT sleeper_id, kind FROM digest_warnings").fetchall()
+        today = digest_mod.morning(conn, season.season, 1, season.today.isoformat(), n_sims=50)
+
+    notices = [w for w in report.warnings if w.kind == "no schedule"]
+    assert report.week == 1 and len(notices) == 1
+    assert ("", "no schedule") in [tuple(r) for r in stored]
+    assert "season is over" not in today.note and "no NBA schedule" in today.note
+
+
 def test_a_call_past_its_tip_is_shown_closed(tmp_path):
     with session(tmp_path / "t.db") as conn:
         digest_mod.persist(conn, a_digest(calls=[call("1001")]))

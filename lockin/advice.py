@@ -207,7 +207,8 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         )
     )
     warnings = tuple(
-        (r["full_name"] or r["sleeper_id"], r["kind"], r["detail"])
+        # An empty id is a warning about the run itself, such as a missing schedule.
+        (r["full_name"] or r["sleeper_id"] or "this run", r["kind"], r["detail"])
         for r in _rows(
             conn,
             "SELECT w.sleeper_id, w.kind, w.detail, p.full_name FROM digest_warnings w"
