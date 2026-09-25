@@ -751,8 +751,9 @@ naive reading makes it every All-Star's final game. Of 15 rostered participants 
 17, not one counted it. Treating it as real would bank far too eagerly before the break.
 
 **The NBA Cup final does count.** Opposite conclusion, and it needs care: it is not a
-regular-season game, so `LeagueGameFinder` omits it, and it was the only game on its
-date. Two managers locked on it. It is backfilled from the scoreboard.
+regular-season game, and it was the only game on its date. Two managers locked on it. The
+original schedule source, `LeagueGameFinder`, omitted it, so it was backfilled from the
+scoreboard. `ScheduleLeagueV2` lists it, and the scoreboard sweep stays as a backstop.
 
 **Postponed is not the same as DNP.** Sleeper keeps the original fixture with every
 player unplayed. An unplayed *real* game scores 0.0 for an unlocked starter; a postponed
