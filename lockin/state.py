@@ -101,7 +101,12 @@ def slate_final_at(known_through: int) -> str:
 def latest_poll(
     conn: sqlite3.Connection, week: int, roster_id: int, *, after: str, before: str
 ) -> tuple[str, dict[str, float | None]] | None:
-    """The newest whole poll of a roster-week taken in [after, before), and its starters."""
+    """The newest poll of a roster-week taken in [after, before), and its starters.
+
+    Every row of that one poll, never rows mixed across polls. Whether the poll
+    accounts for every starting slot is not asked here: a live digest refuses
+    the lineup it would be read against first (`digest.partial_lineup`).
+    """
     stamp = conn.execute(
         "SELECT MAX(observed_at) FROM weekly_matchup_teams"
         " WHERE week = ? AND roster_id = ? AND observed_at >= ? AND observed_at < ?",

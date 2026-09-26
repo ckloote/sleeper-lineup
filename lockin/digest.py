@@ -276,6 +276,9 @@ class DigestContext:
     lineups: dict[tuple[int, int], list[str]]
     opponents: dict[tuple[int, int], int]
     dnp_scale: dict[int, float]
+    whole: dict[tuple[int, int], bool] = field(default_factory=dict)
+    """Whether the poll each lineup was read from accounts for every starting
+    slot, as ingest recorded it (`poll_complete`). See `partial_lineup`."""
 
     def lineup_ids(self, week: int, roster_id: int) -> list[str]:
         return self.lineups.get((week, roster_id), [])
@@ -306,6 +309,15 @@ def load_context(
         key = (row["week"], row["roster_id"])
         lineups[key].append(row["sleeper_id"])
         matchups[key] = row["matchup_id"]
+    # The same poll per roster-week as the lineup: both views take the latest
+    # `observed_at` in weekly_matchup_teams. NULL — a poll written before the
+    # column existed — does not vouch for itself.
+    whole = {
+        (row["week"], row["roster_id"]): row["poll_complete"] == 1
+        for row in conn.execute(
+            "SELECT week, roster_id, poll_complete FROM weekly_matchup_teams_latest"
+        )
+    }
 
     opponents: dict[tuple[int, int], int] = {}
     by_matchup: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -346,6 +358,7 @@ def load_context(
         lineups=lineups,
         opponents=opponents,
         dnp_scale=dnp_scale,
+        whole=whole,
     )
 
 
@@ -535,6 +548,30 @@ def stats_evidence(conn: sqlite3.Connection, week: int, known_through: int) -> S
     return StatsEvidence(None, run["run_id"], fetch["started_at"], fetch["finished_at"])
 
 
+def partial_lineup(ctx: DigestContext, week: int, roster_id: int) -> str | None:
+    """Why this morning's lineups cannot be simulated, if they cannot.
+
+    Each lineup is the starters of its roster's latest poll. A poll that leaves
+    a starting slot unaccounted for drops that starter from the simulation and
+    from the lock-state reading together, and the advice looked no different
+    (review 2026-09-26, finding 1). So both teams' polls must be whole — the
+    polls the lineups are read from: a lock state read from some earlier whole
+    poll would leave the lineup read from the newer partial one. An empty slot
+    ("0") accounts for its slot.
+    """
+    rosters = [roster_id]
+    if (opponent := ctx.opponents.get((week, roster_id))) is not None:
+        rosters.append(opponent)
+    partial = [r for r in rosters if not ctx.whole.get((week, r))]
+    if not partial:
+        return None
+    which = " and ".join(f"roster {r}" for r in partial)
+    return (
+        f"lineup incomplete: the latest week {week} poll of {which} does not account for"
+        " every starting slot. No advice until an ingest records a whole one."
+    )
+
+
 def cold_start(
     ctx: DigestContext,
     mine: dict[str, list[Game]],
@@ -687,7 +724,12 @@ def build(
     evidence = None
     if live:
         evidence = stats_evidence(conn, week, known_through)
-        if reason := slate_in_progress(as_of, now) or evidence.problem:
+        reason = (
+            slate_in_progress(as_of, now)
+            or evidence.problem
+            or partial_lineup(ctx, week, roster_id)
+        )
+        if reason:
             return abstain(conn, ctx.season, roster_id, as_of, reason)
 
     starters = ctx.lineup_ids(week, roster_id)
@@ -727,16 +769,16 @@ def build(
     if opponent_id is None:
         # Weeks 23-24 drop eliminated teams and week 25 is unscored (§7.7).
         # Without an opponent there is no win probability to maximise, so there
-        # is no recommendation to make rather than a worse one to invent.
+        # is no recommendation to make rather than a worse one to invent. Live,
+        # `partial_lineup` has already required this poll to be whole.
         poll = conn.execute(
-            "SELECT matchup_id, observed_at, poll_complete FROM weekly_matchup_teams"
+            "SELECT matchup_id, observed_at FROM weekly_matchup_teams"
             " WHERE week = ? AND roster_id = ? ORDER BY observed_at DESC LIMIT 1",
             (week, roster_id),
         ).fetchone()
         digest.verified_no_matchup = bool(
             live
             and poll
-            and poll["poll_complete"] == 1
             and poll["matchup_id"] is None
             and slate_final_at(known_through) <= poll["observed_at"] < run_moment(as_of, now)
         )

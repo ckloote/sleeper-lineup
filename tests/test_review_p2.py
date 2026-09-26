@@ -8,7 +8,15 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from live_fixture import OPENING, ROSTER_POSITIONS, SyntheticSeason, config_for, connect, ingest
+from live_fixture import (
+    OPENING,
+    ROSTER_POSITIONS,
+    SCALED,
+    SyntheticSeason,
+    config_for,
+    connect,
+    ingest,
+)
 from test_runs import a_digest, call
 
 from lockin import advice, calendar, clock, digest, shadow
@@ -389,6 +397,71 @@ def test_an_eliminated_team_with_an_empty_slot_has_no_matchup_not_missing_data(t
         report = morning(conn, season)
     assert report.verified_no_matchup and not report.abstained
     assert report.note == "roster 1 has no matchup in week 2; nothing to decide"
+
+
+def ingest_with_starters(tmp_path, roster_id, change):
+    """The `live` fixture's season, with one roster's `starters` array rewritten."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=7))
+    cfg = config_for(tmp_path, season)
+    real = SyntheticSeason.matchups_payload
+
+    def rewritten(self, week):
+        payload = real(self, week)
+        for team in payload:
+            if team["roster_id"] == roster_id:
+                team["starters"] = change(team["starters"])
+        return payload
+
+    with patch.object(SyntheticSeason, "matchups_payload", rewritten):
+        ingest(season, cfg, weeks=[1, 2])
+    return season, cfg
+
+
+@pytest.mark.parametrize("roster_id", [1, 2], ids=["mine", "opponent"])
+def test_a_poll_missing_a_starter_gives_no_live_advice(tmp_path, roster_id):
+    """Review 2026-09-26, finding 1. Ingest marked the poll incomplete, but the
+    lineup was read from it anyway: the missing starter left the simulation and
+    the lock-state reading together, and the digest advised on five of six."""
+    season, cfg = ingest_with_starters(tmp_path, roster_id, lambda s: s[:-1])
+    with connect(cfg) as conn:
+        assert (
+            conn.execute(
+                "SELECT poll_complete FROM weekly_matchup_teams_latest"
+                " WHERE week = 2 AND roster_id = ?",
+                (roster_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        report = morning(conn, season)
+        assert report.abstained and not report.calls and not report.rules
+        assert report.p_win is None
+        assert f"roster {roster_id}" in report.note and "lineup" in report.note
+        digest.persist(conn, report)
+        assert "lineup" in advice.render(advice.latest_run(conn, 1))
+        replay = digest.morning(
+            conn, season.season, 1, season.today.isoformat(), n_sims=30, params=SCALED
+        )
+        assert replay.retrospective and not replay.abstained
+
+
+def test_an_empty_slot_in_a_matchup_is_a_whole_poll(tmp_path):
+    """An explicit empty slot ("0") accounts for the slot: advice goes ahead."""
+    season, cfg = ingest_with_starters(tmp_path, 1, lambda s: [*s[:-1], "0"])
+    with connect(cfg) as conn:
+        report = morning(conn, season)
+    assert not report.abstained, report.note
+    assert report.state_source == "inferred" and report.p_win is not None
+    assert report.calls or report.rules
+
+
+def test_a_poll_that_does_not_vouch_for_itself_gives_no_live_advice(live):
+    """A poll written before completeness was recorded is not assumed whole."""
+    season, cfg = live
+    with connect(cfg) as conn:
+        conn.execute("UPDATE weekly_matchup_teams SET poll_complete=NULL WHERE roster_id=2")
+        report = morning(conn, season)
+    assert report.abstained and "roster 2" in report.note
 
 
 @pytest.mark.parametrize(
