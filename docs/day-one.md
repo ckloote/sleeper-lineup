@@ -35,6 +35,8 @@ state it holds:
 - `data/lockin-2025.pre-2026-09-23.db`: before the review fixes' migration
   (implementation-plan.md §21, "Deployed 2026-09-24").
 - `data/lockin-2025.pre-2026-09-25.db`: before W1-W8 added their columns.
+- `data/lockin-2025.pre-2026-09-26.db`: before the 09-25 follow-up review's fixes added
+  theirs (implementation-plan.md §21, "Deployed 2026-09-26").
 
 On 2026-09-25 this snippet still wrote a fixed name, so the second backup overwrote the
 first, and the first had to be restored from a scratch copy. It now names the file by
@@ -340,10 +342,11 @@ From then on it advises, reading what you have banked from the morning's matchup
 (`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
 `--locked` still overrides it whenever you give it.
 
-The September 25 guard and coverage corrections are verified locally: **693 tests passed,
-1 skipped**, including socket-dependent tests; Ruff passed. These checks validate the
-implementation, while the live shadow evidence below must accumulate in the new season.
-The corrections have not been deployed as part of this change.
+The September 25 guard and coverage corrections, and the fixes from reviewing them, were
+deployed on 2026-09-26 (implementation-plan.md §21, "Deployed 2026-09-26"): **704 tests
+passed, 1 skipped**, Ruff passed, and every gate passed against a migrated copy of the
+season file. That validates the implementation. The live shadow evidence below must still
+accumulate in the new season.
 
 **Run in shadow until `lockin shadow` passes its gate**, before trusting the cron without
 `--locked`. The rule the poll reading applies — a locked player's counted score freezes, so

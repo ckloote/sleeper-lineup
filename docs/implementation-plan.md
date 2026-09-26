@@ -3,7 +3,7 @@
 **Companion to:** `sleeper-lockin-engine-architecture.md`
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
-**Status (2026-09-25).** This block is the only current status. Where an earlier section
+**Status (2026-09-26).** This block is the only current status. Where an earlier section
 disagrees with it — §6's phase headings, §20's list of what is live-only — that section is
 history, kept for the reasoning.
 
@@ -13,6 +13,7 @@ history, kept for the reasoning.
 | Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
 | Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
 | The review's remaining items, and one bug found auditing it | W1-W8 merged as `473b6ae`..`bbe1a10`; deployed 2026-09-25 | §21, "What remains", "Deployed 2026-09-25" |
+| The 2026-09-25 follow-up review's five P2 findings, and what reviewing their fix found | Merged as `75e9ff5`..`4f24c4e`; deployed 2026-09-26 | §21, "Deployed 2026-09-26"; `code-review-2026-09-25.md` |
 | Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
 | 2026-27 season | Opens 2026-10-20 | `day-one.md` |
 
@@ -3141,6 +3142,61 @@ Two problems the deploy turned up, both fixed the same evening:
 - **The page's inputs line said "box scores not recorded · lineup poll not recorded"** on
   an off-season morning, although the 06:30 ingest had run. A digest with no week to
   decide reads neither. The line now says "not read by this run".
+
+### Deployed 2026-09-26
+
+The 2026-09-25 follow-up review (`code-review-2026-09-25.md`) found five P2 gaps in the
+fixes above: the live digest ignored the calendar guard, a call with an unknown deadline
+stayed open, freshness was judged on when a run finished rather than when it requested
+the stats, one inferred morning could pass the shadow gate, and thresholds were shown and
+measured on different terms. `75e9ff5` is their implementation as it stood when reviewed.
+Reviewing it found nine bugs and five cleanups, fixed one per commit in
+`0909362`..`4f24c4e`:
+
+- **The advice page's ingest banner judged runs that read no box scores.** It said "No
+  ingest has been recorded" over every abstention, every replay and every off-season
+  morning; the last had been on the live page since 2026-09-24. It now judges only a run
+  that read them.
+- **`--weeks` naming a week twice crashed the ingest** after a checkpoint, leaving a
+  running run that blocked every live digest until a clean re-ingest.
+- **The shadow gate** tracked every roster that had ever had a live run, so one `lockin
+  digest --roster N` blocked it for good; it now tracks yours. It counted Monday's
+  abstention as a failed inference, although Sleeper may not have rolled its week over by
+  the 06:30 ingest and nothing is banked before a week's first game; Monday now needs a
+  run, not an inference. Its header called a scored season unfinalized when no live run
+  existed, and it carried a consecutive-weeks check that could not fail.
+- **Before 07:00 UTC the digest said to run the ingest again**, which would fail the same
+  way until 07:00. It now says to wait.
+- **A no-matchup poll with an empty slot** (`"0"`), usual for an eliminated team in weeks
+  23-24, was refused as incomplete, so the digest abstained rather than saying there was
+  no matchup. A check beside it compared the lineup with itself.
+- **Cleanups.** The advice page no longer imports the engine for a timestamp parser; both
+  parsers are in `lockin.clock`. The freshness check returns the ingest it accepted
+  instead of having it looked up again. `explain` loads the season once. The freshness
+  helpers the stats-fetch evidence replaced are gone, and a test assertion that could not
+  fail now checks something.
+
+Merged to `main` as a fast-forward on ⟨TBD date and time⟩. The season file was backed up
+first, as `data/lockin-2025.pre-2026-09-26.db` at ⟨TBD time⟩ local time. The first command
+to open the file, ⟨TBD command⟩ at ⟨TBD time⟩, added `ingest_stats_fetches`, four
+`digest_runs` columns (`stats_fetch_started_at`, `stats_fetch_finished_at`,
+`verified_no_matchup`, `retrospective`) and `weekly_matchup_teams.poll_complete` in place.
+No data migration ran: `schema_migrations` still records only `coherent-polls` and
+`fixture-states`. `lockin-serve` was restarted at ⟨TBD time⟩.
+
+Checked before the deploy, with the code deployed, against a copy of the live file taken at
+23:15 on 2026-09-25 and migrated by that code:
+
+- `reconcile`, `verify`, `locks`, `calibrate` and `backtest` all pass. The backtest took
+  164 s and reproduced W8's five replays exactly.
+- `lockin shadow` reports weeks 1-24 finalized and no live runs in them.
+- The digest reports the season over, and the page shows no ingest banner.
+- The full suite passes at every commit in the range: 704 passed, 1 skipped at `4f24c4e`.
+
+Until the season opens this changes little on the Pi. An off-season digest has no week, so
+it stops before the new freshness check. Each daily ingest now records when it requested
+the week's stats, so live digests will have that evidence when the season starts. The
+first cron runs on this code are ⟨TBD date⟩'s.
 
 ### Review item status
 
