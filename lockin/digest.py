@@ -488,6 +488,16 @@ def unfinished_slate(
             f"last night is not final yet: no final result for {', '.join(stuck)}."
             " Re-run once the morning ingest has it."
         )
+    return slate_in_progress(as_of, now)
+
+
+def slate_in_progress(as_of: str, now: datetime | None) -> str | None:
+    """Why last night cannot be final yet by the clock alone, if it cannot.
+
+    Asked before `stale_ingest`: before 07:00 UTC no ingest can have requested
+    a final slate, so that check fails too, and its "run ingest again" would
+    fail the same way until 07:00.
+    """
     if now is not None and clock.too_early_for(as_of, now):
         return "last night's games may still be in progress. Re-run after 07:00 UTC."
     return None
@@ -673,7 +683,9 @@ def build(
             note=note,
         )
 
-    if live and (reason := stale_ingest(conn, week, known_through)):
+    if live and (
+        reason := slate_in_progress(as_of, now) or stale_ingest(conn, week, known_through)
+    ):
         return abstain(conn, ctx.season, roster_id, as_of, reason)
 
     starters = ctx.lineup_ids(week, roster_id)
@@ -778,13 +790,9 @@ def build(
         digest.note = f"week {week} has no countable games for one of the two teams"
         return digest
 
-    if live:
-        reason = unfinished_slate(mine_slate, theirs_slate, as_of, now, names) or stale_ingest(
-            conn, week, known_through
-        )
-        if reason:
-            digest.note, digest.abstained = reason, True
-            return digest
+    if live and (reason := unfinished_slate(mine_slate, theirs_slate, as_of, now, names)):
+        digest.note, digest.abstained = reason, True
+        return digest
 
     reason = cold_start(ctx, mine, theirs, week, known_through, names)
     if reason:

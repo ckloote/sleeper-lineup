@@ -163,6 +163,17 @@ def test_a_run_before_last_nights_slate_is_final_waits(week):
     assert "still be in progress" in report.note
 
 
+def test_before_seven_utc_it_says_to_wait_not_to_ingest_again(tmp_path):
+    """Its ingest ran before 07:00 too, so the stats request predates the slate's
+    end. "Run ingest again" would fail the same way until 07:00."""
+    w = Week().ingest(tmp_path, at="2026-10-28T05:30:00")
+
+    report = w.digest(now="2026-10-28T06:00:00+00:00")
+
+    assert report.abstained
+    assert "Re-run after 07:00 UTC" in report.note
+
+
 def test_a_game_the_nba_has_finished_but_sleeper_has_not_scored_waits(tmp_path):
     w = Week()
     blank = w.games[w.b][0]  # Tuesday, final on the NBA side
