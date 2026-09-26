@@ -3196,7 +3196,7 @@ Checked before the deploy, with the code deployed, against a copy of the live fi
 Until the season opens this changes little on the Pi. An off-season digest has no week, so
 it stops before the new freshness check. Each daily ingest now records when it requested
 the week's stats, so live digests will have that evidence when the season starts. The
-first cron runs on this code are ⟨TBD date⟩'s.
+first cron runs on this code are 2026-09-27's: the deploy came after all of 2026-09-26's.
 
 ### Review item status
 
