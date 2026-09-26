@@ -530,11 +530,18 @@ def ingest_with_starters(tmp_path, roster_id, change):
 
 
 @pytest.mark.parametrize("roster_id", [1, 2], ids=["mine", "opponent"])
-def test_a_poll_missing_a_starter_gives_no_live_advice(tmp_path, roster_id):
+@pytest.mark.parametrize(
+    "change", [lambda s: s[:-1], lambda s: [*s[:-1], s[0]]], ids=["missing", "duplicate"]
+)
+def test_a_poll_missing_a_starter_gives_no_live_advice(tmp_path, roster_id, change):
     """Review 2026-09-26, finding 1. Ingest marked the poll incomplete, but the
     lineup was read from it anyway: the missing starter left the simulation and
-    the lock-state reading together, and the digest advised on five of six."""
-    season, cfg = ingest_with_starters(tmp_path, roster_id, lambda s: s[:-1])
+    the lock-state reading together, and the digest advised on five of six.
+
+    The follow-up's finding 2: a poll that named its first starter again in
+    place of the sixth was marked whole. Ingest keys the lineup by player, so
+    the repeat filled one slot, and the digest advised on five of six again."""
+    season, cfg = ingest_with_starters(tmp_path, roster_id, change)
     with connect(cfg) as conn:
         assert (
             conn.execute(
@@ -556,9 +563,11 @@ def test_a_poll_missing_a_starter_gives_no_live_advice(tmp_path, roster_id):
         assert replay.retrospective and not replay.abstained
 
 
-def test_an_empty_slot_in_a_matchup_is_a_whole_poll(tmp_path):
-    """An explicit empty slot ("0") accounts for the slot: advice goes ahead."""
-    season, cfg = ingest_with_starters(tmp_path, 1, lambda s: [*s[:-1], "0"])
+@pytest.mark.parametrize("empty", [1, 2], ids=["one", "two"])
+def test_an_empty_slot_in_a_matchup_is_a_whole_poll(tmp_path, empty):
+    """An explicit empty slot ("0") accounts for the slot: advice goes ahead.
+    Two of them are not a repeated starter."""
+    season, cfg = ingest_with_starters(tmp_path, 1, lambda s: [*s[:-empty], *["0"] * empty])
     with connect(cfg) as conn:
         report = morning(conn, season)
     assert not report.abstained, report.note
@@ -580,12 +589,23 @@ def test_a_poll_that_does_not_vouch_for_itself_gives_no_live_advice(live):
     [
         (lambda t: t, True),
         (lambda t: t | {"starters": [*t["starters"][:-1], "0"]}, True),
+        (lambda t: t | {"starters": [*t["starters"][:-2], "0", "0"]}, True),
         (lambda t: t | {"starters": t["starters"][:-1]}, False),
+        (lambda t: t | {"starters": [*t["starters"][:-1], t["starters"][0]]}, False),
         (lambda t: t | {"starters": [*t["starters"][:-1], "9999"]}, False),
         (lambda t: t | {"starters": [*t["starters"][:-1], None]}, False),
         (lambda t: t | {"starters": None}, False),
     ],
-    ids=["full", "empty slot", "slot missing", "not on roster", "null starter", "no lineup"],
+    ids=[
+        "full",
+        "empty slot",
+        "two empty slots",
+        "slot missing",
+        "duplicate starter",
+        "not on roster",
+        "null starter",
+        "no lineup",
+    ],
 )
 def test_a_whole_poll_names_every_slot(change, whole):
     team = SyntheticSeason().matchups_payload(1)[0]

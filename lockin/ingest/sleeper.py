@@ -372,17 +372,24 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
 
 
 def poll_complete(team: dict, roster_positions: list[str]) -> bool:
-    """Does a team's poll list its whole lineup? A no-matchup exemption rests on it.
+    """Does a team's poll list its whole lineup? Live advice, the no-matchup
+    exemption and the shadow gate all rest on it.
 
     Every starting slot must be there, holding a player on the roster or "0",
     Sleeper's empty slot. An eliminated team in weeks 23-24 often leaves slots
     empty, and its poll is no less whole for it.
+
+    And each player in one slot only. Ingest keys the lineup by player, so a
+    starter named twice fills one slot and the other is lost, which the digest
+    advised on as a whole lineup of five (review 2026-09-26 follow-up, finding
+    2). Empty slots may repeat.
     """
     starters = team.get("starters") or []
     named = [p for p in starters if p != "0"]
     return (
         len(starters) == sum(p not in {"BN", "IR"} for p in roster_positions)
         and all(named)
+        and len(set(named)) == len(named)
         and set(named).issubset(team.get("players") or [])
     )
 
