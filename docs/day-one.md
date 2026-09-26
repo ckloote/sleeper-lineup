@@ -340,7 +340,10 @@ old "P(win) near 50%" pass criterion was unknowingly accepting (review finding 3
 
 From then on it advises, reading what you have banked from the morning's matchup poll
 (`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
-`--locked` still overrides it whenever you give it.
+`--locked` still overrides it whenever you give it. It needs a whole lineup poll for both
+teams: when the latest poll of either roster leaves a starting slot unaccounted for, it
+abstains with `lineup incomplete` rather than advise on a short lineup. An explicit empty
+slot counts as accounted for, and the next ingest's whole poll clears it.
 
 The September 25 guard and coverage corrections, and the fixes from reviewing them, were
 deployed on 2026-09-26 (implementation-plan.md §21, "Deployed 2026-09-26"): **704 tests
@@ -368,21 +371,26 @@ uv run lockin shadow
 For every finalized week it reports:
 - whether each call was followed, overridden, or moot because he had already banked;
 - every morning whose `BANKED` list disagreed with the locks the final scores reveal;
+- every starter's reading on a morning the final scores cannot settle, as unverified;
 - P(win) against results;
 - calls that changed between runs.
 
 **Gate:** the latest two finalized weeks of tracking must both be full, consecutive,
 and marked `clean`. It tracks your roster, the one the cron advises; a digest run by hand
 for another roster is not tracked. Yours needs a non-abstained, automatically inferred
-run with at least one check against resolvable final evidence every calendar morning
-except Monday, which needs only a run: nothing is banked before a week's first game, and
-Sleeper may not have rolled its week over by the 06:30 ingest, which leaves Monday's
-digest to abstain. A partial first week cannot qualify. Supplied state, abstentions,
-uncheckable evidence, and missing runs (including entire missing weeks) block the gate;
-no LOCK calls is not an exemption. A successful rerun recovers coverage, but never erases
-a state discrepancy or a same-input call flip from an earlier run. Only an explicitly
-recorded, fresh, complete roster poll with a null matchup ID qualifies as a no-matchup
-exemption.
+run every calendar morning, with every starter's reading checked against the final
+scores, except Monday, which needs only a run: nothing is banked before a week's first
+game, and Sleeper may not have rolled its week over by the 06:30 ingest, which leaves
+Monday's digest to abstain. A starter whose final score cannot settle a morning's reading
+— one that ties his final game with an earlier one, or is missing or unexplained — is
+listed as unverified and blocks the week. Before his second game no lock can show, so
+those mornings are checked whatever his final score says. In 2025-26, 18 of 250
+roster-weeks had such a starter. A partial first week cannot qualify. Supplied state,
+abstentions, uncheckable evidence, unverified readings, and missing runs (including
+entire missing weeks) block the gate; no LOCK calls is not an exemption. A successful
+rerun recovers coverage, but never erases a state discrepancy or a same-input call flip
+from an earlier run. Only an explicitly recorded, fresh, complete roster poll with a null
+matchup ID qualifies as a no-matchup exemption.
 The report lists these coverage categories separately. Once the gate passes, `--locked`
 is only an override and the daily check stops. Calibration is printed but not gated.
 Look at it again around week 6, when about thirty mornings have accumulated.

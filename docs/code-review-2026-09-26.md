@@ -1,5 +1,10 @@
 # Follow-up review — 2026-09-26
 
+**Resolution status:** all three findings are fixed on branch `review-0926-fixes`, one
+commit each, with regressions shaped like the reproductions below. The findings are kept
+as written for audit; the update at the end records the fixes and how they were checked.
+Deployment is outside this change.
+
 Reviewed HEAD `815e7cc`, focusing on the changes since `45d6c2f` and the live
 consumers around them. The five previous findings have substantive fixes and
 passing regression coverage. Three remaining issues are reproduced below.
@@ -92,3 +97,63 @@ calls.
 The passing suite verifies the implemented regressions; it does not cover the
 mixed-evidence shadow case or reject incomplete ordinary lineup polls. Those
 two correctness gaps should be closed before relying on the automatic gate.
+
+
+## Implementation and verification update
+
+All three findings are resolved:
+
+1. **Incomplete polls (`e88a1f2`).** A live digest now requires a whole poll for both
+   teams: the polls their lineups are read from, not an older whole poll picked for the
+   lock state. `load_context` records each roster-week's `poll_complete` from
+   `weekly_matchup_teams_latest`, which selects the same latest poll as
+   `weekly_matchups_latest`. `partial_lineup` joins the live guards ahead of the "no
+   starters" branch and abstains with a note naming the roster. A NULL (legacy) poll does
+   not vouch for itself; an explicit empty slot counts as accounted for. The no-matchup
+   check's own completeness term read the same poll after the new guard, so it was
+   dropped. Replays are unchanged.
+2. **Shadow coverage (`7765a53`).** `_state` no longer skips a starter whose final score
+   cannot settle a morning's reading. It records the reading as unverified, once per
+   morning and player, with the reason: no final score, a score nothing explains, a final
+   zero despite a played game, a tie with the final game, or tied games on either side of
+   the morning. A week with any unverified reading is not clean, and the report lists
+   them in a section of their own. One justified exemption: before a starter's second
+   game no lock can show, so "nothing banked" is the right reading whatever the final
+   score says. That turns such early mornings into real checks; for readable truths the
+   answer is unchanged. On the 2025-26 season, 18 of 250 roster-weeks had a starter
+   whose final score cannot be read, so two fully verifiable weeks in a row stay likely.
+3. **Replay label (`e5bd7fa`).** The page carries a run-level "Historical replay" banner
+   under the age banner, above the win probability, whether the run has calls, rules, or
+   only a note. A replay's rules are dated, never "Tonight", and described as what that
+   morning would have said. The text digest prints its label before any note, which
+   covers the compact notification.
+
+Regressions in `tests/test_review_p2.py` and `tests/test_shadow.py`, each seen failing on
+the unfixed code first:
+
+- Your final starter missing, and the opponent's, both abstain, with no calls, rules or
+  P(win). A NULL completeness abstains too. An explicit empty slot in an ordinary matchup
+  still advises from the inferred state, and a replay of the incomplete case still runs.
+- The reproduction above, where 1001 is the only readable starter and 1002 reads as 999
+  every morning: the gate fails. 1002–1005 are unverified after their second games, and
+  the 999 is a miss on 1002's first morning. 1006's second week-3 game is the week's
+  last night, so none of his readings depend on a final score. With 1002 alone
+  unreadable, the week is not clean, the other starters are still checked, and a rerun
+  adds no duplicate entries.
+- The shared history's seed has a natural tie: 1003 scored 11.5 on 10-28 and in his final
+  game on 10-30. Week 2 is flagged for 10-29 to 11-01 and week 3 stays clean. The
+  fixture's clean baseline now sits him out of 10-28, so the tests that need a passing
+  gate still have one.
+- A rules-only replay and a note-only replay carry the banner, above the state and
+  without "Tonight". So does the replayed Monday 2026-10-26 above: no calls, standing
+  rules, persisted and rendered. A live run of the same season has no banner.
+
+Final verification, from the branch worktree, with `LOCKIN_DB` pointed at a copy of the
+season file:
+
+- Full suite: **715 passed, 1 skipped**, cron and HTTP suites included (local sockets
+  were available).
+- Ruff check, Ruff format check, and `git diff --check`: **passed**.
+
+`docs/day-one.md` describes the new live abstention and the per-starter shadow gate. No
+schema change or data migration. The page change needs a `lockin-serve` restart to show.
