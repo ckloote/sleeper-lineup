@@ -63,6 +63,27 @@ def today_iso(tz: str | None = None) -> str:
     return today(tz).isoformat()
 
 
+def utc(stamp: str) -> datetime:
+    """A stored timestamp as a UTC datetime. "Z" is read as +00:00."""
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def aware_utc(stamp: str | None) -> datetime | None:
+    """A timestamp as a UTC datetime, if it says which timezone it is in.
+
+    A naive or malformed one is None, not guessed at: a tipoff that closes a
+    call, or the moment the week's stats were requested, must not pass as known
+    when it cannot be placed.
+    """
+    if not stamp:
+        return None
+    try:
+        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return value.astimezone(UTC) if value.tzinfo is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
 def too_early_for(as_of: str, moment: datetime | None = None) -> bool:
     """Would a digest for ``as_of`` be reading an unfinished slate?
 

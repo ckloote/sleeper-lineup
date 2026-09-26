@@ -11,7 +11,7 @@ import pytest
 from live_fixture import OPENING, ROSTER_POSITIONS, SyntheticSeason, config_for, connect, ingest
 from test_runs import a_digest, call
 
-from lockin import advice, calendar, digest, shadow
+from lockin import advice, calendar, clock, digest, shadow
 from lockin.core.policy import Game
 from lockin.core.projections import ProjectionParams
 from lockin.core.winprob import evaluate_lock, lock_threshold
@@ -112,7 +112,7 @@ def test_exact_tipoff_is_closed(live):
         )
         assert target.sleeper_id not in {c.sleeper_id for c in report.calls}
     item = advice.Item("p", "P", "LOCK", 1, 11.5, 0.6, 0.5, "", target.expires_utc)
-    assert item.deadline_status(digest.valid_deadline(target.expires_utc)) == "closed"
+    assert item.deadline_status(clock.aware_utc(target.expires_utc)) == "closed"
 
 
 @pytest.mark.parametrize(

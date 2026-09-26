@@ -34,7 +34,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from lockin import clock
-from lockin.digest import valid_deadline
 from lockin.projections import date_of, day_index
 
 
@@ -57,7 +56,7 @@ class Item:
         return self.deadline_status(now) == "closed"
 
     def deadline_status(self, now: datetime) -> str:
-        deadline = valid_deadline(self.expires_utc)
+        deadline = clock.aware_utc(self.expires_utc)
         if deadline is None:
             return "unknown deadline"
         return "closed" if deadline <= now else "open"
@@ -136,10 +135,6 @@ class Run:
         re-run something that had already run.
         """
         return day_index(today or clock.today_iso()) - day_index(self.as_of)
-
-
-def _utc(stamp: str) -> datetime:
-    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _rows(conn: sqlite3.Connection, sql: str, args: tuple) -> list[sqlite3.Row]:
@@ -402,7 +397,7 @@ def _freshness(run: Run, today: str | None = None) -> tuple[str, str]:
 
 def _local(stamp: str) -> str:
     """A UTC stamp as the weekday and time it was here: "Thu 7:30pm"."""
-    local = _utc(stamp).astimezone(clock.zone())
+    local = clock.utc(stamp).astimezone(clock.zone())
     return f"{local.strftime('%a')} {local.strftime('%I:%M%p').lstrip('0').lower()}"
 
 

@@ -457,21 +457,6 @@ def run_moment(as_of: str, now: datetime | None) -> str:
     return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"
 
 
-def _utc(stamp: str) -> datetime:
-    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
-
-
-def valid_deadline(stamp: str | None) -> datetime | None:
-    """Only an explicitly timezone-aware timestamp verifies a live deadline."""
-    if not stamp:
-        return None
-    try:
-        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        return value.astimezone(UTC) if value.tzinfo is not None else None
-    except (ValueError, TypeError):
-        return None
-
-
 def unfinished_slate(
     mine: WeekSlate, theirs: WeekSlate, as_of: str, now: datetime | None, names: dict[str, str]
 ) -> str | None:
@@ -525,11 +510,11 @@ def stale_ingest(conn: sqlite3.Connection, week: int, known_through: int) -> str
     fetch = runs.stats_fetch(conn, run["run_id"], week)
     if fetch is None:
         return "no stats-fetch evidence for this week; run ingest again."
-    started = valid_deadline(fetch["started_at"])
-    finished = valid_deadline(fetch["finished_at"])
+    started = clock.aware_utc(fetch["started_at"])
+    finished = clock.aware_utc(fetch["finished_at"])
     if started is None or finished is None or finished < started:
         return "invalid stats-fetch evidence; run ingest again."
-    if started < _utc(slate_final_at(known_through)):
+    if started < clock.utc(slate_final_at(known_through)):
         return "the stats request started before last night's games finished; run ingest again."
     return None
 
@@ -877,7 +862,7 @@ def build(
             continue
         game = seen[-1]
         expires = mine_slate.tipoff.get((sleeper_id, ahead[0].day))
-        deadline = valid_deadline(expires)
+        deadline = clock.aware_utc(expires)
         if live and deadline is None:
             digest.warnings.append(
                 Warning(
@@ -1012,9 +997,9 @@ def _short(name: str, width: int) -> str:
 
 def deadline_day(tipoff_utc: str | None) -> str | None:
     """The local date a window closes on, for grouping."""
-    if valid_deadline(tipoff_utc) is None:
+    if clock.aware_utc(tipoff_utc) is None:
         return None
-    return _utc(tipoff_utc).astimezone(clock.zone()).date().isoformat()
+    return clock.utc(tipoff_utc).astimezone(clock.zone()).date().isoformat()
 
 
 def deadline_label(tipoff_utc: str) -> str:
