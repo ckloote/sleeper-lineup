@@ -366,9 +366,15 @@ def ingest_warning(run: Run) -> str | None:
     the 9:00 digest still runs, still finds box scores, and still produces
     confident calls — on last night's data minus last night. Nothing else on this
     page would look wrong.
+
+    Only a run that read box scores is judged. One that read none — an
+    abstention, a morning with no week to decide, a replay — says so in its
+    inputs line, and a live digest with no fresh ingest to read abstains with
+    that as its note. Judging those too put "No ingest has been recorded" over
+    every off-season morning and every abstention after a healthy ingest.
     """
-    if run.last_ingest_at is None:
-        return "No ingest has been recorded, so these calls may rest on stale box scores."
+    if run.stats_fetch_started_at is None or run.last_ingest_at is None:
+        return None
     try:
         ingested = datetime.fromisoformat(run.last_ingest_at)
         generated = datetime.fromisoformat(run.generated_at)

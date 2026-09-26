@@ -15,9 +15,10 @@ advice it qualifies.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from live_fixture import advising_morning, connect
@@ -477,11 +478,43 @@ def test_a_recent_selected_fetch_says_nothing(stored):
     assert 'data-warning="ingest"' not in advice.render(run, today=AS_OF, now=MORNING)
 
 
-def test_no_ingest_at_all_is_reported_rather_than_assumed_fine(tmp_path, report):
+def test_a_run_that_read_no_box_scores_is_not_judged_on_them(tmp_path):
+    """A healthy ingest, then two mornings that read no box scores: an abstention,
+    and the off-season's "the season is over". Judged anyway, both said "No ingest
+    has been recorded" — the second over every morning of September."""
+    season, cfg_, report, now = advising_morning(tmp_path)
+    with connect(cfg_) as conn:
+        row = conn.execute("SELECT payload_json FROM league_settings").fetchone()
+        payload = json.loads(row[0])
+        payload["settings"]["leg"] = 4
+        conn.execute("UPDATE league_settings SET payload_json=?", (json.dumps(payload),))
+        abstention = digest_mod.morning(conn, season.season, 1, report.as_of, live=True, now=now)
+        assert abstention.abstained and "week 4" in abstention.note
+        season_over = digest_mod.Digest(
+            as_of=report.as_of,
+            week=0,
+            roster_id=1,
+            opponent_roster_id=None,
+            known_through=report.known_through,
+            note="no scheduled games on or after this date; the season is over",
+        )
+        for minute, quiet in enumerate((abstention, season_over)):
+            digest_mod.persist(conn, quiet, now=now + timedelta(minutes=minute))
+            run = advice.latest_run(conn, 1)
+            assert run.note == quiet.note
+            assert advice.ingest_warning(run) is None
+            page = advice.render(run, today=report.as_of, now=now)
+            assert 'data-warning="ingest"' not in page
+            assert "box scores not read by this run" in page
+
+
+def test_a_replay_is_not_judged_on_todays_ingest(tmp_path, report):
+    """It reads the recorded season, not this morning's ingest."""
     with session(tmp_path / "none.db") as conn:
         digest_mod.persist(conn, report, state_supplied=True)
         run = advice.latest_run(conn, report.roster_id)
-    assert "No ingest has been recorded" in advice.ingest_warning(run)
+    assert run.retrospective
+    assert advice.ingest_warning(run) is None
 
 
 def test_a_late_cron_is_not_treated_as_a_failure(tmp_path, report):
@@ -493,7 +526,7 @@ def test_a_late_cron_is_not_treated_as_a_failure(tmp_path, report):
         run = advice.latest_run(conn, report.roster_id)
 
     generated = run.generated_at
-    fresh = dc_replace(run, last_ingest_at=generated)
+    fresh = dc_replace(run, stats_fetch_started_at=generated, last_ingest_at=generated)
     assert advice.ingest_warning(fresh) is None
 
 
