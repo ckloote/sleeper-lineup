@@ -371,12 +371,15 @@ For every finalized week it reports:
 **Gate:** the latest two finalized weeks of tracking must both be full, consecutive,
 and marked `clean`. It tracks your roster, the one the cron advises; a digest run by hand
 for another roster is not tracked. Yours needs a non-abstained, automatically inferred
-run with at least one check against resolvable final evidence every calendar morning.
-A partial first week cannot qualify. Supplied state, abstentions, uncheckable evidence,
-and missing runs (including entire missing weeks) block the gate; no LOCK calls is not
-an exemption. A successful rerun recovers coverage, but never erases a state discrepancy
-or a same-input call flip from an earlier run. Only an explicitly recorded, fresh,
-complete roster poll with a null matchup ID qualifies as a no-matchup exemption.
+run with at least one check against resolvable final evidence every calendar morning
+except Monday, which needs only a run: nothing is banked before a week's first game, and
+Sleeper may not have rolled its week over by the 06:30 ingest, which leaves Monday's
+digest to abstain. A partial first week cannot qualify. Supplied state, abstentions,
+uncheckable evidence, and missing runs (including entire missing weeks) block the gate;
+no LOCK calls is not an exemption. A successful rerun recovers coverage, but never erases
+a state discrepancy or a same-input call flip from an earlier run. Only an explicitly
+recorded, fresh, complete roster poll with a null matchup ID qualifies as a no-matchup
+exemption.
 The report lists these coverage categories separately. Once the gate passes, `--locked`
 is only an override and the daily check stops. Calibration is printed but not gated.
 Look at it again around week 6, when about thirty mornings have accumulated.

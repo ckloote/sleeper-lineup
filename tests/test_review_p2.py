@@ -305,6 +305,25 @@ def test_a_digest_run_by_hand_for_another_roster_is_not_owed_daily(history):
         assert "roster 2" not in shadow.render(report)
 
 
+def test_monday_is_owed_a_run_not_an_inference(history):
+    """Before Sleeper rolls its week over, the 06:30 ingest fetches only the week
+    just gone, and Monday's digest abstains for want of the new one. Nothing is
+    banked before a week's first game, so there was no state to read anyway."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        for monday, week in (("2026-10-26", 2), ("2026-11-02", 3)):
+            conn.execute(
+                "UPDATE digest_runs SET abstained=1, state_source=NULL, note=? WHERE as_of=?",
+                (f"no complete newest ingest covering week {week}.", monday),
+            )
+        report = shadow.build(conn, season.season, 1)
+        assert report.gate()[0], shadow.render(report)
+        conn.execute("DELETE FROM digest_runs WHERE as_of='2026-11-02'")
+        report = shadow.build(conn, season.season, 1)
+        assert report.weeks[-1].mornings_missing == ["roster 1 2026-11-02"]
+        assert not report.gate()[0]
+
+
 @pytest.mark.parametrize(
     "kind", ["verified", "missing_opponent", "missing_starters", "stale", "incomplete"]
 )

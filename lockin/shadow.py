@@ -337,7 +337,13 @@ def _mornings(
     first_live: str | None,
     truth: dict[tuple[int, int, str], Truth],
 ) -> None:
-    """Require automatic, checkable inference each calendar morning."""
+    """Require automatic, checkable inference each calendar morning.
+
+    Monday is owed a run, not an inference. Nothing is banked before a week's
+    first game, so there is no state to read, and its digest may abstain for want
+    of the week itself: Sleeper need not have rolled over by the 06:30 ingest,
+    which then fetches only the week just gone.
+    """
     if opening is None or first_live is None:
         summary.partial = True
         return
@@ -366,6 +372,8 @@ def _mornings(
             summary.exemptions.append(label)
         elif not morning:
             summary.mornings_missing.append(label)
+        elif day == monday:
+            pass
         elif inferred:
             summary.uncheckable.append(label)
         elif any(r["state_source"] == "supplied" and not r["abstained"] for r in morning):
