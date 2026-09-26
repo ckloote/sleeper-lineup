@@ -1224,20 +1224,21 @@ def explain(
         roster_id = roster or digest_mod.roster_for_user(conn, cfg.user_id)
         if roster_id is None:
             raise click.ClickException(f"no roster for user {cfg.user_id}")
+        # `build` applies a live run's guards itself, the calendar's included, so
+        # this declines wherever the digest would. `morning` would too, but it
+        # keeps its context to itself, and the explanation below needs it.
         try:
-            report = digest_mod.morning(
-                conn,
-                cfg.season,
+            ctx = digest_mod.load_context(conn, cfg.season)
+            report = digest_mod.build(
+                ctx,
                 roster_id,
                 as_of,
                 n_sims=sims,
+                n_paths=sims,
                 locked=banked,
                 live=live,
                 now=now,
             )
-            if report.note:
-                raise click.ClickException(report.note)
-            ctx = digest_mod.load_context(conn, cfg.season)
         except (ValueError, projections_mod.NoGamesYet) as exc:
             raise click.ClickException(str(exc)) from None
         if report.note:
