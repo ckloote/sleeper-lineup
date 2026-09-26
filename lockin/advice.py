@@ -389,6 +389,11 @@ def _inputs(run: Run) -> str:
     The banners judge only the box scores. The lineup poll, the schedule and the
     designations can each go stale on their own — a cron that stopped fetching
     one of them leaves the others fresh — so each one's age is shown.
+
+    A missing age means this run did not read that input, not that the input is
+    missing: a run with no week to decide reads no box scores and no poll. It
+    used to say "not recorded", which on every off-season morning read like a
+    failed ingest.
     """
     ages = [
         ("box scores", run.last_ingest_at),
@@ -397,7 +402,7 @@ def _inputs(run: Run) -> str:
         ("designations", run.status_at),
     ]
     return "Inputs: " + " &middot; ".join(
-        f"{name} {_local(at) if at else 'not recorded'}" for name, at in ages
+        f"{name} {_local(at) if at else 'not read by this run'}" for name, at in ages
     )
 
 

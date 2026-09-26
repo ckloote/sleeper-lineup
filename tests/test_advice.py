@@ -540,4 +540,4 @@ def test_a_live_page_names_its_players_deadlines_and_inputs(live):
     assert "Advice for this morning" in page
     assert page.count(" tip</div>") == len(run.calls), "every call shows the tip that closes it"
     assert "read from the matchup poll" in page
-    assert "Inputs: box scores" in page and "not recorded" not in page
+    assert "Inputs: box scores" in page and "not read" not in page

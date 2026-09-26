@@ -256,4 +256,19 @@ def test_the_page_says_how_old_each_input_was(tmp_path):
     page = advice.render(run, today="2026-10-28", now=datetime(2026, 10, 28, 14, tzinfo=UTC))
     assert row["schedule_at"] and row["status_at"]
     assert "Inputs: box scores" in page and "designations" in page
-    assert "not recorded" not in page, page[page.index("Inputs:") :][:300]
+    assert "not read" not in page, page[page.index("Inputs:") :][:300]
+
+
+def test_an_input_a_run_did_not_read_is_not_called_missing(tmp_path):
+    """Found on the first morning after deploying: an off-season digest has no week
+    to decide, so it reads no box scores and no poll, and the page said "box
+    scores not recorded" over an ingest that had run at 06:30."""
+    quiet = a_digest(week=0, poll_observed_at=None, note="the season is over", p_win=None)
+    with session(tmp_path / "t.db") as conn:
+        digest_mod.persist(conn, quiet)
+        run = advice.latest_run(conn, 1)
+
+    page = advice.render(run, today="2026-10-28", now=datetime(2026, 10, 28, 14, tzinfo=UTC))
+    assert "box scores not read by this run" in page
+    assert "lineup poll not read by this run" in page
+    assert "not recorded" not in page
