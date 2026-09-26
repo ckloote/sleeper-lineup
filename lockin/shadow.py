@@ -149,6 +149,9 @@ class WeekSummary:
     uncheckable: list[str] = field(default_factory=list)
     exemptions: list[str] = field(default_factory=list)
     partial: bool = False
+    final_incomplete: bool = False
+    """The week's final poll does not vouch for every starting slot, so a starter
+    it dropped is in neither the checks nor the unverified readings."""
     calls: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     state_checked: int = 0
     state_misses: int = 0
@@ -162,6 +165,7 @@ class WeekSummary:
             self.runs > 0
             and (self.state_checked > 0 or bool(self.exemptions))
             and not self.partial
+            and not self.final_incomplete
             and not self.failed_inference
             and not self.supplied_only
             and not self.uncheckable
@@ -212,7 +216,11 @@ class ShadowReport:
 def truths(
     conn: sqlite3.Connection, season: str, weeks: list[int], rosters: set[int]
 ) -> dict[tuple[int, int, str], Truth]:
-    """(week, roster, player) -> what he banked, for every starter of ``rosters``."""
+    """(week, roster, player) -> what he banked, for every starter of ``rosters``.
+
+    The starters are the final poll's, which is the week's whole lineup only when
+    that poll is whole. `build` asks (`_whole_finals`).
+    """
     scoring = scoring_settings(conn)
     seq = game_sequence(conn, season)
     out: dict[tuple[int, int, str], Truth] = {}
@@ -329,6 +337,26 @@ def _final_points(conn: sqlite3.Connection, week: int, roster_id: int) -> float 
     return row["points"] if row else None
 
 
+def _whole_finals(conn: sqlite3.Connection, weeks: list[int], roster_id: int) -> set[int]:
+    """The weeks whose final poll of the roster accounts for every starting slot.
+
+    `truths` reads its starters from the same poll: both views take the latest
+    `observed_at` in weekly_matchup_teams. A starter that poll dropped was in
+    nothing to check, so a final poll that kept one starter passed a week on one
+    check a morning (review 2026-09-26 follow-up, finding 1). NULL — a poll
+    written before the column existed — does not vouch for itself.
+    """
+    marks = ",".join("?" * len(weeks))
+    return {
+        row["week"]
+        for row in conn.execute(
+            f"SELECT week FROM weekly_matchup_teams_latest"
+            f" WHERE roster_id = ? AND poll_complete = 1 AND week IN ({marks})",
+            [roster_id, *weeks],
+        )
+    }
+
+
 def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport:
     last = last_scored_week(conn) if _has_league(conn) else 0
     report = ShadowReport(finalized=last)
@@ -340,12 +368,14 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
     for r in runs:
         by_week[r["week"]].append(r)
     truth = truths(conn, season, weeks, {roster_id})
+    whole = _whole_finals(conn, weeks, roster_id)
     opening = calendar.opening_night(conn, season)
     first_live = runs[0]["as_of"] if runs else None
     first_week = min(by_week) if by_week else last + 1
 
     for week in range(first_week, last + 1):
         summary = WeekSummary(week=week, runs=len(by_week[week]))
+        summary.final_incomplete = week not in whole
         report.weeks.append(summary)
         _mornings(summary, by_week[week], week, opening, roster_id, first_live, truth)
         _calls(conn, report, summary, by_week[week], truth)
@@ -500,6 +530,9 @@ def _state(
     scores cannot settle let one checkable starter a morning pass a week, and a
     wrong banked score went unseen along with its evidence (review 2026-09-26,
     finding 2). Unverified is reported once per morning, however many runs.
+
+    Every starter of the final poll, that is: one it dropped is here only if a
+    run banked him. That is the week's `final_incomplete`, not this reading's.
     """
     unsettled: set[tuple[str, str]] = set()
     for run in runs:
@@ -593,6 +626,11 @@ def render(report: ShadowReport) -> str:
         )
         if w.partial:
             out.append("          partial first week: a full week is required")
+        if w.final_incomplete:
+            out.append(
+                "          incomplete final poll: a starting slot is unaccounted for,"
+                " so its starter is unverified"
+            )
         for label, entries in (
             ("failed inference", w.failed_inference),
             ("supplied-only", w.supplied_only),

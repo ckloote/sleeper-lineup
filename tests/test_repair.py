@@ -74,8 +74,8 @@ def seed_db(path, week, roster_points, *, observed_at="2026-08-08T00:00:00+00:00
         for roster_id, points in roster_points.items():
             conn.execute(
                 "INSERT OR REPLACE INTO weekly_matchup_teams"
-                " (week, roster_id, matchup_id, points, custom_points, observed_at)"
-                " VALUES (?, ?, 1, ?, NULL, ?)",
+                " (week, roster_id, matchup_id, points, custom_points, observed_at, poll_complete)"
+                " VALUES (?, ?, 1, ?, NULL, ?, 1)",
                 (week, roster_id, sum(points[p] for p in STARTERS), observed_at),
             )
             for player, value in {**points, "9999": 0.0}.items():
@@ -285,12 +285,15 @@ def test_the_team_total_is_recomputed_from_the_repaired_starters(project):
         repairs, _ = repair.plan(conn, root, "2025", [12])
         repair.apply(conn, root, "2025", repairs, observed_at=now_iso())
         total = conn.execute(
-            "SELECT points, matchup_id FROM weekly_matchup_teams"
+            "SELECT points, matchup_id, poll_complete FROM weekly_matchup_teams"
             " WHERE week = 12 AND roster_id = 1 ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()
 
     assert total["points"] == 92.5, "points must stay the sum of its six slots"
     assert total["matchup_id"] == 1, "the pairing is carried forward, not invented"
+    # The same membership as the poll it corrects, so the same completeness: a
+    # NULL here would keep the week out of the shadow gate for good.
+    assert total["poll_complete"] == 1
 
 
 def test_the_bench_is_left_alone(project):

@@ -213,7 +213,9 @@ def apply(
     latest observation, with the corrected values substituted. The latest view
     reads one poll per roster-week (schema.sql), so a repair that appended only
     the rows it changed would become the roster's entire membership and drop
-    everyone it left alone.
+    everyone it left alone. The same membership is as whole as the poll it
+    copies, so its `poll_complete` is carried over too; NULL would keep a
+    repaired week out of the shadow gate.
     """
     touched = sorted({(r.consensus.week, r.consensus.roster_id) for r in repairs})
     weeks = sorted({week for week, _ in touched})
@@ -255,14 +257,14 @@ def apply(
         slots = [s for s in by_week[week] if s[0] == roster_id]
         points = sum(by_week[week][s].value for s in slots)
         prior = conn.execute(
-            "SELECT matchup_id, custom_points FROM weekly_matchup_teams"
+            "SELECT matchup_id, custom_points, poll_complete FROM weekly_matchup_teams"
             " WHERE week = ? AND roster_id = ? ORDER BY observed_at DESC LIMIT 1",
             (week, roster_id),
         ).fetchone()
         conn.execute(
             "INSERT OR REPLACE INTO weekly_matchup_teams"
-            " (week, roster_id, matchup_id, points, custom_points, observed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " (week, roster_id, matchup_id, points, custom_points, observed_at, poll_complete)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 week,
                 roster_id,
@@ -270,6 +272,7 @@ def apply(
                 points,
                 prior["custom_points"] if prior else None,
                 observed_at,
+                prior["poll_complete"] if prior else None,
             ),
         )
         team_rows += 1

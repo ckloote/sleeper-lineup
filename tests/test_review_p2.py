@@ -425,6 +425,41 @@ def test_a_final_score_tied_with_an_earlier_game_is_unverified(tmp_path):
     assert not report.misses and report.weeks[-1].clean
 
 
+def test_a_final_poll_missing_starters_does_not_qualify_a_week(history):
+    """Review 2026-09-26 follow-up, finding 1. The starters to check came from the
+    final poll, so one it dropped left the check too, unless a run had banked him.
+    Nothing is banked here: a final poll that kept only 1001 passed both weeks on
+    one check a morning."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        conn.execute(
+            "UPDATE weekly_matchups SET is_starter=0 WHERE roster_id=1 AND sleeper_id != '1001'"
+        )
+        conn.execute("UPDATE weekly_matchup_teams SET poll_complete=0 WHERE roster_id=1")
+        report = shadow.build(conn, season.season, 1)
+    assert report.gate() == (False, "week(s) 2, 3 not clean"), shadow.render(report)
+    assert all(w.final_incomplete for w in report.weeks)
+    assert not report.misses and not report.unverified
+    assert "incomplete final poll" in shadow.render(report)
+
+
+@pytest.mark.parametrize("flag", [0, None], ids=["incomplete", "legacy"])
+def test_only_a_whole_final_poll_qualifies_its_week(history, flag):
+    """Every starter is still there and checks out; the poll's own word that it
+    is not whole, or its silence, is enough to keep the week from qualifying."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        conn.execute(
+            "UPDATE weekly_matchup_teams SET poll_complete=? WHERE roster_id=1 AND week=3", (flag,)
+        )
+        report = shadow.build(conn, season.season, 1)
+    assert report.gate() == (False, "week(s) 3 not clean"), shadow.render(report)
+    week2, week3 = report.weeks
+    assert week2.clean and not week2.final_incomplete
+    assert week3.final_incomplete and week3.state_checked
+    assert not week3.state_misses and not week3.state_unverified
+
+
 @pytest.mark.parametrize(
     "kind", ["verified", "missing_opponent", "missing_starters", "stale", "incomplete"]
 )
