@@ -1,6 +1,11 @@
 # Follow-up review of the September 26 fixes
 
-**Status:** two outstanding P2 findings. No implementation changes were made.
+**Resolution status:** both findings are fixed on branch `review-0926-followup-fixes`, one
+commit each, with regressions shaped like the reproductions below. The findings are kept
+as written for audit; the update at the end records the fixes and how they were checked.
+Deployment is outside this change.
+
+**Status as reviewed:** two outstanding P2 findings. No implementation changes were made.
 
 Reviewed HEAD `bb34153`, focusing on the fixes since `815e7cc` and their
 surrounding validation paths. The original three reproductions are addressed,
@@ -68,3 +73,60 @@ advice to abstain.
 - The full suite was not rerun for this follow-up review.
 
 The passing tests verify the existing fixes but do not cover these two cases.
+
+
+## Implementation and verification update
+
+Both findings are resolved:
+
+1. **Partial final polls (`f0b89c1`).** `shadow.build` reads each tracked week's final
+   `poll_complete` from `weekly_matchup_teams_latest`, the same poll `truths` takes its
+   starters from. A week whose final poll is not whole is not clean. Its week line in the
+   report reads `incomplete final poll: a starting slot is unaccounted for, so its starter
+   is unverified`. As in the live digest, NULL (a legacy poll) does not vouch for itself.
+   The starters the poll does list are still checked, and their misses and unverified
+   readings are still reported. `lockin repair` wrote its new final poll with a NULL flag
+   although it copies the corrected poll's whole membership. Under the new check that
+   would have kept a repaired week out of the gate for good, so the repair now carries the
+   flag over.
+2. **Duplicate starters (`0ef0445`).** `poll_complete` also requires each named starter
+   to be distinct. Explicit empty slots are not named players, so they may still repeat.
+   The ingest loop is unchanged. A poll with a repeated starter is now recorded as
+   incomplete, and live advice, the no-matchup exemption and the shadow gate all refuse
+   it.
+
+Regressions, each seen failing on the unfixed code first:
+
+- `tests/test_review_p2.py`, finding 1:
+  - The reproduction above. Roster 1's final polls keep only 1001 as a starter, are
+    marked incomplete, and nothing is banked for the dropped starters. The gate returns
+    `(False, 'week(s) 2, 3 not clean')`, both weeks carry the flag, and there are no
+    misses or unverified readings: the flag alone blocks them.
+  - Week 3's final poll marked incomplete, or NULL, with every starter present. Week 3
+    alone is not clean, and week 2 still is.
+  - These are separate from the NULL-counted-score tests of the 09-26 review.
+- `tests/test_repair.py`: the repaired team row keeps `poll_complete = 1`.
+- `tests/test_review_p2.py`, finding 2:
+  - The live test for a missing starter also runs the duplicate `[*s[:-1], s[0]]`, for
+    your roster and the opponent's. Both abstain with no calls, rules or P(win), and a
+    replay still runs.
+  - The completeness unit test adds a repeated starter (not whole) and two empty slots
+    (whole).
+  - A matchup with two empty slots still advises.
+
+Real data: all 2,280 team polls in the 2025-26 matchup archive, including the last one of
+each of the 25 weeks (250 final polls), are whole under the new rule. None names a
+starter twice. Neither fix changes the reading of a stored poll, and neither leaves the
+gate unreachable on a season like the last one.
+
+Final verification, from the branch worktree, with `LOCKIN_DB` pointed at a copy of the
+season file:
+
+- Full suite: **723 passed, 1 skipped**. That is the previous 715 plus the eight new
+  cases, with the cron and HTTP suites included (local sockets were available).
+- Ruff check, Ruff format check, and `git diff --check`: **passed**.
+
+`docs/day-one.md` describes the stricter completeness rule and the final-poll
+requirement of the shadow gate. There is no schema change or data migration. Ingest
+applies the new rule at its next run. The page is unchanged, so `lockin-serve` needs no
+restart.
