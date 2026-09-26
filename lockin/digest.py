@@ -739,12 +739,6 @@ def build(
             and poll["poll_complete"] == 1
             and poll["matchup_id"] is None
             and slate_final_at(known_through) <= poll["observed_at"] < run_moment(as_of, now)
-            and conn.execute(
-                "SELECT COUNT(*) FROM weekly_matchups WHERE week=? AND roster_id=?"
-                " AND observed_at=? AND is_starter=1",
-                (week, roster_id, poll["observed_at"]),
-            ).fetchone()[0]
-            == len(starters)
         )
         if live and not digest.verified_no_matchup:
             digest.abstained = True
