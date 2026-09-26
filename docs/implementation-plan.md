@@ -3176,13 +3176,13 @@ Reviewing it found nine bugs and five cleanups, fixed one per commit in
   helpers the stats-fetch evidence replaced are gone, and a test assertion that could not
   fail now checks something.
 
-Merged to `main` as a fast-forward on ⟨TBD date and time⟩. The season file was backed up
-first, as `data/lockin-2025.pre-2026-09-26.db` at ⟨TBD time⟩ local time. The first command
-to open the file, ⟨TBD command⟩ at ⟨TBD time⟩, added `ingest_stats_fetches`, four
+Merged to `main` as a fast-forward on 2026-09-26. The season file was backed up
+first, as `data/lockin-2025.pre-2026-09-26.db` at 10:41 local time. The first command
+to open the file, `lockin verify` at 10:42, added `ingest_stats_fetches`, four
 `digest_runs` columns (`stats_fetch_started_at`, `stats_fetch_finished_at`,
 `verified_no_matchup`, `retrospective`) and `weekly_matchup_teams.poll_complete` in place.
 No data migration ran: `schema_migrations` still records only `coherent-polls` and
-`fixture-states`. `lockin-serve` was restarted at ⟨TBD time⟩.
+`fixture-states`. `lockin-serve` was restarted at 10:43.
 
 Checked before the deploy, with the code deployed, against a copy of the live file taken at
 23:15 on 2026-09-25 and migrated by that code:
