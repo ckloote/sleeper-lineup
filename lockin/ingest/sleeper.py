@@ -371,6 +371,22 @@ def ingest_players(conn: sqlite3.Connection, client: SleeperClient) -> int:
     return n
 
 
+def poll_complete(team: dict, roster_positions: list[str]) -> bool:
+    """Does a team's poll list its whole lineup? A no-matchup exemption rests on it.
+
+    Every starting slot must be there, holding a player on the roster or "0",
+    Sleeper's empty slot. An eliminated team in weeks 23-24 often leaves slots
+    empty, and its poll is no less whole for it.
+    """
+    starters = team.get("starters") or []
+    named = [p for p in starters if p != "0"]
+    return (
+        len(starters) == sum(p not in {"BN", "IR"} for p in roster_positions)
+        and all(named)
+        and set(named).issubset(team.get("players") or [])
+    )
+
+
 def ingest_matchups(
     conn: sqlite3.Connection,
     client: SleeperClient,
@@ -416,12 +432,7 @@ def ingest_matchups(
                 team.get("points"),
                 team.get("custom_points"),
                 observed,
-                int(
-                    len(team.get("starters") or [])
-                    == sum(p not in {"BN", "IR"} for p in roster_positions)
-                    and all(p and p != "0" for p in team.get("starters") or [])
-                    and set(team.get("starters") or []).issubset(team.get("players") or [])
-                ),
+                int(poll_complete(team, roster_positions)),
             ),
         )
         starters = team.get("starters") or []

@@ -8,13 +8,14 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from live_fixture import OPENING, SyntheticSeason, config_for, connect, ingest
+from live_fixture import OPENING, ROSTER_POSITIONS, SyntheticSeason, config_for, connect, ingest
 from test_runs import a_digest, call
 
 from lockin import advice, calendar, digest, shadow
 from lockin.core.policy import Game
 from lockin.core.projections import ProjectionParams
 from lockin.core.winprob import evaluate_lock, lock_threshold
+from lockin.ingest import sleeper as sleeper_ingest
 from lockin.store import runs
 from lockin.store.db import apply_schema, session
 
@@ -359,6 +360,48 @@ def test_only_verified_complete_no_matchup_poll_is_exempt(live, kind):
         assert bool(conn.execute("SELECT verified_no_matchup FROM digest_runs").fetchone()[0]) == (
             kind == "verified"
         )
+
+
+def test_an_eliminated_team_with_an_empty_slot_has_no_matchup_not_missing_data(tmp_path):
+    """In weeks 23-24 an eliminated team often leaves a slot empty ("0"). Its poll
+    is whole, but was refused as incomplete, so every morning's digest abstained
+    with "opponent data missing"."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=7))
+    cfg = config_for(tmp_path, season)
+    real = SyntheticSeason.matchups_payload
+
+    def eliminated(self, week):
+        payload = real(self, week)
+        for team in payload:
+            if team["roster_id"] == 1:
+                team["matchup_id"] = None
+                team["starters"][-1] = "0"
+        return payload
+
+    with patch.object(SyntheticSeason, "matchups_payload", eliminated):
+        ingest(season, cfg, weeks=[1, 2])
+    with connect(cfg) as conn:
+        report = morning(conn, season)
+    assert report.verified_no_matchup and not report.abstained
+    assert report.note == "roster 1 has no matchup in week 2; nothing to decide"
+
+
+@pytest.mark.parametrize(
+    ("change", "whole"),
+    [
+        (lambda t: t, True),
+        (lambda t: t | {"starters": [*t["starters"][:-1], "0"]}, True),
+        (lambda t: t | {"starters": t["starters"][:-1]}, False),
+        (lambda t: t | {"starters": [*t["starters"][:-1], "9999"]}, False),
+        (lambda t: t | {"starters": [*t["starters"][:-1], None]}, False),
+        (lambda t: t | {"starters": None}, False),
+    ],
+    ids=["full", "empty slot", "slot missing", "not on roster", "null starter", "no lineup"],
+)
+def test_a_whole_poll_names_every_slot(change, whole):
+    team = SyntheticSeason().matchups_payload(1)[0]
+    assert sleeper_ingest.poll_complete(change(team), ROSTER_POSITIONS) is whole
 
 
 def test_shadow_exemptions_are_explicit_not_free_text(history):
