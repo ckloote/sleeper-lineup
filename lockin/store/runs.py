@@ -43,27 +43,6 @@ def skipped(row: sqlite3.Row) -> set[str]:
     return set(json.loads(row["skipped"] or "[]"))
 
 
-def latest_complete(
-    conn: sqlite3.Connection, week: int | None = None, *, live: bool = False
-) -> sqlite3.Row | None:
-    """The newest ingest that finished every step — and covered ``week``, if given.
-
-    ``live`` also requires that it skipped nothing a live digest depends on
-    (`LIVE_REQUIRES`). Otherwise a `--skip-nba` run this morning would vouch for
-    fixture states classified from yesterday's NBA data.
-    """
-    for row in conn.execute(
-        "SELECT run_id, started_at, finished_at, weeks, skipped FROM ingest_runs"
-        " WHERE status = 'complete' ORDER BY finished_at DESC"
-    ):
-        if week is not None and week not in json.loads(row["weeks"]):
-            continue
-        if live and skipped(row) & LIVE_REQUIRES:
-            continue
-        return row
-    return None
-
-
 def schedule_fetched_at(conn: sqlite3.Connection) -> str | None:
     """When the NBA schedule was last fetched in full."""
     row = conn.execute(
@@ -76,11 +55,6 @@ def designations_read_at(conn: sqlite3.Connection) -> str | None:
     """When injury designations were last read, flagged or not."""
     row = conn.execute("SELECT MAX(observed_at) FROM status_captures").fetchone()
     return row[0] if row else None
-
-
-def any_recorded(conn: sqlite3.Connection) -> bool:
-    """Has this database ever been ingested by code that records runs?"""
-    return conn.execute("SELECT EXISTS (SELECT 1 FROM ingest_runs)").fetchone()[0] == 1
 
 
 def latest_covering(conn: sqlite3.Connection, week: int) -> sqlite3.Row | None:

@@ -1106,22 +1106,6 @@ def render(digest: Digest, *, compact: bool = False) -> str:
 # ------------------------------------------------------------------- persistence
 
 
-def last_ingest_at(conn: sqlite3.Connection, week: int | None = None) -> str | None:
-    """When the data under a digest was last complete, from `ingest_runs`.
-
-    A database no run-recording ingest has touched yet falls back to the newest
-    `ingest_log` line — the old signal, which a sub-step can refresh without the
-    stats (review finding 9). The first ingest by current code ends that.
-    """
-    if runs.any_recorded(conn):
-        run = runs.latest_complete(conn, week)
-        return run["finished_at"] if run else None
-    row = conn.execute(
-        "SELECT MAX(finished_at) f FROM ingest_log WHERE source = 'sleeper'"
-    ).fetchone()
-    return row["f"] if row else None
-
-
 def persist(
     conn: sqlite3.Connection,
     digest: Digest,
