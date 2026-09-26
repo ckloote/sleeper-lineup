@@ -206,7 +206,7 @@ def test_a_run_that_failed_part_way_does_not_vouch_for_the_data(tmp_path):
     with connect(cfg) as conn:
         statuses = [r[0] for r in conn.execute("SELECT status FROM ingest_runs ORDER BY run_id")]
         newest_log = conn.execute("SELECT MAX(finished_at) FROM ingest_log").fetchone()[0]
-        problem = digest_mod.stale_ingest(conn, 2, season.today.toordinal() - 1)
+        problem = digest_mod.stats_evidence(conn, 2, season.today.toordinal() - 1).problem
     assert statuses == ["complete", "running"], "the failed run committed week 1, and says so"
     assert newest_log > "2026-10-29"  # the old signal: fooled by today's partial run
     # Nor can yesterday's complete run vouch: today's may have replaced what it read.

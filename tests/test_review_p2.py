@@ -135,7 +135,9 @@ def test_fetch_request_boundary_and_selected_provenance(live, start, end, accept
             "UPDATE ingest_stats_fetches SET started_at=?, finished_at=? WHERE week=2",
             (started, finished),
         )
-        assert (digest.stale_ingest(conn, 2, season.today.toordinal() - 1) is None) == accepted
+        assert (
+            digest.stats_evidence(conn, 2, season.today.toordinal() - 1).problem is None
+        ) == accepted
         report = morning(conn, season, locked={})
         assert report.abstained != accepted
         if accepted:
@@ -146,7 +148,9 @@ def test_fetch_request_boundary_and_selected_provenance(live, start, end, accept
             assert saved["ingest_run_id"] == run["run_id"]
             assert saved["stats_fetch_started_at"] == started
             assert advice.latest_run(conn, 1).stats_fetch_started_at == started
-            assert "complete" in digest.stale_ingest(conn, 2, season.today.toordinal() - 1)
+            assert (
+                "complete" in digest.stats_evidence(conn, 2, season.today.toordinal() - 1).problem
+            )
 
 
 def test_missing_evidence_and_unrelated_refresh_cannot_certify(live):

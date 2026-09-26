@@ -479,7 +479,7 @@ def unfinished_slate(
 def slate_in_progress(as_of: str, now: datetime | None) -> str | None:
     """Why last night cannot be final yet by the clock alone, if it cannot.
 
-    Asked before `stale_ingest`: before 07:00 UTC no ingest can have requested
+    Asked before `stats_evidence`: before 07:00 UTC no ingest can have requested
     a final slate, so that check fails too, and its "run ingest again" would
     fail the same way until 07:00.
     """
@@ -493,30 +493,46 @@ def model_id(ctx: DigestContext) -> str:
     return f"lockin {__version__}; projection params {params}"
 
 
-def stale_ingest(conn: sqlite3.Connection, week: int, known_through: int) -> str | None:
+@dataclass(frozen=True, slots=True)
+class StatsEvidence:
+    """The ingest a live digest reads and when it requested the week's stats —
+    or, as ``problem``, why no ingest can be trusted for them."""
+
+    problem: str | None
+    run_id: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+def stats_evidence(conn: sqlite3.Connection, week: int, known_through: int) -> StatsEvidence:
     """Require the newest covering ingest and a post-boundary stats request.
 
     Completion alone cannot certify stats requested before the slate was final.
     A newer partial run may already have replaced inputs, so an older complete
     run cannot vouch for them. Legacy evidence is deliberately not fabricated.
+    What passes is what the digest records as its provenance.
     """
     run = runs.latest_covering(conn, week)
     if run is None or run["status"] != "complete":
-        return (
+        return StatsEvidence(
             f"no complete newest ingest covering week {week}. Run `lockin ingest --weeks current`."
         )
     if runs.skipped(run) & runs.LIVE_REQUIRES:
-        return "the last ingest skipped the NBA schedule (--skip-nba). Run ingest without it."
+        return StatsEvidence(
+            "the last ingest skipped the NBA schedule (--skip-nba). Run ingest without it."
+        )
     fetch = runs.stats_fetch(conn, run["run_id"], week)
     if fetch is None:
-        return "no stats-fetch evidence for this week; run ingest again."
+        return StatsEvidence("no stats-fetch evidence for this week; run ingest again.")
     started = clock.aware_utc(fetch["started_at"])
     finished = clock.aware_utc(fetch["finished_at"])
     if started is None or finished is None or finished < started:
-        return "invalid stats-fetch evidence; run ingest again."
+        return StatsEvidence("invalid stats-fetch evidence; run ingest again.")
     if started < clock.utc(slate_final_at(known_through)):
-        return "the stats request started before last night's games finished; run ingest again."
-    return None
+        return StatsEvidence(
+            "the stats request started before last night's games finished; run ingest again."
+        )
+    return StatsEvidence(None, run["run_id"], fetch["started_at"], fetch["finished_at"])
 
 
 def cold_start(
@@ -668,10 +684,11 @@ def build(
             note=note,
         )
 
-    if live and (
-        reason := slate_in_progress(as_of, now) or stale_ingest(conn, week, known_through)
-    ):
-        return abstain(conn, ctx.season, roster_id, as_of, reason)
+    evidence = None
+    if live:
+        evidence = stats_evidence(conn, week, known_through)
+        if reason := slate_in_progress(as_of, now) or evidence.problem:
+            return abstain(conn, ctx.season, roster_id, as_of, reason)
 
     starters = ctx.lineup_ids(week, roster_id)
     if not starters:
@@ -703,12 +720,10 @@ def build(
         model=model_id(ctx),
         retrospective=not live,
     )
-    if live:
-        selected = runs.latest_covering(conn, week)
-        fetch = runs.stats_fetch(conn, selected["run_id"], week)
-        digest.ingest_run_id = selected["run_id"]
-        digest.stats_fetch_started_at = fetch["started_at"]
-        digest.stats_fetch_finished_at = fetch["finished_at"]
+    if evidence is not None:
+        digest.ingest_run_id = evidence.run_id
+        digest.stats_fetch_started_at = evidence.started_at
+        digest.stats_fetch_finished_at = evidence.finished_at
     if opponent_id is None:
         # Weeks 23-24 drop eliminated teams and week 25 is unscored (§7.7).
         # Without an opponent there is no win probability to maximise, so there
