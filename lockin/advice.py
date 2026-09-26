@@ -444,6 +444,18 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
     now = now or datetime.now(UTC)
     parts: list[str] = []
 
+    # Said of the run, above everything it qualifies — the win probability too.
+    # It used to be the heading of the calls, so a replay with none, only
+    # standing rules or a note, read as tonight's advice (review 2026-09-26,
+    # finding 3). A replay also skips the checks a live run must pass.
+    replay = ""
+    if run.retrospective:
+        replay = (
+            '<p class="banner stale" data-warning="retrospective">Historical replay'
+            f" &mdash; a reconstruction of the morning of {html.escape(run.as_of)}, made"
+            " afterwards without the checks a live run must pass. Not advice to act on.</p>"
+        )
+
     # Directly under the staleness banner, because it is the same question asked
     # of the other input: that one says the advice is old, this says the data
     # under it is. Either makes the numbers below untrustworthy.
@@ -507,8 +519,15 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
     by_night: dict[int, list[Item]] = {}
     for item in run.rules:
         by_night.setdefault(item.for_day, []).append(item)
+    # A replay's night is always past, so it is never "Tonight", and its rule is
+    # what that morning would have said rather than something to do.
+    hint = (
+        "The rule that morning would have given. Chance: how likely he was to clear it."
+        if run.retrospective
+        else "Lock him at this score or more. Chance: how likely he is to."
+    )
     for day in sorted(by_night):
-        label = "Tonight" if date_of(day) == run.as_of else date_of(day)
+        label = "Tonight" if date_of(day) == run.as_of and not run.retrospective else date_of(day)
         rows = "".join(
             "<tr>"
             f"<td class=who>{html.escape(i.name)}</td>"
@@ -519,7 +538,7 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
         )
         parts.append(
             f"<h2>{html.escape(label)}</h2>"
-            "<p class=hint>Lock him at this score or more. Chance: how likely he is to.</p>"
+            f"<p class=hint>{hint}</p>"
             "<table><thead><tr><th>Player</th>"
             "<th class=num>Clears</th><th class=num>Chance</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
@@ -652,6 +671,7 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
 
 <h1>What to do &mdash; week {run.week}</h1>
 <p class="banner {tone}" data-warning="age">{sentence}</p>
+{replay}
 {state}
 {"".join(parts)}
 {prompt}

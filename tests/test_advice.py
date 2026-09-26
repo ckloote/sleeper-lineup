@@ -347,7 +347,7 @@ def test_where_the_matchup_stands_comes_before_the_advice(stored):
     _, run = stored
     page = advice.render(run, today=AS_OF, now=MORNING)
     assert page.index("class=state") < page.index("<h2>")
-    assert page.index("class=pwin") < page.index("Historical replay")
+    assert page.index("class=pwin") < page.index("<h2>Historical replay")
 
 
 def test_the_banner_still_outranks_everything(stored):

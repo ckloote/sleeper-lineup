@@ -568,6 +568,47 @@ def test_shadow_exemptions_are_explicit_not_free_text(history):
         assert sum(len(w.exemptions) for w in report.weeks) == 14
 
 
+@pytest.mark.parametrize("shape", ["rules", "note"])
+def test_a_replay_without_calls_is_still_labelled_historical(tmp_path, shape):
+    """Review 2026-09-26, finding 3. The label lived in the calls section, so a
+    replay with only standing rules — any Monday — read as tonight's orders."""
+    tonight = date(2026, 10, 28).toordinal()
+    if shape == "rules":
+        report = a_digest(
+            rules=[digest.StandingRule("p", "P", tonight, 30.5, 0.4, 0, 1)], retrospective=True
+        )
+    else:
+        report = a_digest(note="week 2 has no countable games", retrospective=True)
+    with session(tmp_path / "t.db") as conn:
+        digest.persist(conn, report)
+        page = advice.render(
+            advice.latest_run(conn, 1),
+            today=report.as_of,
+            now=datetime(2026, 10, 28, 13, tzinfo=UTC),
+        )
+    assert 'data-warning="retrospective"' in page and "Historical replay" in page
+    assert page.index('data-warning="retrospective"') < page.index("class=state")
+    assert "Tonight" not in page and "Lock him" not in page
+    assert "HISTORICAL REPLAY" in digest.render(report)
+    assert "HISTORICAL REPLAY" in digest.render(report, compact=True)
+
+
+def test_a_replayed_monday_is_labelled_historical_and_a_live_run_is_not(live):
+    season, cfg = live
+    with connect(cfg) as conn:
+        replay = digest.morning(conn, season.season, 1, "2026-10-26", n_sims=30, params=SCALED)
+        assert replay.retrospective and not replay.calls and replay.rules
+        digest.persist(conn, replay)
+        page = advice.render(advice.latest_run(conn, 1))
+        assert "Historical replay" in page and "Tonight" not in page
+        report = morning(conn, season)
+        assert not report.abstained and report.rules
+        now = datetime.combine(season.today, datetime.min.time(), UTC) + timedelta(hours=13)
+        digest.persist(conn, report, now=now)
+        page = advice.render(advice.latest_run(conn, 1), today=report.as_of, now=now)
+    assert "Historical replay" not in page and "Tonight" in page
+
+
 def test_retrospective_call_never_becomes_lock_now(tmp_path):
     with session(tmp_path / "t.db") as conn:
         report = a_digest(calls=[call("p")], retrospective=True)

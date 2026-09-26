@@ -1076,12 +1076,12 @@ def render(digest: Digest, *, compact: bool = False) -> str:
     """
     day_name = datetime.fromordinal(digest.as_of_day).strftime("%a %-d %b")
     out = [f"LOCK-IN  {day_name}  wk {digest.week}"]
+    if digest.retrospective:
+        out.append("HISTORICAL REPLAY — not live advice")
     if digest.note:
         out.extend(textwrap.wrap(digest.note, WIDTH))
         return "\n".join(out)
 
-    if digest.retrospective:
-        out.append("HISTORICAL REPLAY — not live advice")
     banked = sum(digest.banked.values())
     out.append(
         f"roster {digest.roster_id} v {digest.opponent_roster_id}   P(win) {digest.p_win:.0%}"
