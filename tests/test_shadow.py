@@ -231,6 +231,13 @@ def test_a_lock_shows_only_once_he_has_played_again():
     assert shadow.expected_banked(truth({D, D + 4}), D + 2) is False  # a tie across the morning
 
 
+def test_before_his_second_game_no_lock_can_show_whatever_the_final_score():
+    unreadable = truth(None)
+    assert shadow.expected_banked(unreadable, D - 1) is None  # no game yet
+    assert shadow.expected_banked(unreadable, D) is None  # one game: its window is open
+    assert shadow.expected_banked(unreadable, D + 2) is False
+
+
 def summary(week: int, *, clean: bool = True) -> shadow.WeekSummary:
     return shadow.WeekSummary(week=week, runs=7, state_checked=30, state_misses=0 if clean else 1)
 

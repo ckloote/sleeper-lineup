@@ -227,9 +227,23 @@ def test_half_point_probability_and_rendering(tmp_path):
             assert row["threshold"] == 11.5 and "11.5 or more" in row["rationale"]
 
 
-@pytest.fixture
-def history(tmp_path):
+TIED = date(2026, 10, 28)
+"""1003 scores 11.5 here and in his final game of week 2, on 10-30."""
+
+
+def persisted_history(tmp_path, *, tie: bool = False):
+    """Weeks 2-3 finalized, with an inferred, nothing-banked run every morning.
+
+    Nobody locks, so nothing-banked is the right reading every morning. Left to
+    the seed, 1003's 10-28 game ties his final one, and then the final score
+    cannot say whether he rode or banked 10-28. Without ``tie`` he sits that
+    game out, so every reading can be settled.
+    """
     season = SyntheticSeason()
+    if not tie:
+        team = season.players["1003"].team
+        game = next(f for f in season.games_for(team, 2) if f.date == TIED)
+        season.dnp.add((game.sleeper_game_id, "1003"))
     season.play_through(date(2026, 11, 8))
     cfg = config_for(tmp_path, season)
     ingest(season, cfg, weeks=[1, 2, 3])
@@ -248,6 +262,11 @@ def history(tmp_path):
                 now=datetime.combine(day, datetime.min.time(), UTC) + timedelta(hours=13),
             )
     return season, cfg
+
+
+@pytest.fixture
+def history(tmp_path):
+    return persisted_history(tmp_path)
 
 
 def test_daily_inference_passes_without_lock_calls(history):
@@ -347,6 +366,63 @@ def test_finalized_weeks_are_named_before_any_live_run(history):
     assert report.finalized == 3 and not report.weeks
     assert shadow.render(report).startswith("SHADOW  weeks 1-3 finalized, and no live digest")
     assert report.gate() == (False, f"0 finalized week(s) of tracking; need {shadow.GATE_WEEKS}")
+
+
+def test_one_checkable_starter_does_not_vouch_for_the_rest(history):
+    """Review 2026-09-26, finding 2. With every roster-1 starter but 1001 missing
+    his final score, each morning still had one check, so the weeks passed — and
+    a wrong banked score for 1002 on every morning was skipped with his evidence."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        conn.execute(
+            "UPDATE weekly_matchups SET counted_points=NULL"
+            " WHERE roster_id=1 AND sleeper_id != '1001'"
+        )
+        for (run_id,) in conn.execute("SELECT run_id FROM digest_runs").fetchall():
+            conn.execute("INSERT INTO digest_banked VALUES (?, '1002', 999)", (run_id,))
+        report = shadow.build(conn, season.season, 1)
+    assert not report.gate()[0], shadow.render(report)
+    # 1006 never has two games behind him on a morning of either week — his
+    # second in week 3 is its last night — so his readings need no final score.
+    assert {u.sleeper_id for u in report.unverified} == {"1002", "1003", "1004", "1005"}
+    assert {u.detail for u in report.unverified} == {"no final counted score"}
+    # Before his second game no lock can show, whatever the final score says.
+    assert any(m.sleeper_id == "1002" and m.as_of == "2026-10-26" for m in report.misses)
+    assert "UNVERIFIED" in shadow.render(report)
+
+
+def test_a_mix_of_checkable_and_unverifiable_starters_is_not_clean(history):
+    season, cfg = history
+    with connect(cfg) as conn:
+        conn.execute(
+            "UPDATE weekly_matchups SET counted_points=NULL WHERE roster_id=1 AND sleeper_id='1002'"
+        )
+        rerun = dict(conn.execute("SELECT * FROM digest_runs WHERE as_of='2026-10-30'").fetchone())
+        rerun |= {"run_id": "rerun", "generated_at": rerun["generated_at"].replace("13:", "14:")}
+        conn.execute(
+            f"INSERT INTO digest_runs ({','.join(rerun)}) VALUES ({','.join('?' * len(rerun))})",
+            list(rerun.values()),
+        )
+        report = shadow.build(conn, season.season, 1)
+    assert not report.gate()[0] and not report.misses
+    assert {u.sleeper_id for u in report.unverified} == {"1002"}
+    keys = [(u.as_of, u.sleeper_id) for u in report.unverified]
+    assert len(keys) == len(set(keys))  # once per morning, however many runs
+    assert all(w.state_unverified and w.state_checked and not w.uncheckable for w in report.weeks)
+
+
+def test_a_final_score_tied_with_an_earlier_game_is_unverified(tmp_path):
+    """The seed's own tie: 1003 may have banked 10-28 or ridden to 10-30, and from
+    the morning after his second game the two readings differ."""
+    season, cfg = persisted_history(tmp_path, tie=True)
+    with connect(cfg) as conn:
+        report = shadow.build(conn, season.season, 1)
+    assert report.gate() == (False, "week(s) 2 not clean")
+    assert [(u.sleeper_id, u.as_of) for u in report.unverified] == [
+        ("1003", day) for day in ("2026-10-29", "2026-10-30", "2026-10-31", "2026-11-01")
+    ]
+    assert report.unverified[0].detail == "final score ties his last game with an earlier one"
+    assert not report.misses and report.weeks[-1].clean
 
 
 @pytest.mark.parametrize(

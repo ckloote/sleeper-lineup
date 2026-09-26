@@ -55,6 +55,15 @@ GATE_WEEKS = 2
 NO_EARLY_LOCK = {LockStatus.RODE_TO_END, LockStatus.SINGLE_GAME, LockStatus.NO_GAMES}
 """Final readings that mean nothing was banked before his last game."""
 
+UNREADABLE = {
+    LockStatus.UNRESOLVED: "final score matches none of his games",
+    LockStatus.NO_LOCKABLE_GAME: "final zero despite a played game",
+    LockStatus.AMBIGUOUS: "final score ties his last game with an earlier one",
+}
+"""Final readings that cannot say what he banked, and why. AMBIGUOUS lands here
+only when riding explains the score too; a tie between earlier games is still
+a lock, and is read as one."""
+
 
 @dataclass(frozen=True, slots=True)
 class Truth:
@@ -65,6 +74,8 @@ class Truth:
     when their scores tie, none when he rode. None when it cannot be told."""
     counted: float
     game_days: tuple[int, ...]
+    reason: str | None = None
+    """Why ``days`` cannot be told, when it cannot."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +98,22 @@ class StateMiss:
     as_of: str
     run_banked: float | None
     expected: float | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class Unverified:
+    """A starter's reading on a morning the final score cannot settle.
+
+    Not a miss — the reading may be right — and not a check either: a wrong
+    banked score here goes unseen (review 2026-09-26, finding 2).
+    """
+
+    week: int
+    roster_id: int
+    sleeper_id: str
+    as_of: str
+    run_banked: float | None
     detail: str
 
 
@@ -125,6 +152,7 @@ class WeekSummary:
     calls: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     state_checked: int = 0
     state_misses: int = 0
+    state_unverified: int = 0
     flips: int = 0
     same_input_flips: int = 0
 
@@ -138,6 +166,7 @@ class WeekSummary:
             and not self.supplied_only
             and not self.uncheckable
             and self.state_misses == 0
+            and self.state_unverified == 0
             and self.same_input_flips == 0
             and not self.mornings_missing
         )
@@ -152,6 +181,7 @@ class ShadowReport:
     no run is in it. Empty when no finalized week has one."""
     calls: list[CallOutcome] = field(default_factory=list)
     misses: list[StateMiss] = field(default_factory=list)
+    unverified: list[Unverified] = field(default_factory=list)
     forecasts: list[Forecast] = field(default_factory=list)
     flips: list[Flip] = field(default_factory=list)
     names: dict[str, str] = field(default_factory=dict)
@@ -206,8 +236,10 @@ def truths(
         counted = row["counted_points"] if row["counted_points"] is not None else 0.0
         inference = infer_lock(counted, games)
         game_days = tuple(day_index(g["game_date"]) for g in raw)
+        reason = None
         if row["counted_points"] is None:
-            days = None  # missing final evidence is not a counted zero
+            # Missing final evidence is not a counted zero.
+            days, reason = None, "no final counted score"
         elif inference.status is LockStatus.LOCKED_EARLY:
             days = frozenset({game_days[inference.matched_index]})
         elif inference.status is LockStatus.AMBIGUOUS and inference.locked_early:
@@ -215,8 +247,10 @@ def truths(
         elif inference.status in NO_EARLY_LOCK:
             days = frozenset()
         else:
-            days = None  # unresolved, benched, or a tie with his final game
-        out[(row["week"], row["roster_id"], row["sleeper_id"])] = Truth(days, counted, game_days)
+            days = None
+            reason = UNREADABLE.get(inference.status, "final score cannot be read")
+        key = (row["week"], row["roster_id"], row["sleeper_id"])
+        out[key] = Truth(days, counted, game_days, reason)
     return out
 
 
@@ -247,7 +281,12 @@ def expected_banked(truth: Truth, known_through: int) -> float | None | bool:
     A lock shows once he has played again: before that, the counted value is
     last night's score whether or not he locked it. Returns the banked score,
     None for nothing banked, or False when the truth cannot settle it.
+
+    So until his second game has tipped, nothing can show, and nothing banked
+    is the right reading whatever the final score says — or fails to.
     """
+    if sum(d <= known_through for d in truth.game_days) < 2:
+        return None
     if truth.days is None:
         return False
     if not truth.days:
@@ -314,7 +353,7 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
         _forecasts(conn, report, by_week[week])
 
     pids = {c.sleeper_id for c in report.calls} | {m.sleeper_id for m in report.misses}
-    pids |= {f.sleeper_id for f in report.flips}
+    pids |= {f.sleeper_id for f in report.flips} | {u.sleeper_id for u in report.unverified}
     if pids:
         marks = ",".join("?" * len(pids))
         report.names = {
@@ -342,6 +381,10 @@ def _mornings(
     truth: dict[tuple[int, int, str], Truth],
 ) -> None:
     """Require automatic, checkable inference each calendar morning.
+
+    A morning with no starter the final scores can check is uncheckable here.
+    One with some is not thereby vouched for: each starter the final scores
+    cannot settle is `_state`'s to report, and blocks the week there.
 
     Monday is owed a run, not an inference. Nothing is banked before a week's
     first game, so there is no state to read, and its digest may abstain for want
@@ -451,7 +494,14 @@ def _state(
     runs: list[sqlite3.Row],
     truth: dict[tuple[int, int, str], Truth],
 ) -> None:
-    """Each poll-read BANKED list against the locks knowable that morning."""
+    """Each poll-read BANKED list against the locks knowable that morning.
+
+    Every starter is checked or reported unverified. Skipping the ones the final
+    scores cannot settle let one checkable starter a morning pass a week, and a
+    wrong banked score went unseen along with its evidence (review 2026-09-26,
+    finding 2). Unverified is reported once per morning, however many runs.
+    """
+    unsettled: set[tuple[str, str]] = set()
     for run in runs:
         if run["state_source"] != "inferred":
             continue  # supplied by hand, or no poll: nothing of the reading's to check
@@ -467,6 +517,19 @@ def _state(
             t = truth.get((summary.week, run["roster_id"], pid))
             expected = expected_banked(t, known_through) if t else None
             if expected is False:
+                if (run["as_of"], pid) not in unsettled:
+                    unsettled.add((run["as_of"], pid))
+                    summary.state_unverified += 1
+                    report.unverified.append(
+                        Unverified(
+                            summary.week,
+                            run["roster_id"],
+                            pid,
+                            run["as_of"],
+                            banked.get(pid),
+                            t.reason or "tied games either side of this morning",
+                        )
+                    )
                 continue
             summary.state_checked += 1
             have = banked.get(pid)
@@ -524,7 +587,8 @@ def render(report: ShadowReport) -> str:
         calls = ", ".join(f"{w.calls[k]} {k}" for k in (FOLLOWED, OVERRIDDEN, MOOT, UNKNOWN))
         out.append(
             f"week {w.week:>2}  {'clean' if w.clean else 'NOT CLEAN'}  {w.runs} run(s);"
-            f" calls: {calls}; state: {w.state_misses} miss(es) in {w.state_checked} checks;"
+            f" calls: {calls}; state: {w.state_misses} miss(es) in {w.state_checked} checks,"
+            f" {w.state_unverified} unverified;"
             f" flips: {w.flips} ({w.same_input_flips} on the same inputs)"
         )
         if w.partial:
@@ -545,6 +609,13 @@ def render(report: ShadowReport) -> str:
         out += [
             f"  wk {m.week} {m.as_of}  {name(m.sleeper_id) or m.sleeper_id}: {m.detail}"
             for m in report.misses
+        ]
+    if report.unverified:
+        out += ["", "UNVERIFIED — the final scores cannot settle these mornings' readings"]
+        out += [
+            f"  wk {u.week} {u.as_of}  {name(u.sleeper_id) or u.sleeper_id}: {u.detail}"
+            + ("" if u.run_banked is None else f" (read as banked {u.run_banked:.1f})")
+            for u in report.unverified
         ]
     overridden = [c for c in report.calls if c.verdict in (OVERRIDDEN, MOOT)]
     if overridden:
