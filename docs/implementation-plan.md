@@ -3,7 +3,7 @@
 **Companion to:** `sleeper-lockin-engine-architecture.md`
 **Written:** 2026-08-05 (offseason — Sleeper global state is `season_type: off`, week 0)
 
-**Status (2026-09-24).** This block is the only current status. Where an earlier section
+**Status (2026-09-25).** This block is the only current status. Where an earlier section
 disagrees with it — §6's phase headings, §20's list of what is live-only — that section is
 history, kept for the reasoning.
 
@@ -12,7 +12,7 @@ history, kept for the reasoning.
 | Phases 0-5: ingest, scoring, lock inference, projections, simulation, rollout | Complete. The Phase 5 gate is judged over five replays since 2026-09-24 | §9-§11, §13-§15; §21 W8 |
 | Phase 6: digest, advice page, deployment | Shipped; deployed to the Pi 2026-09-20 | §20 |
 | Live-state correctness: the 2026-09-23 review's twelve findings | Fixed in `0e22e9c` and `05e260d`; deployed 2026-09-24 | §21 |
-| The review's remaining items, and one bug found auditing it | W1-W8 done on branch `review-followups`, not yet merged or deployed | §21, "What remains" |
+| The review's remaining items, and one bug found auditing it | W1-W8 merged as `473b6ae`..`bbe1a10`; deployed 2026-09-25 | §21, "What remains", "Deployed 2026-09-25" |
 | Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
 | 2026-27 season | Opens 2026-10-20 | `day-one.md` |
 
@@ -3105,13 +3105,42 @@ the 06:30 ingest on a Monday (tolerated either way). Both are in day-one.md.
 ### Deployed 2026-09-24
 
 `0e22e9c` and `05e260d` were merged to `main` late on 2026-09-23. The backup day-one.md
-step 0 asks for was taken first: `data/lockin-2025.pre-review.db`, at 22:32 local time.
+step 0 asks for was taken first, at 22:32 local time. It is now
+`data/lockin-2025.pre-2026-09-23.db`, restored under that name on 2026-09-25 (below).
 The Pi's copy of the season file was migrated two minutes later, at 02:34 UTC, when the
 first command to open it did so. `schema_migrations` records `coherent-polls` and
 `fixture-states`, and `db_identity` claimed league `1283214955830575104`, season 2025.
 The first run-recording ingest was the 06:30 cron (`ingest_runs` 1, `complete`). The
 09:00 digest wrote the first `digest_runs` row with a `run_id`. It correctly reports the
 season over.
+
+### Deployed 2026-09-25
+
+W1-W8 were merged to `main` on the evening of 2026-09-25, as `473b6ae`..`bbe1a10`. The
+season file was backed up first, as `data/lockin-2025.pre-2026-09-25.db` at 20:40 local
+time. The first command to open the file added the new columns in place at 20:41. No data
+migration ran.
+
+Checked on the Pi, with the production code, against a copy of the migrated file:
+
+- `reconcile`, `verify`, `locks`, `calibrate` and `backtest` all pass. The backtest took
+  139 s and reproduced W8's five replays exactly.
+- `lockin shadow` reports no live runs yet.
+- A digest records when the schedule and designations were read.
+
+`lockin managers` was re-run on the live file, so the dashboard's bands now resample weeks
+and its Holds column is filled. The first cron runs on this code are 2026-09-26's.
+
+Two problems the deploy turned up, both fixed the same evening:
+
+- **The backup reused the 09-23 name and overwrote it.** That file was the only copy of
+  the season from before the first review migration. It was restored from a scratch copy
+  taken on 2026-09-24 and checked: integrity ok, no migrations, 9,794 poll rows. It is now
+  `data/lockin-2025.pre-2026-09-23.db`. day-one.md's snippet now names each backup by date
+  and refuses to overwrite one.
+- **The page's inputs line said "box scores not recorded · lineup poll not recorded"** on
+  an off-season morning, although the 06:30 ingest had run. A digest with no week to
+  decide reads neither. The line now says "not read by this run".
 
 ### Review item status
 

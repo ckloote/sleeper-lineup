@@ -27,25 +27,34 @@ Verify the deployment by running a gate, not by running the digest:
 uv run --frozen lockin verify     # exits nonzero on failure
 ```
 
-**Back up `data/lockin-2025.db` before the Pi first runs the code from the 2026-09-23
-review.** ✅ Done 2026-09-23: `data/lockin-2025.pre-review.db`, two minutes before the
-first command to open the file migrated it (implementation-plan.md §21, "Deployed
-2026-09-24"). Keep the copy. The same backup, under a new name, comes before deploying
-any later change that migrates data.
+**Back up `data/lockin-2025.db` before deploying anything that migrates data.** The first
+command to open the file after a pull migrates it, and that command may be a cron job.
+Name each backup by its date and never reuse a name. Each one is the only copy of the
+state it holds:
 
-The migration adopted the file's league identity, completed the partial `lockin repair`
-polls so the new per-poll lineup view reads them whole, and classified fixture states. All
-three are additive and were checked on a copy: `verify`, `reconcile` and `locks` were
-identical before and after, and `weekly_matchups_latest` matched row for row. But the file
-is the only copy of the season's derived tables, and a cron job applies a migration
-unattended.
+- `data/lockin-2025.pre-2026-09-23.db`: before the review fixes' migration
+  (implementation-plan.md §21, "Deployed 2026-09-24").
+- `data/lockin-2025.pre-2026-09-25.db`: before W1-W8 added their columns.
+
+On 2026-09-25 this snippet still wrote a fixed name, so the second backup overwrote the
+first, and the first had to be restored from a scratch copy. It now names the file by
+date and refuses to overwrite one.
+
+The 2026-09-23 migration adopted the file's league identity, completed the partial `lockin
+repair` polls so the new per-poll lineup view reads them whole, and classified fixture
+states. All three are additive and were checked on a copy: `verify`, `reconcile` and
+`locks` were identical before and after, and `weekly_matchups_latest` matched row for row.
+But the live file is the only copy of the season's derived tables, and a cron job applies a
+migration unattended.
 
 ```bash
 uv run python -c "
-import sqlite3
+import datetime, pathlib, sqlite3
+dst_path = pathlib.Path(f'data/lockin-2025.pre-{datetime.date.today()}.db')
+assert not dst_path.exists(), f'{dst_path} exists: every backup keeps its own name'
 src=sqlite3.connect('file:data/lockin-2025.db?mode=ro', uri=True)
-dst=sqlite3.connect('data/lockin-2025.pre-review.db')
-src.backup(dst); dst.close(); print('backed up')
+dst=sqlite3.connect(dst_path)
+src.backup(dst); dst.close(); print('backed up to', dst_path)
 "
 ```
 
