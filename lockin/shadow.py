@@ -24,7 +24,9 @@ Four questions, for each week the league has finished scoring:
    seeded and deterministic.
 
 Only runs made on the morning they describe count. A replay of a past date,
-run afterwards, advised nobody.
+run afterwards, advised nobody. And only your roster's: the cron advises that
+one, and a digest run by hand for another — a look at an opponent — is not a
+morning anything owed.
 
 Writes nothing.
 """
@@ -257,14 +259,14 @@ def expected_banked(truth: Truth, known_through: int) -> float | None | bool:
 # ------------------------------------------------------------------ the report
 
 
-def _live_runs(conn: sqlite3.Connection, weeks: list[int]) -> list[sqlite3.Row]:
-    """Runs made on the morning they describe, in finalized weeks, oldest first."""
+def _live_runs(conn: sqlite3.Connection, weeks: list[int], roster_id: int) -> list[sqlite3.Row]:
+    """The roster's runs made on the morning they describe, in finalized weeks, oldest first."""
     marks = ",".join("?" * len(weeks))
     zone = clock.zone()
     rows = conn.execute(
         f"SELECT * FROM digest_runs WHERE run_id IS NOT NULL AND week IN ({marks})"
-        " ORDER BY generated_at",
-        weeks,
+        " AND roster_id = ? ORDER BY generated_at",
+        [*weeks, roster_id],
     ).fetchall()
     return [
         r
@@ -284,27 +286,25 @@ def _final_points(conn: sqlite3.Connection, week: int, roster_id: int) -> float 
     return row["points"] if row else None
 
 
-def build(conn: sqlite3.Connection, season: str) -> ShadowReport:
+def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport:
     report = ShadowReport()
     last = last_scored_week(conn) if _has_league(conn) else 0
     weeks = list(range(1, last + 1))
     if not weeks:
         return report
-    runs = _live_runs(conn, weeks)
+    runs = _live_runs(conn, weeks, roster_id)
     by_week: dict[int, list[sqlite3.Row]] = defaultdict(list)
     for r in runs:
         by_week[r["week"]].append(r)
-    truth = truths(conn, season, weeks, {r["roster_id"] for r in runs})
+    truth = truths(conn, season, weeks, {roster_id})
     opening = calendar.opening_night(conn, season)
-    first_live: dict[int, str] = {}
-    for run in runs:
-        first_live.setdefault(run["roster_id"], run["as_of"])
+    first_live = runs[0]["as_of"] if runs else None
     first_week = min(by_week) if by_week else last + 1
 
     for week in range(first_week, last + 1):
         summary = WeekSummary(week=week, runs=len(by_week[week]))
         report.weeks.append(summary)
-        _mornings(summary, by_week[week], week, opening, first_live, truth)
+        _mornings(summary, by_week[week], week, opening, roster_id, first_live, truth)
         _calls(conn, report, summary, by_week[week], truth)
         _state(conn, report, summary, by_week[week], truth)
         _forecasts(conn, report, by_week[week])
@@ -333,52 +333,46 @@ def _mornings(
     runs: list[sqlite3.Row],
     week: int,
     opening: date | None,
-    first_live: dict[int, str],
+    roster_id: int,
+    first_live: str | None,
     truth: dict[tuple[int, int, str], Truth],
 ) -> None:
-    """Require automatic, checkable inference each calendar morning per roster."""
-    if opening is None:
+    """Require automatic, checkable inference each calendar morning."""
+    if opening is None or first_live is None:
         summary.partial = True
         return
     monday, sunday = calendar.week_bounds(week, opening)
-    for roster_id, first in sorted(first_live.items()):
-        start = date.fromisoformat(first)
-        if start > sunday:
-            continue
-        if start > monday:
-            summary.partial = True
-        day = monday
-        while day <= sunday:
-            label = f"roster {roster_id} {day.isoformat()}"
-            morning = [
-                r for r in runs if r["roster_id"] == roster_id and r["as_of"] == day.isoformat()
-            ]
-            inferred = [
-                r for r in morning if r["state_source"] == "inferred" and not r["abstained"]
-            ]
-            checkable = any(
-                expected_banked(t, day.toordinal() - 1) is not False
-                for (w, rid, _), t in truth.items()
-                if w == week and rid == roster_id
-            )
-            if inferred and checkable:
-                pass
-            elif any(
-                "verified_no_matchup" in r.keys()
-                and r["verified_no_matchup"]
-                and not r["abstained"]
-                for r in morning
-            ):
-                summary.exemptions.append(label)
-            elif not morning:
-                summary.mornings_missing.append(label)
-            elif inferred:
-                summary.uncheckable.append(label)
-            elif any(r["state_source"] == "supplied" and not r["abstained"] for r in morning):
-                summary.supplied_only.append(label)
-            else:
-                summary.failed_inference.append(label)
-            day += timedelta(days=1)
+    start = date.fromisoformat(first_live)
+    if start > sunday:
+        return
+    if start > monday:
+        summary.partial = True
+    day = monday
+    while day <= sunday:
+        label = f"roster {roster_id} {day.isoformat()}"
+        morning = [r for r in runs if r["as_of"] == day.isoformat()]
+        inferred = [r for r in morning if r["state_source"] == "inferred" and not r["abstained"]]
+        checkable = any(
+            expected_banked(t, day.toordinal() - 1) is not False
+            for (w, rid, _), t in truth.items()
+            if w == week and rid == roster_id
+        )
+        if inferred and checkable:
+            pass
+        elif any(
+            "verified_no_matchup" in r.keys() and r["verified_no_matchup"] and not r["abstained"]
+            for r in morning
+        ):
+            summary.exemptions.append(label)
+        elif not morning:
+            summary.mornings_missing.append(label)
+        elif inferred:
+            summary.uncheckable.append(label)
+        elif any(r["state_source"] == "supplied" and not r["abstained"] for r in morning):
+            summary.supplied_only.append(label)
+        else:
+            summary.failed_inference.append(label)
+        day += timedelta(days=1)
 
 
 def _calls(

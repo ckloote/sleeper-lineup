@@ -369,7 +369,8 @@ For every finalized week it reports:
 - calls that changed between runs.
 
 **Gate:** the latest two finalized weeks of tracking must both be full, consecutive,
-and marked `clean`. Each tracked roster needs a non-abstained, automatically inferred
+and marked `clean`. It tracks your roster, the one the cron advises; a digest run by hand
+for another roster is not tracked. Yours needs a non-abstained, automatically inferred
 run with at least one check against resolvable final evidence every calendar morning.
 A partial first week cannot qualify. Supplied state, abstentions, uncheckable evidence,
 and missing runs (including entire missing weeks) block the gate; no LOCK calls is not

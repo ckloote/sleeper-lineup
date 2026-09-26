@@ -1072,10 +1072,15 @@ def shadow() -> None:
     followed, whether each morning's BANKED list matched the locks the final
     scores reveal, P(win) against results, and calls that changed between runs.
     Ends with the day-one.md step 7 gate. Writes nothing.
+
+    Judges your roster, the one the cron advises.
     """
     cfg = Config.from_env()
     with _season(cfg) as conn:
-        report = shadow_mod.build(conn, cfg.season)
+        roster_id = digest_mod.roster_for_user(conn, cfg.user_id)
+        if roster_id is None:
+            raise click.ClickException(f"no roster for user {cfg.user_id}")
+        report = shadow_mod.build(conn, cfg.season, roster_id)
     click.echo(shadow_mod.render(report))
 
 

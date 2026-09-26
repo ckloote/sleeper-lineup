@@ -240,7 +240,7 @@ def history(tmp_path):
 def test_daily_inference_passes_without_lock_calls(history):
     season, cfg = history
     with connect(cfg) as conn:
-        report = shadow.build(conn, season.season)
+        report = shadow.build(conn, season.season, 1)
         assert report.gate()[0], shadow.render(report)
 
 
@@ -252,7 +252,7 @@ def test_twelve_abstentions_fail_and_reruns_recover(history):
             "UPDATE digest_runs SET abstained=1, state_source=NULL"
             " WHERE as_of NOT IN ('2026-10-26', '2026-11-02')"
         )
-        report = shadow.build(conn, season.season)
+        report = shadow.build(conn, season.season, 1)
         assert not report.gate()[0]
         assert sum(len(w.failed_inference) for w in report.weeks) == 12
         for r in originals:
@@ -267,14 +267,12 @@ def test_twelve_abstentions_fail_and_reruns_recover(history):
                 f"INSERT INTO digest_runs ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
                 list(row.values()),
             )
-        assert shadow.build(conn, season.season).gate()[0]
+        assert shadow.build(conn, season.season, 1).gate()[0]
         conn.execute("INSERT INTO digest_banked VALUES (?, '1001', 999)", (originals[0]["run_id"],))
-        assert not shadow.build(conn, season.season).gate()[0]
+        assert not shadow.build(conn, season.season, 1).gate()[0]
 
 
-@pytest.mark.parametrize(
-    "kind", ["supplied", "uncheckable", "missing_week", "second_roster", "partial"]
-)
+@pytest.mark.parametrize("kind", ["supplied", "uncheckable", "missing_week", "partial"])
 def test_shadow_coverage_failures(history, kind):
     season, cfg = history
     with connect(cfg) as conn:
@@ -284,18 +282,27 @@ def test_shadow_coverage_failures(history, kind):
             conn.execute("UPDATE weekly_matchups SET counted_points=99999")
         elif kind == "missing_week":
             conn.execute("DELETE FROM digest_runs WHERE week=3")
-        elif kind == "second_roster":
-            digest.persist(
-                conn,
-                a_digest(roster_id=2, as_of="2026-10-26", banked={}),
-                now=datetime(2026, 10, 26, 14, tzinfo=UTC),
-            )
         else:
             conn.execute("DELETE FROM digest_runs WHERE as_of='2026-10-26'")
-        report = shadow.build(conn, season.season)
+        report = shadow.build(conn, season.season, 1)
         assert not report.gate()[0], shadow.render(report)
         if kind == "missing_week":
             assert len(report.weeks[-1].mornings_missing) == 7
+
+
+def test_a_digest_run_by_hand_for_another_roster_is_not_owed_daily(history):
+    """One look at the opponent (`lockin digest --roster 2`) made roster 2 owe a
+    run every morning for the rest of the season, so the gate could never pass."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        digest.persist(
+            conn,
+            a_digest(roster_id=2, as_of="2026-10-26", banked={}),
+            now=datetime(2026, 10, 26, 14, tzinfo=UTC),
+        )
+        report = shadow.build(conn, season.season, 1)
+        assert report.gate()[0], shadow.render(report)
+        assert "roster 2" not in shadow.render(report)
 
 
 @pytest.mark.parametrize(
@@ -327,9 +334,9 @@ def test_shadow_exemptions_are_explicit_not_free_text(history):
     season, cfg = history
     with connect(cfg) as conn:
         conn.execute("UPDATE digest_runs SET state_source=NULL, note='no matchup this week'")
-        assert not shadow.build(conn, season.season).gate()[0]
+        assert not shadow.build(conn, season.season, 1).gate()[0]
         conn.execute("UPDATE digest_runs SET verified_no_matchup=1")
-        report = shadow.build(conn, season.season)
+        report = shadow.build(conn, season.season, 1)
         assert report.gate()[0]
         assert sum(len(w.exemptions) for w in report.weeks) == 14
 

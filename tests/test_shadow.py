@@ -78,7 +78,7 @@ def db(played, tmp_path):
 
 def report_for(season, cfg) -> shadow.ShadowReport:
     with connect(cfg) as conn:
-        return shadow.build(conn, season.season)
+        return shadow.build(conn, season.season, 1)
 
 
 def test_the_call_taken_and_the_calls_ignored_are_read_back(played):
