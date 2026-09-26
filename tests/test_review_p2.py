@@ -84,8 +84,8 @@ def test_unknown_deadline_suppresses_only_affected_calls(live, stamp):
         with patch("lockin.digest.week_slate", side_effect=slate):
             report = morning(conn, season)
         assert target.sleeper_id not in {c.sleeper_id for c in report.calls}
-        assert len(report.calls) == len(original.calls) - 1
-        assert report.p_win == original.p_win or report.p_win is not None
+        assert report.calls == original.calls[1:]
+        assert report.p_win == original.p_win
         digest.persist(conn, report)
         saved = advice.latest_run(conn, 1)
         assert any(w[1] == "unknown deadline" for w in saved.warnings)
