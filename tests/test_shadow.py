@@ -104,7 +104,7 @@ def test_a_correct_state_reading_passes_and_the_week_is_clean(played):
     assert week.same_input_flips == 0
     assert week.partial and week.mornings_missing == ["roster 1 2026-10-26"]
     assert not week.clean
-    assert report.gate() == (False, f"1 finalized week(s) with live runs; need {shadow.GATE_WEEKS}")
+    assert report.gate() == (False, f"1 finalized week(s) of tracking; need {shadow.GATE_WEEKS}")
     text = shadow.render(report)
     assert "week  2  NOT CLEAN" in text and "GATE  not yet" in text
 

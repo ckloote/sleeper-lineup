@@ -324,6 +324,18 @@ def test_monday_is_owed_a_run_not_an_inference(history):
         assert not report.gate()[0]
 
 
+def test_finalized_weeks_are_named_before_any_live_run(history):
+    """Tracking starts at the first live run, so with none there are no weeks to
+    report — which the header used to read as none having been scored."""
+    season, cfg = history
+    with connect(cfg) as conn:
+        conn.execute("DELETE FROM digest_runs")
+        report = shadow.build(conn, season.season, 1)
+    assert report.finalized == 3 and not report.weeks
+    assert shadow.render(report).startswith("SHADOW  weeks 1-3 finalized, and no live digest")
+    assert report.gate() == (False, f"0 finalized week(s) of tracking; need {shadow.GATE_WEEKS}")
+
+
 @pytest.mark.parametrize(
     "kind", ["verified", "missing_opponent", "missing_starters", "stale", "incomplete"]
 )

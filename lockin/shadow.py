@@ -145,7 +145,11 @@ class WeekSummary:
 
 @dataclass(slots=True)
 class ShadowReport:
+    finalized: int = 0
+    """The last week the league has finished scoring: weeks 1 to this are final."""
     weeks: list[WeekSummary] = field(default_factory=list)
+    """From the first week with a live run to `finalized`, unbroken — a week with
+    no run is in it. Empty when no finalized week has one."""
     calls: list[CallOutcome] = field(default_factory=list)
     misses: list[StateMiss] = field(default_factory=list)
     forecasts: list[Forecast] = field(default_factory=list)
@@ -158,15 +162,15 @@ class ShadowReport:
         return sum((f.p_win - f.outcome) ** 2 for f in self.forecasts) / len(self.forecasts)
 
     def gate(self) -> tuple[bool, str]:
-        """Require the latest finalized tracking weeks, including weeks with no runs."""
-        advised = self.weeks
-        recent = advised[-GATE_WEEKS:]
+        """Passed once the latest ``GATE_WEEKS`` weeks of tracking are all clean.
+
+        `weeks` is unbroken, so they are consecutive by construction, and a week
+        with no run is among them rather than skipped.
+        """
+        recent = self.weeks[-GATE_WEEKS:]
         if len(recent) < GATE_WEEKS:
-            return False, f"{len(advised)} finalized week(s) with live runs; need {GATE_WEEKS}"
-        consecutive = all(b.week == a.week + 1 for a, b in zip(recent, recent[1:], strict=False))
+            return False, f"{len(self.weeks)} finalized week(s) of tracking; need {GATE_WEEKS}"
         dirty = [w.week for w in recent if not w.clean]
-        if not consecutive:
-            return False, f"weeks {', '.join(str(w.week) for w in recent)} are not consecutive"
         if dirty:
             return False, f"week(s) {', '.join(map(str, dirty))} not clean"
         return True, f"weeks {recent[0].week}-{recent[-1].week} clean"
@@ -287,8 +291,8 @@ def _final_points(conn: sqlite3.Connection, week: int, roster_id: int) -> float 
 
 
 def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport:
-    report = ShadowReport()
     last = last_scored_week(conn) if _has_league(conn) else 0
+    report = ShadowReport(finalized=last)
     weeks = list(range(1, last + 1))
     if not weeks:
         return report
@@ -509,7 +513,7 @@ BINS = ((0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01))
 
 def render(report: ShadowReport) -> str:
     if not any(w.runs for w in report.weeks):
-        scored = f"weeks 1-{report.weeks[-1].week}" if report.weeks else "no week"
+        scored = f"weeks 1-{report.finalized}" if report.finalized else "no week"
         return (
             f"SHADOW  {scored} finalized, and no live digest runs in them.\n"
             "Nothing to compare yet: runs count once the league has scored their week."
