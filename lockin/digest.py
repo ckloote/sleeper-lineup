@@ -184,6 +184,11 @@ class Digest:
     """Where `banked` came from: supplied, inferred from a poll, or assumed."""
     opponent_state: str | None = None
     """Where the opponent's banked scores came from: inferred, or the stand-in."""
+    ingest_run_id: int | None = None
+    stats_fetch_started_at: str | None = None
+    stats_fetch_finished_at: str | None = None
+    verified_no_matchup: bool | None = None
+    retrospective: bool = False
     poll_observed_at: str | None = None
     n_sims: int | None = None
     seed: int | None = None
@@ -387,7 +392,7 @@ def clearing_chance(
     except InsufficientHistory:
         return float("nan")
     column = next(i for i, g in enumerate(remaining) if g.day == night)
-    return float((paths[:, column] > threshold).mean())
+    return float((paths[:, column] >= threshold).mean())
 
 
 def durability_warnings(
@@ -456,6 +461,17 @@ def _utc(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def valid_deadline(stamp: str | None) -> datetime | None:
+    """Only an explicitly timezone-aware timestamp verifies a live deadline."""
+    if not stamp:
+        return None
+    try:
+        value = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        return value.astimezone(UTC) if value.tzinfo is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
 def unfinished_slate(
     mine: WeekSlate, theirs: WeekSlate, as_of: str, now: datetime | None, names: dict[str, str]
 ) -> str | None:
@@ -483,28 +499,28 @@ def model_id(ctx: DigestContext) -> str:
 
 
 def stale_ingest(conn: sqlite3.Connection, week: int, known_through: int) -> str | None:
-    """Why this morning's data cannot be trusted as fresh, if it cannot.
+    """Require the newest covering ingest and a post-boundary stats request.
 
-    Asked of the last *complete* ingest covering this week (`ingest_runs`), not
-    of the newest log line: a players refresh today on top of a stats fetch
-    yesterday, or a run that died after committing its first week, looked fresh
-    to the old check (review finding 9). It must have finished after last
-    night's games did, and must not have skipped the NBA step that says they had.
+    Completion alone cannot certify stats requested before the slate was final.
+    A newer partial run may already have replaced inputs, so an older complete
+    run cannot vouch for them. Legacy evidence is deliberately not fabricated.
     """
-    newest = runs.latest_complete(conn, week)
-    if newest is not None and runs.skipped(newest) & runs.LIVE_REQUIRES:
+    run = runs.latest_covering(conn, week)
+    if run is None or run["status"] != "complete":
         return (
-            "the last ingest skipped the NBA schedule (--skip-nba), which is what says"
-            " last night is final. Run `lockin ingest` without it."
+            f"no complete newest ingest covering week {week}. Run `lockin ingest --weeks current`."
         )
-    run = runs.latest_complete(conn, week, live=True)
-    if run is None:
-        return f"no complete ingest covering week {week}. Run `lockin ingest --weeks current`."
-    if run["finished_at"] < slate_final_at(known_through):
-        return (
-            f"the last complete ingest finished at {run['finished_at'][:16]}Z, before last"
-            " night's games did. Check the ingest cron, then re-run."
-        )
+    if runs.skipped(run) & runs.LIVE_REQUIRES:
+        return "the last ingest skipped the NBA schedule (--skip-nba). Run ingest without it."
+    fetch = runs.stats_fetch(conn, run["run_id"], week)
+    if fetch is None:
+        return "no stats-fetch evidence for this week; run ingest again."
+    started = valid_deadline(fetch["started_at"])
+    finished = valid_deadline(fetch["finished_at"])
+    if started is None or finished is None or finished < started:
+        return "invalid stats-fetch evidence; run ingest again."
+    if started < _utc(slate_final_at(known_through)):
+        return "the stats request started before last night's games finished; run ingest again."
     return None
 
 
@@ -585,6 +601,8 @@ def morning(
     (`tests/test_lifecycle.py`), so the rehearsal exercises the sequence the
     cron runs rather than a copy of it.
     """
+    if live and (problem := calendar.disagreement(conn, season, as_of)):
+        return abstain(conn, season, roster_id, as_of, problem)
     try:
         ctx = load_context(conn, season, params=params)
     except NoGamesYet as exc:
@@ -632,6 +650,8 @@ def build(
     moment of the run, which closes any call whose next tipoff has passed.
     """
     conn = ctx.conn
+    if live and (problem := calendar.disagreement(conn, ctx.season, as_of)):
+        return abstain(conn, ctx.season, roster_id, as_of, problem)
     day = day_index(as_of)
     known_through = day - 1
     week = resolve_week(conn, ctx.season, as_of)
@@ -652,6 +672,9 @@ def build(
             known_through=known_through,
             note=note,
         )
+
+    if live and (reason := stale_ingest(conn, week, known_through)):
+        return abstain(conn, ctx.season, roster_id, as_of, reason)
 
     starters = ctx.lineup_ids(week, roster_id)
     if not starters:
@@ -681,11 +704,41 @@ def build(
         n_sims=n_sims,
         seed=seed,
         model=model_id(ctx),
+        retrospective=not live,
     )
+    if live:
+        selected = runs.latest_covering(conn, week)
+        fetch = runs.stats_fetch(conn, selected["run_id"], week)
+        digest.ingest_run_id = selected["run_id"]
+        digest.stats_fetch_started_at = fetch["started_at"]
+        digest.stats_fetch_finished_at = fetch["finished_at"]
     if opponent_id is None:
         # Weeks 23-24 drop eliminated teams and week 25 is unscored (§7.7).
         # Without an opponent there is no win probability to maximise, so there
         # is no recommendation to make rather than a worse one to invent.
+        poll = conn.execute(
+            "SELECT matchup_id, observed_at, poll_complete FROM weekly_matchup_teams"
+            " WHERE week = ? AND roster_id = ? ORDER BY observed_at DESC LIMIT 1",
+            (week, roster_id),
+        ).fetchone()
+        digest.verified_no_matchup = bool(
+            live
+            and poll
+            and poll["poll_complete"] == 1
+            and poll["matchup_id"] is None
+            and slate_final_at(known_through) <= poll["observed_at"] < run_moment(as_of, now)
+            and conn.execute(
+                "SELECT COUNT(*) FROM weekly_matchups WHERE week=? AND roster_id=?"
+                " AND observed_at=? AND is_starter=1",
+                (week, roster_id, poll["observed_at"]),
+            ).fetchone()[0]
+            == len(starters)
+        )
+        if live and not digest.verified_no_matchup:
+            digest.abstained = True
+            digest.note = "opponent data missing; no verified no-matchup poll"
+            return digest
+        digest.poll_observed_at = poll["observed_at"] if poll else None
         digest.note = f"roster {roster_id} has no matchup in week {week}; nothing to decide"
         return digest
     theirs_slate = week_slate(
@@ -822,7 +875,23 @@ def build(
             continue
         game = seen[-1]
         expires = mine_slate.tipoff.get((sleeper_id, ahead[0].day))
-        if now is not None and expires and _utc(expires) <= now:
+        deadline = valid_deadline(expires)
+        if live and deadline is None:
+            digest.warnings.append(
+                Warning(
+                    sleeper_id,
+                    names.get(sleeper_id, sleeper_id),
+                    "unknown deadline",
+                    "call suppressed: next tipoff is missing or is not a timezone-aware timestamp",
+                    "tipoff unknown; no call",
+                )
+            )
+            continue
+        if (
+            deadline is not None
+            and (now is not None or live)
+            and deadline <= (now or datetime.now(UTC))
+        ):
             continue  # he has tipped again: the window is shut
         call, break_even = decision_for(
             mine,
@@ -941,7 +1010,7 @@ def _short(name: str, width: int) -> str:
 
 def deadline_day(tipoff_utc: str | None) -> str | None:
     """The local date a window closes on, for grouping."""
-    if tipoff_utc is None:
+    if valid_deadline(tipoff_utc) is None:
         return None
     return _utc(tipoff_utc).astimezone(clock.zone()).date().isoformat()
 
@@ -967,6 +1036,8 @@ def render(digest: Digest, *, compact: bool = False) -> str:
         out.extend(textwrap.wrap(digest.note, WIDTH))
         return "\n".join(out)
 
+    if digest.retrospective:
+        out.append("HISTORICAL REPLAY — not live advice")
     banked = sum(digest.banked.values())
     out.append(
         f"roster {digest.roster_id} v {digest.opponent_roster_id}   P(win) {digest.p_win:.0%}"
@@ -982,14 +1053,18 @@ def render(digest: Digest, *, compact: bool = False) -> str:
         calls = by_day[key]
         if key is None:
             night = datetime.fromordinal(calls[0].day).strftime("%a")
-            out.append(f"\nLAST NIGHT ({night}) — do this now")
+            out.append(f"\nLAST NIGHT ({night}) — deadline unknown")
+            out.append("Historical advice; unavailable live")
         else:
             first = min(c.expires_utc for c in calls if c.expires_utc)
             out.append(f"\nBEFORE {deadline_label(first)} TIP — lock or pass")
         for call in calls:
             verb = "LOCK" if call.lock else "pass"
-            need = "ride" if not np.isfinite(call.break_even) else f"need {call.break_even:.0f}"
-            out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}  {need}")
+            need = (
+                "ride" if not np.isfinite(call.break_even) else f"score {call.break_even:g} or more"
+            )
+            out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
+            out.append(f"        {need}")
 
     by_night: dict[int, list[StandingRule]] = defaultdict(list)
     for rule in digest.rules:
@@ -999,14 +1074,11 @@ def render(digest: Digest, *, compact: bool = False) -> str:
         when = "TONIGHT" if night == digest.as_of_day else f"{label.upper()}"
         idle = by_night[night][0].idle_nights
         suffix = f"  (assumes {idle} idle)" if idle else ""
-        out.append(f"\n{when} — lock if he clears{suffix}")
+        out.append(f"\n{when} — lock{suffix}")
         for rule in sorted(by_night[night], key=lambda r: -r.threshold):
             chance = "" if np.isnan(rule.p_clear) else f"  {rule.p_clear:.0%}"
-            # Whole points. The Monte Carlo standard deviation on a threshold is
-            # about a point at the default 2,000 sims, so a decimal place would be
-            # advertising precision that is not there — and this is a number the
-            # user applies from memory on a phone.
-            out.append(f"  {_short(rule.name, 20):<20}{rule.threshold:>7.0f}{chance}")
+            out.append(f"  {_short(rule.name, 20)}{chance}")
+            out.append(f"    score {rule.threshold:g} or more")
 
     if digest.warnings:
         out.append("\nWATCH")
@@ -1081,7 +1153,6 @@ def persist(
     """
     run_id = uuid.uuid4().hex
     generated_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat(timespec="microseconds")
-    ingest = runs.latest_complete(conn, digest.week) if runs.any_recorded(conn) else None
     conn.execute(
         """
         INSERT INTO digest_runs
@@ -1089,8 +1160,10 @@ def persist(
              projected, opponent_projected, margin_p10, margin_p50, margin_p90,
              banked_total, banked_slots, state_supplied, last_ingest_at, note,
              run_id, state_source, opponent_state, poll_observed_at, ingest_run_id,
-             n_sims, seed, model, abstained, schedule_at, status_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             n_sims, seed, model, abstained, schedule_at, status_at,
+             stats_fetch_started_at, stats_fetch_finished_at, verified_no_matchup, retrospective)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -1107,19 +1180,23 @@ def persist(
             sum(digest.banked.values()),
             len(digest.banked),
             int(state_supplied or digest.state_source == SOURCE_SUPPLIED),
-            last_ingest_at(conn, digest.week),
+            digest.stats_fetch_finished_at,
             digest.note,
             run_id,
             digest.state_source,
             digest.opponent_state,
             digest.poll_observed_at,
-            ingest["run_id"] if ingest else None,
+            digest.ingest_run_id,
             digest.n_sims,
             digest.seed,
             digest.model,
             int(digest.abstained),
             runs.schedule_fetched_at(conn),
             runs.designations_read_at(conn),
+            digest.stats_fetch_started_at,
+            digest.stats_fetch_finished_at,
+            digest.verified_no_matchup,
+            int(digest.retrospective),
         ),
     )
 
@@ -1140,7 +1217,7 @@ def persist(
             call.p_win_lock - call.p_win_pass,
             f"{call.name} scored {call.score:.1f} on {date_of(call.day)};"
             + (
-                f" break-even {call.break_even:.1f}"
+                f" break-even: score {call.break_even:g} or more"
                 if np.isfinite(call.break_even)
                 else " no score is worth banking"
             ),
@@ -1163,7 +1240,7 @@ def persist(
             None,
             None,
             f"{rule.name}: lock on {date_of(rule.night)} if he scores"
-            f" {rule.threshold:.0f} ({rule.idle_nights} idle night(s) assumed, §7.2)",
+            f" {rule.threshold:g} or more ({rule.idle_nights} idle night(s) assumed, §7.2)",
             run_id,
             None,
             finite(rule.p_clear),

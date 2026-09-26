@@ -101,11 +101,12 @@ def test_a_correct_state_reading_passes_and_the_week_is_clean(played):
 
     assert week.runs == 6 and week.state_checked > 0  # Tuesday to Sunday
     assert week.state_misses == 0, report.misses
-    assert week.same_input_flips == 0 and not week.mornings_missing
-    assert week.clean
+    assert week.same_input_flips == 0
+    assert week.partial and week.mornings_missing == ["roster 1 2026-10-26"]
+    assert not week.clean
     assert report.gate() == (False, f"1 finalized week(s) with live runs; need {shadow.GATE_WEEKS}")
     text = shadow.render(report)
-    assert "week  2  clean" in text and "GATE  not yet" in text
+    assert "week  2  NOT CLEAN" in text and "GATE  not yet" in text
 
 
 def test_a_wrong_banked_list_is_caught(db):
@@ -186,7 +187,10 @@ def test_a_missed_morning_is_reported(db):
         )
     week = next(w for w in report_for(season, cfg).weeks if w.week == WEEK)
 
-    assert week.mornings_missing == [f"roster 1 {(TUESDAY + timedelta(days=2)).isoformat()}"]
+    assert week.mornings_missing == [
+        "roster 1 2026-10-26",
+        f"roster 1 {(TUESDAY + timedelta(days=2)).isoformat()}",
+    ]
     assert not week.clean
 
 

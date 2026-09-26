@@ -21,7 +21,6 @@ gates it closed no longer mean what they said.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 
 import numpy as np
@@ -488,28 +487,12 @@ def test_the_calls_are_stable_once_the_state_is_fixed(ctx, roster_id):
     assert len(calls) == 1, f"calls disagreed across seeds: {calls}"
 
 
-def test_thresholds_are_rendered_without_false_precision(ctx, roster_id):
-    """A decimal place on a number carrying 1-3 points of noise is a lie.
-
-    Scoped to the standing-rule blocks only. Elsewhere a decimal is honest: a
-    score of 42.5 is exactly what he scored, not an estimate.
-    """
+def test_thresholds_are_rendered_exactly(ctx, roster_id):
     report = digest_mod.build(ctx, roster_id, AS_OF, n_sims=100, n_paths=100)
-    assert report.rules, "this date should produce standing rules"
-
-    in_block = False
-    checked = 0
-    for line in digest_mod.render(report).splitlines():
-        if "lock if he clears" in line:
-            in_block = True
-            continue
-        if not line.startswith("  "):
-            in_block = False
-            continue
-        if in_block:
-            checked += 1
-            assert not re.search(r"\d+\.\d", line), f"decimal threshold: {line!r}"
-    assert checked >= len(report.rules)
+    assert report.rules
+    text = digest_mod.render(report)
+    for rule in report.rules:
+        assert f"score {rule.threshold:g} or more" in text
 
 
 def test_the_reconstruction_no_longer_consumes_the_calls_it_should_deliver(ctx, roster_id):

@@ -287,6 +287,7 @@ CREATE TABLE IF NOT EXISTS weekly_matchup_teams (
     matchup_id      INTEGER,         -- nullable, see weekly_matchups above
     points          REAL,
     custom_points   REAL,
+    poll_complete   INTEGER,
     observed_at     TEXT NOT NULL,
     PRIMARY KEY (week, roster_id, observed_at)
 );
@@ -553,6 +554,10 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     -- schedule was last fetched, and when designations were last read.
     schedule_at         TEXT,
     status_at           TEXT,
+    stats_fetch_started_at TEXT,
+    stats_fetch_finished_at TEXT,
+    verified_no_matchup INTEGER,
+    retrospective INTEGER,
     PRIMARY KEY (generated_at, roster_id)
 );
 
@@ -615,4 +620,12 @@ CREATE TABLE IF NOT EXISTS ingest_log (
     started_at      TEXT NOT NULL,
     finished_at     TEXT NOT NULL,
     PRIMARY KEY (source, target, started_at)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_stats_fetches (
+    run_id INTEGER NOT NULL REFERENCES ingest_runs(run_id),
+    week INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, week)
 );

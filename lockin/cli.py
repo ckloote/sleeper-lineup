@@ -1220,17 +1220,19 @@ def explain(
         if roster_id is None:
             raise click.ClickException(f"no roster for user {cfg.user_id}")
         try:
-            ctx = digest_mod.load_context(conn, cfg.season)
-            report = digest_mod.build(
-                ctx,
+            report = digest_mod.morning(
+                conn,
+                cfg.season,
                 roster_id,
                 as_of,
                 n_sims=sims,
-                n_paths=sims,
                 locked=banked,
                 live=live,
                 now=now,
             )
+            if report.note:
+                raise click.ClickException(report.note)
+            ctx = digest_mod.load_context(conn, cfg.season)
         except (ValueError, projections_mod.NoGamesYet) as exc:
             raise click.ClickException(str(exc)) from None
         if report.note:
@@ -1299,7 +1301,7 @@ def explain(
             f"\n  last night ({projections_mod.date_of(call.day)}): scored {call.score:.1f}"
             f"\n    {verdict} — P(win) {call.p_win_lock:.1%} locking,"
             f" {call.p_win_pass:.1%} passing"
-            f"\n    break-even {call.break_even:.1f}: below it, riding is worth more."
+            f"\n    break-even: score {call.break_even:g} or more; below it, riding is worth more."
             f"\n    The gap is {call.edge:.2%} of win probability, which is what"
             f"\n    the call is worth — not the {abs(call.score - call.break_even):.1f} points."
         )
@@ -1309,7 +1311,7 @@ def explain(
         click.echo("\n  standing rules")
         for rule in rules:
             chance = (
-                "" if np.isnan(rule.p_clear) else f", he clears it {rule.p_clear:.0%} of the time"
+                "" if np.isnan(rule.p_clear) else f", he meets it {rule.p_clear:.0%} of the time"
             )
             idle = (
                 f"\n      assumes {rule.idle_nights} idle decision night(s) first (§7.2)"
@@ -1317,8 +1319,8 @@ def explain(
                 else ""
             )
             click.echo(
-                f"    {projections_mod.date_of(rule.night)}: lock if he clears"
-                f" {rule.threshold:.0f}{chance}"
+                f"    {projections_mod.date_of(rule.night)}: lock at score"
+                f" {rule.threshold:g} or more{chance}"
                 f"\n      {rule.games_after} game(s) left after it{idle}"
             )
 

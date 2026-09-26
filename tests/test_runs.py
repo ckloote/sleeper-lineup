@@ -249,7 +249,17 @@ def test_the_page_says_how_old_each_input_was(tmp_path):
     ingest(season, cfg, weeks=[1, 2])
 
     with connect(cfg) as conn:
-        digest_mod.persist(conn, a_digest(week=2))
+        selected = runs.latest_covering(conn, 2)
+        fetch = runs.stats_fetch(conn, selected["run_id"], 2)
+        digest_mod.persist(
+            conn,
+            a_digest(
+                week=2,
+                ingest_run_id=selected["run_id"],
+                stats_fetch_started_at=fetch["started_at"],
+                stats_fetch_finished_at=fetch["finished_at"],
+            ),
+        )
         row = conn.execute("SELECT schedule_at, status_at FROM digest_runs").fetchone()
         run = advice.latest_run(conn, 1)
 

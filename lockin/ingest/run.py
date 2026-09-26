@@ -122,7 +122,9 @@ def run_ingest(
 
     total_rows = total_played = snapshots_written = 0
     for week in weeks:
-        rows, played = sleeper_ingest.ingest_week_stats(conn, client, cfg.season, week)
+        rows, played = sleeper_ingest.ingest_week_stats(
+            conn, client, cfg.season, week, run_id=ingest_run
+        )
         _, snap = sleeper_ingest.ingest_matchups(
             conn,
             client,

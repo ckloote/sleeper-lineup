@@ -147,8 +147,13 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "abstained": "INTEGER",
         "schedule_at": "TEXT",
         "status_at": "TEXT",
+        "stats_fetch_started_at": "TEXT",
+        "stats_fetch_finished_at": "TEXT",
+        "verified_no_matchup": "INTEGER",
+        "retrospective": "INTEGER",
     },
     "ingest_runs": {"skipped": "TEXT"},
+    "weekly_matchup_teams": {"poll_complete": "INTEGER"},
 }
 
 

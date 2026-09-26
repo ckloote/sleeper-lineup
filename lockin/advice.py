@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from lockin import clock
+from lockin.digest import valid_deadline
 from lockin.projections import date_of, day_index
 
 
@@ -53,7 +54,13 @@ class Item:
     """A standing rule's chance of firing, as the notification printed it."""
 
     def expired(self, now: datetime) -> bool:
-        return self.expires_utc is not None and _utc(self.expires_utc) <= now
+        return self.deadline_status(now) == "closed"
+
+    def deadline_status(self, now: datetime) -> str:
+        deadline = valid_deadline(self.expires_utc)
+        if deadline is None:
+            return "unknown deadline"
+        return "closed" if deadline <= now else "open"
 
     @property
     def is_call(self) -> bool:
@@ -100,6 +107,11 @@ class Run:
     capture is still *running*, as opposed to having run once in October."""
     schedule_at: str | None = None
     """When the NBA schedule was last fetched, as of this run."""
+    ingest_run_id: int | None = None
+    verified_no_matchup: bool | None = None
+    retrospective: bool = False
+    stats_fetch_started_at: str | None = None
+    stats_fetch_finished_at: str | None = None
     status_at: str | None = None
     """When designations were last read, as of this run."""
 
@@ -248,6 +260,11 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         abstained=bool(get("abstained")),
         schedule_at=get("schedule_at"),
         status_at=get("status_at"),
+        ingest_run_id=get("ingest_run_id"),
+        verified_no_matchup=get("verified_no_matchup"),
+        retrospective=bool(get("retrospective")),
+        stats_fetch_started_at=get("stats_fetch_started_at"),
+        stats_fetch_finished_at=get("stats_fetch_finished_at"),
         banked=banked,
         warnings=warnings,
         **availability_coverage(conn, row["as_of"]),
@@ -396,7 +413,7 @@ def _inputs(run: Run) -> str:
     failed ingest.
     """
     ages = [
-        ("box scores", run.last_ingest_at),
+        ("box scores", run.stats_fetch_started_at),
         ("lineup poll", run.poll_observed_at),
         ("NBA schedule", run.schedule_at),
         ("designations", run.status_at),
@@ -407,8 +424,8 @@ def _inputs(run: Run) -> str:
 
 
 def _deadline(item: Item, now: datetime) -> str:
-    if item.expires_utc is None:
-        return ""
+    if item.deadline_status(now) == "unknown deadline":
+        return "<div class=deadline>unknown deadline — unavailable historical advice</div>"
     when = _local(item.expires_utc)
     if item.expired(now):
         return f"<div class=deadline>closed at {when} tip</div>"
@@ -439,12 +456,13 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
     calls = run.calls
     if calls:
         rows = "".join(
-            f"<tr{' class=expired' if i.expired(now) else ''}>"
+            f"<tr{' class=expired' if i.deadline_status(now) != 'open' else ''}>"
             f'<td class=act><span class="tag {"lock" if i.action == "LOCK" else "pass"}">'
             f"{i.action}</span></td>"
             f"<td class=who>{html.escape(i.name)}"
             f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}</td>"
-            f"<td class=num>{'ride' if i.threshold is None else f'{i.threshold:.0f}'}</td>"
+            "<td class=num>"
+            f"{'ride' if i.threshold is None else f'score {i.threshold:g} or more'}</td>"
             f"<td class=num>{'' if i.edge is None else f'{i.edge:.1%}'}</td>"
             "</tr>"
             for i in sorted(calls, key=lambda x: (x.expired(now), -(x.edge or 0)))
@@ -454,13 +472,22 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
         # reader to act when the correct action was to do nothing — passing *is*
         # inaction, and only a LOCK has a deadline. A LOCK whose deadline has
         # passed is no longer one to act on, so it does not count either.
-        locks = [i for i in calls if i.action == "LOCK" and not i.expired(now)]
-        if locks:
+        locks = [i for i in calls if i.action == "LOCK" and i.deadline_status(now) == "open"]
+        if run.retrospective:
+            heading = "Historical replay &mdash; unavailable as live advice"
+            hint = (
+                "These calls reconstruct a past morning;"
+                " their deadlines do not verify a live window."
+            )
+        elif locks:
             heading = "Lock now &mdash; before each player's next tip"
             hint = (
                 "Marked LOCK: bank before his next game tips, or the score is gone."
                 " The rest are worth riding."
             )
+        elif any(i.deadline_status(now) == "unknown deadline" for i in calls):
+            heading = "Nothing to lock now &mdash; advice unavailable"
+            hint = "Unknown deadlines cannot verify a live lock window. Re-run ingest and digest."
         elif any(i.action == "LOCK" for i in calls):
             heading = "Nothing to lock now &mdash; the lock windows have closed"
             hint = "The LOCK calls below expired at their tips. Re-run the digest."
@@ -484,14 +511,14 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
         rows = "".join(
             "<tr>"
             f"<td class=who>{html.escape(i.name)}</td>"
-            f"<td class=num><strong>{i.threshold:.0f}</strong></td>"
+            f"<td class=num><strong>score {i.threshold:g} or more</strong></td>"
             f"<td class=num>{'' if i.p_clear is None else f'{i.p_clear:.0%}'}</td>"
             "</tr>"
             for i in sorted(by_night[day], key=lambda x: -(x.threshold or 0))
         )
         parts.append(
             f"<h2>{html.escape(label)}</h2>"
-            "<p class=hint>Lock him if he clears this. Chance: how likely he is to.</p>"
+            "<p class=hint>Lock him at this score or more. Chance: how likely he is to.</p>"
             "<table><thead><tr><th>Player</th>"
             "<th class=num>Clears</th><th class=num>Chance</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"

@@ -340,6 +340,11 @@ From then on it advises, reading what you have banked from the morning's matchup
 (`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
 `--locked` still overrides it whenever you give it.
 
+The September 25 guard and coverage corrections are verified locally: **693 tests passed,
+1 skipped**, including socket-dependent tests; Ruff passed. These checks validate the
+implementation, while the live shadow evidence below must accumulate in the new season.
+The corrections have not been deployed as part of this change.
+
 **Run in shadow until `lockin shadow` passes its gate**, before trusting the cron without
 `--locked`. The rule the poll reading applies — a locked player's counted score freezes, so
 an earlier lock shows once he has played again — is the architecture doc's §10 reading, and
@@ -363,16 +368,33 @@ For every finalized week it reports:
 - P(win) against results;
 - calls that changed between runs.
 
-**Gate:** two consecutive weeks marked `clean`. That means a live run every morning, no
-`BANKED` disagreement, and no call that changed on the same inputs (a digest is seeded, so
-that would be a bug). Once it passes, `--locked` is only an override and the daily check
-stops. Calibration is printed but not gated. Look at it again around week 6, when about
-thirty mornings have accumulated.
+**Gate:** the latest two finalized weeks of tracking must both be full, consecutive,
+and marked `clean`. Each tracked roster needs a non-abstained, automatically inferred
+run with at least one check against resolvable final evidence every calendar morning.
+A partial first week cannot qualify. Supplied state, abstentions, uncheckable evidence,
+and missing runs (including entire missing weeks) block the gate; no LOCK calls is not
+an exemption. A successful rerun recovers coverage, but never erases a state discrepancy
+or a same-input call flip from an earlier run. Only an explicitly recorded, fresh,
+complete roster poll with a null matchup ID qualifies as a no-matchup exemption.
+The report lists these coverage categories separately. Once the gate passes, `--locked`
+is only an override and the daily check stops. Calibration is printed but not gated.
+Look at it again around week 6, when about thirty mornings have accumulated.
 
-A live run also declines when last night's games are not final yet, when the last
-*complete* ingest finished before they did — a cron that died half-way no longer vouches
-for the data (review findings 7 and 9) — or when the last ingest ran with `--skip-nba`.
-Each says so in the notification.
+A live run declines on calendar disagreement with Sleeper (except the existing Monday
+rollover tolerance), unfinished games, or missing fresh stats evidence. The newest ingest
+covering the requested week must be complete, include the NBA step, and record a successful
+stats request **started at or after 07:00 UTC** that morning. A request begun earlier is
+insufficient even if it finishes later. A newer partially committed ingest blocks an older
+complete run. Legacy databases must run ingest again to record this evidence; player
+refreshes, matchup polls, and `--locked` cannot substitute for it. Historical replay remains
+available. Each refusal appears in the notification and saved advice.
+
+Calls require a valid, timezone-aware next tipoff and expire exactly at that tipoff.
+A missing or malformed deadline suppresses only that player's call, with a saved warning;
+other recommendations and projections remain available. Legacy unknown-deadline calls
+are shown as unavailable historical advice and never count toward “Lock now.” Replay
+runs are explicitly labelled historical. Thresholds mean **score X or more**, including
+half points: 11.5 means 11.5, and clearing probability includes draws equal to 11.5.
 
 Then render the page, which is how a missed notification stays readable:
 
@@ -383,7 +405,8 @@ uv run lockin advice
 **Pass:** a green banner saying the advice is for this morning, and each call showing the
 tip it must be acted on before. A red banner means the digest did not run today — check
 `logs/digest.log` before trusting anything on the page. A greyed call is one whose tip has
-passed. The footer's `Inputs:` line gives the age of the box scores, the lineup poll, the NBA
+passed or unavailable. The footer's `Inputs:` line shows the actual stats-request start,
+the lineup poll, the NBA
 schedule and the designations. All four should be from this morning's ingest.
 
 If `lockin-serve` is running on the Pi, the same page is at `http://<pi>:8080/` and is

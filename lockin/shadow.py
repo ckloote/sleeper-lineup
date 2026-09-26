@@ -115,6 +115,11 @@ class WeekSummary:
     week: int
     runs: int = 0
     mornings_missing: list[str] = field(default_factory=list)
+    failed_inference: list[str] = field(default_factory=list)
+    supplied_only: list[str] = field(default_factory=list)
+    uncheckable: list[str] = field(default_factory=list)
+    exemptions: list[str] = field(default_factory=list)
+    partial: bool = False
     calls: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     state_checked: int = 0
     state_misses: int = 0
@@ -125,7 +130,11 @@ class WeekSummary:
     def clean(self) -> bool:
         return (
             self.runs > 0
-            and self.state_checked > 0
+            and (self.state_checked > 0 or bool(self.exemptions))
+            and not self.partial
+            and not self.failed_inference
+            and not self.supplied_only
+            and not self.uncheckable
             and self.state_misses == 0
             and self.same_input_flips == 0
             and not self.mornings_missing
@@ -147,8 +156,8 @@ class ShadowReport:
         return sum((f.p_win - f.outcome) ** 2 for f in self.forecasts) / len(self.forecasts)
 
     def gate(self) -> tuple[bool, str]:
-        """Passed once the latest ``GATE_WEEKS`` weeks with runs are all clean."""
-        advised = [w for w in self.weeks if w.runs]
+        """Require the latest finalized tracking weeks, including weeks with no runs."""
+        advised = self.weeks
         recent = advised[-GATE_WEEKS:]
         if len(recent) < GATE_WEEKS:
             return False, f"{len(advised)} finalized week(s) with live runs; need {GATE_WEEKS}"
@@ -191,7 +200,9 @@ def truths(
         counted = row["counted_points"] if row["counted_points"] is not None else 0.0
         inference = infer_lock(counted, games)
         game_days = tuple(day_index(g["game_date"]) for g in raw)
-        if inference.status is LockStatus.LOCKED_EARLY:
+        if row["counted_points"] is None:
+            days = None  # missing final evidence is not a counted zero
+        elif inference.status is LockStatus.LOCKED_EARLY:
             days = frozenset({game_days[inference.matched_index]})
         elif inference.status is LockStatus.AMBIGUOUS and inference.locked_early:
             days = frozenset(game_days[i] for i in inference.candidates)
@@ -258,7 +269,8 @@ def _live_runs(conn: sqlite3.Connection, weeks: list[int]) -> list[sqlite3.Row]:
     return [
         r
         for r in rows
-        if datetime.fromisoformat(r["generated_at"]).astimezone(zone).date().isoformat()
+        if not ("retrospective" in r.keys() and r["retrospective"])
+        and datetime.fromisoformat(r["generated_at"]).astimezone(zone).date().isoformat()
         == r["as_of"]
     ]
 
@@ -284,14 +296,15 @@ def build(conn: sqlite3.Connection, season: str) -> ShadowReport:
         by_week[r["week"]].append(r)
     truth = truths(conn, season, weeks, {r["roster_id"] for r in runs})
     opening = calendar.opening_night(conn, season)
-    first_live = runs[0]["as_of"] if runs else None
+    first_live: dict[int, str] = {}
+    for run in runs:
+        first_live.setdefault(run["roster_id"], run["as_of"])
+    first_week = min(by_week) if by_week else last + 1
 
-    for week in weeks:
+    for week in range(first_week, last + 1):
         summary = WeekSummary(week=week, runs=len(by_week[week]))
         report.weeks.append(summary)
-        if not by_week[week]:
-            continue
-        _mornings(summary, by_week[week], week, opening, first_live)
+        _mornings(summary, by_week[week], week, opening, first_live, truth)
         _calls(conn, report, summary, by_week[week], truth)
         _state(conn, report, summary, by_week[week], truth)
         _forecasts(conn, report, by_week[week])
@@ -320,18 +333,51 @@ def _mornings(
     runs: list[sqlite3.Row],
     week: int,
     opening: date | None,
-    first_live: str | None,
+    first_live: dict[int, str],
+    truth: dict[tuple[int, int, str], Truth],
 ) -> None:
-    """Mornings of the week with no live run: the digest failed, or never ran."""
-    if opening is None or first_live is None:
+    """Require automatic, checkable inference each calendar morning per roster."""
+    if opening is None:
+        summary.partial = True
         return
     monday, sunday = calendar.week_bounds(week, opening)
-    have = {(r["roster_id"], r["as_of"]) for r in runs}
-    for roster_id in sorted({r["roster_id"] for r in runs}):
-        day = max(monday, date.fromisoformat(first_live))
+    for roster_id, first in sorted(first_live.items()):
+        start = date.fromisoformat(first)
+        if start > sunday:
+            continue
+        if start > monday:
+            summary.partial = True
+        day = monday
         while day <= sunday:
-            if (roster_id, day.isoformat()) not in have:
-                summary.mornings_missing.append(f"roster {roster_id} {day.isoformat()}")
+            label = f"roster {roster_id} {day.isoformat()}"
+            morning = [
+                r for r in runs if r["roster_id"] == roster_id and r["as_of"] == day.isoformat()
+            ]
+            inferred = [
+                r for r in morning if r["state_source"] == "inferred" and not r["abstained"]
+            ]
+            checkable = any(
+                expected_banked(t, day.toordinal() - 1) is not False
+                for (w, rid, _), t in truth.items()
+                if w == week and rid == roster_id
+            )
+            if inferred and checkable:
+                pass
+            elif any(
+                "verified_no_matchup" in r.keys()
+                and r["verified_no_matchup"]
+                and not r["abstained"]
+                for r in morning
+            ):
+                summary.exemptions.append(label)
+            elif not morning:
+                summary.mornings_missing.append(label)
+            elif inferred:
+                summary.uncheckable.append(label)
+            elif any(r["state_source"] == "supplied" and not r["abstained"] for r in morning):
+                summary.supplied_only.append(label)
+            else:
+                summary.failed_inference.append(label)
             day += timedelta(days=1)
 
 
@@ -469,14 +515,22 @@ def render(report: ShadowReport) -> str:
     name = report.names.get
     out = ["SHADOW  what the digest said, against what was done", ""]
     for w in report.weeks:
-        if not w.runs:
-            continue
         calls = ", ".join(f"{w.calls[k]} {k}" for k in (FOLLOWED, OVERRIDDEN, MOOT, UNKNOWN))
         out.append(
             f"week {w.week:>2}  {'clean' if w.clean else 'NOT CLEAN'}  {w.runs} run(s);"
             f" calls: {calls}; state: {w.state_misses} miss(es) in {w.state_checked} checks;"
             f" flips: {w.flips} ({w.same_input_flips} on the same inputs)"
         )
+        if w.partial:
+            out.append("          partial first week: a full week is required")
+        for label, entries in (
+            ("failed inference", w.failed_inference),
+            ("supplied-only", w.supplied_only),
+            ("uncheckable evidence", w.uncheckable),
+            ("verified exemption", w.exemptions),
+        ):
+            for entry in entries:
+                out.append(f"          {label}: {entry}")
         for missing in w.mornings_missing:
             out.append(f"          no run: {missing}")
 

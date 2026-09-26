@@ -81,3 +81,21 @@ def designations_read_at(conn: sqlite3.Connection) -> str | None:
 def any_recorded(conn: sqlite3.Connection) -> bool:
     """Has this database ever been ingested by code that records runs?"""
     return conn.execute("SELECT EXISTS (SELECT 1 FROM ingest_runs)").fetchone()[0] == 1
+
+
+def latest_covering(conn: sqlite3.Connection, week: int) -> sqlite3.Row | None:
+    """Newest started run touching this week, including partial commits."""
+    for row in conn.execute("SELECT * FROM ingest_runs ORDER BY run_id DESC"):
+        if week in json.loads(row["weeks"]):
+            return row
+    return None
+
+
+def stats_fetch(conn: sqlite3.Connection, run_id: int, week: int) -> sqlite3.Row | None:
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'ingest_stats_fetches'"
+    ).fetchone():
+        return None
+    return conn.execute(
+        "SELECT * FROM ingest_stats_fetches WHERE run_id = ? AND week = ?", (run_id, week)
+    ).fetchone()

@@ -76,15 +76,9 @@ def seed_players(conn, report):
 def stored(tmp_path, report):
     """Persist into a scratch database and read it back. The round trip."""
     with session(tmp_path / "advice.db") as conn:
-        # Log an ingest that just finished. `persist` stamps `generated_at` with
-        # the real clock, so a fixture dating the ingest to the replayed January
-        # would look like a cron four thousand hours dead.
-        conn.execute(
-            "INSERT INTO ingest_log (source, target, rows, started_at, finished_at)"
-            " VALUES ('sleeper', 'stats', 1, ?, ?)",
-            (now_iso(), now_iso()),
-        )
-        digest_mod.persist(conn, report, state_supplied=True)
+        stamp = now_iso()
+        selected = replace(report, stats_fetch_started_at=stamp, stats_fetch_finished_at=stamp)
+        digest_mod.persist(conn, selected, state_supplied=True)
         seed_players(conn, report)
         yield conn, advice.latest_run(conn, report.roster_id)
 
@@ -311,6 +305,7 @@ def test_an_all_pass_night_does_not_tell_you_to_act(stored):
     """Passing is inaction. "Do these now" over four PASS rows was an instruction
     to do something when the correct move was to do nothing."""
     _, run = stored
+    run = replace(run, retrospective=False)
     assert all(i.action == "PASS" for i in run.calls), "this date should be all pass"
     page = advice.render(run, today=AS_OF, now=MORNING)
     assert "Nothing to lock" in page
@@ -321,6 +316,7 @@ def test_an_all_pass_night_does_not_tell_you_to_act(stored):
 def test_a_night_with_a_lock_says_so_in_the_heading(stored):
     """The heading is what gets scanned, so it carries the verdict."""
     _, run = stored
+    run = replace(run, retrospective=False)
     with_lock = replace(run, items=(replace(run.calls[0], action="LOCK"), *run.items[1:]))
     page = advice.render(with_lock, today=AS_OF, now=MORNING)
     assert "Lock now" in page
@@ -331,6 +327,7 @@ def test_a_night_with_a_lock_says_so_in_the_heading(stored):
 def test_the_heading_tracks_the_calls_not_the_count(stored):
     """One lock among several passes is still a night you must act on."""
     _, run = stored
+    run = replace(run, retrospective=False)
     only_passes = advice.render(run, today=AS_OF, now=MORNING)
     one_lock = advice.render(
         replace(run, items=(replace(run.calls[-1], action="LOCK"), *run.items[:-1])),
@@ -349,7 +346,7 @@ def test_where_the_matchup_stands_comes_before_the_advice(stored):
     _, run = stored
     page = advice.render(run, today=AS_OF, now=MORNING)
     assert page.index("class=state") < page.index("<h2>")
-    assert page.index("class=pwin") < page.index("Nothing to lock")
+    assert page.index("class=pwin") < page.index("Historical replay")
 
 
 def test_the_banner_still_outranks_everything(stored):
@@ -463,12 +460,8 @@ def test_a_failed_ingest_is_reported_on_the_page(tmp_path, report):
     """
     with session(tmp_path / "stale.db") as conn:
         stale = date_of(day_index(now_iso()[:10]) - 4) + "T11:30:00+00:00"
-        conn.execute(
-            "INSERT INTO ingest_log (source, target, rows, started_at, finished_at)"
-            " VALUES ('sleeper', 'stats', 1, ?, ?)",
-            (stale, stale),  # four days before this digest
-        )
-        digest_mod.persist(conn, report, state_supplied=True)
+        selected = replace(report, stats_fetch_started_at=stale, stats_fetch_finished_at=stale)
+        digest_mod.persist(conn, selected, state_supplied=True)
         run = advice.latest_run(conn, report.roster_id)
 
     warning = advice.ingest_warning(run)
@@ -478,7 +471,7 @@ def test_a_failed_ingest_is_reported_on_the_page(tmp_path, report):
     assert 'data-warning="ingest"' in page
 
 
-def test_a_recent_ingest_says_nothing(stored):
+def test_a_recent_selected_fetch_says_nothing(stored):
     _, run = stored
     assert advice.ingest_warning(run) is None
     assert 'data-warning="ingest"' not in advice.render(run, today=AS_OF, now=MORNING)

@@ -224,7 +224,7 @@ def test_an_ingest_from_before_last_nights_games_is_not_fresh(tmp_path):
     report = w.digest()
 
     assert report.abstained
-    assert "before last night's games did" in report.note
+    assert "started before last night's games finished" in report.note
 
 
 def test_no_poll_since_last_night_means_no_live_advice(tmp_path):

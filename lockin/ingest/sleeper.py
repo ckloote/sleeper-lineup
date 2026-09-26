@@ -407,8 +407,8 @@ def ingest_matchups(
     for team in rows:
         conn.execute(
             "INSERT OR REPLACE INTO weekly_matchup_teams"
-            " (week, roster_id, matchup_id, points, custom_points, observed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            " (week, roster_id, matchup_id, points, custom_points, observed_at, poll_complete)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 week,
                 team["roster_id"],
@@ -416,6 +416,12 @@ def ingest_matchups(
                 team.get("points"),
                 team.get("custom_points"),
                 observed,
+                int(
+                    len(team.get("starters") or [])
+                    == sum(p not in {"BN", "IR"} for p in roster_positions)
+                    and all(p and p != "0" for p in team.get("starters") or [])
+                    and set(team.get("starters") or []).issubset(team.get("players") or [])
+                ),
             ),
         )
         starters = team.get("starters") or []
@@ -487,7 +493,12 @@ _STAT_COLUMNS = {
 
 
 def ingest_week_stats(
-    conn: sqlite3.Connection, client: SleeperClient, season: str, week: int
+    conn: sqlite3.Connection,
+    client: SleeperClient,
+    season: str,
+    week: int,
+    *,
+    run_id: int | None = None,
 ) -> tuple[int, int]:
     """Ingest one fantasy week of per-player-per-game box scores.
 
@@ -579,6 +590,12 @@ def ingest_week_stats(
             )
 
     log_ingest(conn, "sleeper", f"stats:week={week}", n, started)
+    if run_id is not None:
+        conn.execute(
+            "INSERT INTO ingest_stats_fetches (run_id, week, started_at, finished_at)"
+            " VALUES (?, ?, ?, ?)",
+            (run_id, week, started, now_iso()),
+        )
     return n, played_n
 
 
