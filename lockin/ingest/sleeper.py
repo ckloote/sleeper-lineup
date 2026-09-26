@@ -592,7 +592,7 @@ def ingest_week_stats(
     log_ingest(conn, "sleeper", f"stats:week={week}", n, started)
     if run_id is not None:
         conn.execute(
-            "INSERT INTO ingest_stats_fetches (run_id, week, started_at, finished_at)"
+            "INSERT OR REPLACE INTO ingest_stats_fetches (run_id, week, started_at, finished_at)"
             " VALUES (?, ?, ?, ?)",
             (run_id, week, started, now_iso()),
         )

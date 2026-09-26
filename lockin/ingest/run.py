@@ -102,6 +102,9 @@ def run_ingest(
         except ValueError as exc:
             raise IngestRefused(str(exc)) from None
         echo(f"  weeks       current -> {', '.join(str(w) for w in weeks)}")
+    # A week named twice (`--weeks 1-3,2`) is fetched once. Its stats evidence
+    # is one row per run and week, so a second fetch crashed the run part-way.
+    weeks = list(dict.fromkeys(weeks))
 
     # Running until the last step finishes. A failure part-way leaves it so,
     # whatever the between-week checkpoints committed — which is what stops a

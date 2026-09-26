@@ -168,6 +168,21 @@ def test_fetch_evidence_survives_checkpoint_and_matches_each_week(live):
         assert all(r["started_at"] <= r["finished_at"] for r in rows)
 
 
+def test_a_week_named_twice_is_fetched_once(tmp_path):
+    """`--weeks 1-2,2` crashed on the second week-2 evidence row, after a
+    checkpoint had committed the run as running — which then blocked every live
+    digest until a clean re-ingest."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=7))
+    cfg = config_for(tmp_path, season)
+    ingest(season, cfg, weeks=[1, 2, 2])
+    with connect(cfg) as conn:
+        run = conn.execute("SELECT status, weeks FROM ingest_runs").fetchone()
+        assert (run["status"], json.loads(run["weeks"])) == ("complete", [1, 2])
+        fetched = conn.execute("SELECT week FROM ingest_stats_fetches ORDER BY week").fetchall()
+        assert [r["week"] for r in fetched] == [1, 2]
+
+
 def test_half_point_probability_and_rendering(tmp_path):
     args = dict(
         banked=0.0,
