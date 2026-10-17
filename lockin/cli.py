@@ -275,7 +275,7 @@ def observe(weeks: str | None) -> None:
 
     click.echo(f"  observed    {len(week_list)} weeks, {changed} changed")
     if changed:
-        click.echo("commit the new snapshots — they cannot be refetched.")
+        click.echo("back up the new snapshots — they cannot be refetched.")
 
 
 @main.command()
@@ -1118,7 +1118,9 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
     if roster_id is None:
         raise click.ClickException(f"no roster for user {cfg.user_id}; pass --roster")
 
-    httpd = serve_mod.build_server(cfg.db_path, roster_id, host=host, port=port, quiet=quiet)
+    httpd = serve_mod.build_server(
+        cfg.db_path, roster_id, dashboard_db=dashboard_db, host=host, port=port, quiet=quiet
+    )
     click.echo(f"serving roster {roster_id} from {cfg.db_path} (read-only)")
     for url in serve_mod.reachable_addresses(port):
         click.echo(f"  {url}")

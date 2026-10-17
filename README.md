@@ -129,8 +129,9 @@ but can abstain before the league rolls over. See the
 ### After the season
 
 Keep backups of the database and raw `snapshots/`: Sleeper can rewrite completed
-results, and saved digest runs preserve what was actually advised. See the
-[deployment guide](docs/deployment.md) for archive observation and repair procedures.
+results, and saved digest runs preserve what was actually advised. Snapshots are
+ignored by Git and need a verified copy on another device or host. See the
+[deployment guide](docs/deployment.md) for backup, observation, and repair procedures.
 
 With sufficient season history, `lockin calibrate`, `lockin backtest`, and
 `lockin managers --sims 2000` provide retrospective checks and analysis. These are

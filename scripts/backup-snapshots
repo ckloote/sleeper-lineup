@@ -1,0 +1,62 @@
+#!/bin/sh
+# Copy the append-only snapshot archive to a prepared rsync destination, then
+# verify every source file by checksum. Existing destination files are never
+# overwritten: a mismatch must be investigated rather than erasing evidence.
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: scripts/backup-snapshots /absolute/backup/path|user@host:/absolute/backup/path" >&2
+    exit 2
+fi
+
+cd "$(dirname "$0")/.."
+[ -d snapshots ] || { echo "no snapshots directory in $(pwd -P)" >&2; exit 2; }
+count=$(find snapshots -type f | wc -l)
+[ "$count" -gt 0 ] || { echo "snapshot archive is empty; refusing a false-success backup" >&2; exit 2; }
+[ -z "$(find snapshots -type l -print -quit)" ] || {
+    echo "snapshot archive contains a symbolic link; refusing to skip it" >&2
+    exit 2
+}
+destination=${1%/}
+case "$destination" in
+    /*)
+        [ -d "$destination" ] || { echo "backup destination does not exist: $destination" >&2; exit 2; }
+        repo=$(pwd -P)
+        resolved=$(realpath "$destination")
+        case "$resolved" in
+            "$repo"|"$repo"/*)
+                echo "backup destination must be outside the project: $resolved" >&2
+                exit 2
+                ;;
+        esac
+        if [ "$(stat -c %d snapshots)" = "$(stat -c %d "$resolved")" ]; then
+            echo "warning: backup destination is on the same filesystem; use another device or host for disaster recovery" >&2
+        fi
+        ;;
+    *:/*) ;;
+    *)
+        echo "backup destination must be an absolute local path or host:/absolute/path" >&2
+        exit 2
+        ;;
+esac
+
+marker=$(mktemp)
+trap 'rm -f "$marker"' EXIT HUP INT TERM
+if ! rsync -q -- "$destination/.lockin-snapshot-backup" "$marker"; then
+    echo "destination is not prepared: create .lockin-snapshot-backup there first" >&2
+    exit 2
+fi
+if [ "$(cat "$marker")" != 'sleeper-lineup snapshot archive v1' ]; then
+    echo "backup destination marker has unexpected contents" >&2
+    exit 2
+fi
+
+rsync -rtO --ignore-existing -- snapshots/ "$destination/"
+changes=$(rsync -rtOcn --out-format='%n' -- snapshots/ "$destination/")
+if [ -n "$changes" ]; then
+    echo "backup verification failed; missing or changed source files:" >&2
+    printf '%s\n' "$changes" >&2
+    exit 1
+fi
+
+echo "verified $count snapshot files at $destination"

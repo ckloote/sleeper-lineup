@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 — 2026-10-17
+
+- Pass `--dashboard-db` through the CLI to the web server, so the 2026 advice
+  page can display 2025 manager scorecards on `/dashboard`.
+- Validated with 724 passing tests (1 skipped), Ruff checks, a 0.1.1 wheel and
+  source distribution, and both live HTTP routes after service restart.
+- Ignore the raw snapshot archive in Git and add a checksum-verified, append-only
+  rsync backup script for a separately prepared destination.
+
 ## 0.1.0 — 2026-09-26
 
 First tagged release of the Sleeper NBA Lock-In assistant. Ready for supervised

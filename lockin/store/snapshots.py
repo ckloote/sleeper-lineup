@@ -7,8 +7,8 @@ no historical endpoint, so an unobserved change is unrecoverable.
 
 `weekly_matchups` is append-only for this reason, but that was not enough: the
 database gets rebuilt, and rebuilding destroyed 24 of 25 weeks of original
-values. Snapshots therefore live **outside the database**, as files, under
-version control — so `rm data/lockin.db` cannot touch them.
+values. Snapshots therefore live **outside the database**, as files, backed
+up separately — so `rm data/lockin.db` cannot touch them.
 
 Deduplicated by content: a snapshot is written only when the payload differs
 from the most recent one for that week. A stable season costs 25 small files;

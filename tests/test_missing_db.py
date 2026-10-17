@@ -112,3 +112,35 @@ def test_serve_rejects_a_bad_dashboard_db_at_startup(tmp_path, monkeypatch):
     assert result.exit_code != 0
     assert "no database at" in result.output
     assert "lockin-2025.bd" in result.output
+
+
+def test_serve_passes_previous_season_db_to_http_server(tmp_path, monkeypatch):
+    season = tmp_path / "2026.db"
+    previous = tmp_path / "2025.db"
+    with session(season):
+        pass
+    with session(previous):
+        pass
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOCKIN_DB", str(season))
+    monkeypatch.setattr(cli.digest_mod, "roster_for_user", lambda conn, user_id: 4)
+
+    received = {}
+
+    class Server:
+        def serve_forever(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    def build_server(db_path, roster_id, **kwargs):
+        received.update(db_path=db_path, roster_id=roster_id, **kwargs)
+        return Server()
+
+    monkeypatch.setattr(cli.serve_mod, "build_server", build_server)
+    result = CliRunner().invoke(cli.main, ["serve", "--dashboard-db", str(previous)])
+
+    assert result.exit_code == 0, result.output
+    assert received["db_path"] == season
+    assert received["dashboard_db"] == previous

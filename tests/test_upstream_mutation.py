@@ -16,7 +16,7 @@ after week 12 was played, so which version matches what managers actually did on
 the night is not determinable. The cause of the change is likewise unresolved —
 see implementation-plan.md §12 for the hypotheses that were ruled out.
 
-These tests run offline against the committed snapshots. They do not call the
+These tests run offline against committed golden fixtures. They do not call the
 API, so they cannot flake, and they will keep passing after the next mutation —
 which is the point: they pin what was true, not what is currently served.
 """

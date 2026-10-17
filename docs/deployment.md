@@ -81,8 +81,9 @@ headroom, which is why Eastern needs no special handling. **A Pi east of UTC+2 w
 
 ## 3. Bring last season's database across — do not re-ingest it
 
-`snapshots/` is committed, so it arrives with the clone. **`data/` is gitignored**, so a
-fresh clone has no database at all.
+`snapshots/` and `data/` are host data, ignored by Git. Restore the snapshot
+archive from its separate backup when building a new host. A fresh clone has no
+database or snapshot history.
 
 ```bash
 # from the dev machine
@@ -92,7 +93,7 @@ rsync -avP data/lockin.db pi@raspberrypi:/home/pi/lockin/data/lockin-2025.db
 **Copy it; do not rebuild it on the Pi.** Sleeper rewrites completed seasons (§12) — 38% of
 week-12 starter values changed under us between two days in August. Re-ingesting 2025-26 on
 the Pi would fetch *today's* version, producing a database that disagrees with this one and
-with the committed snapshots. Copying preserves the record that was actually observed;
+with the restored snapshots. Copying preserves the record that was actually observed;
 `lockin reconcile` then confirms it still matches the archive.
 
 Name it for its season from the start. Two seasons must never share a database:
@@ -551,11 +552,41 @@ with the job, so the run that recovers is the one that reports the gap. Step 7's
 rule keeps this log bounded without losing it — it is the record the §12 timing analysis was
 read out of, so it rotates into dated archives rather than being truncated.
 
-**Commit what it writes.** New snapshots are the whole product, they cannot be refetched,
-and `snapshots/` is version-controlled precisely because `data/` is not. The cron cannot
-commit for you — check `git status snapshots/` when you see a changed week in the log. At
-daily cadence on a moving season that is up to 25 small files a day, so make it a habit
-rather than an occasional sweep.
+**Back up what it writes.** New snapshots cannot be refetched. `snapshots/` is
+ignored by Git; use `scripts/backup-snapshots` to copy the complete archive to
+another device or host, including the 2025 history and files never committed to
+Git. The script copies only missing files and verifies every source file by
+checksum. It stops on an existing file with different contents instead of
+overwriting evidence.
+
+Prepare the destination once with a marker, then run the script:
+
+```bash
+mkdir -p /mnt/backup/sleeper-lineup/snapshots
+printf 'sleeper-lineup snapshot archive v1\n' > /mnt/backup/sleeper-lineup/snapshots/.lockin-snapshot-backup
+scripts/backup-snapshots /mnt/backup/sleeper-lineup/snapshots
+```
+
+The destination can also be `user@host:/absolute/path` over SSH. Create the
+directory and marker on that host first. The script refuses an unprepared
+destination, so a missing mount cannot silently turn into a backup on the Pi's
+system disk. A destination on that same disk is only a convenience copy, not
+disaster recovery.
+
+After the first verified copy, schedule it after the daily jobs. Use the actual
+prepared destination in the cron line; for a remote host, set up unattended SSH
+authentication before enabling it:
+
+```cron
+10 9 * * *  cd /home/pi/lockin && scripts/cron-guard backup-snapshots scripts/backup-snapshots /mnt/backup/sleeper-lineup/snapshots
+```
+
+Check `logs/.cron-guard/backup-snapshots.ok` and `logs/backup-snapshots.log` on
+the next run. To restore, copy the backup directory's contents back into
+`snapshots/`, excluding `.lockin-snapshot-backup`. Keep the separate SQLite
+database backup too; snapshots do not contain injury captures, digest runs, or
+manager scorecards. Older snapshots remain in Git history, but new observations
+will not be committed there.
 
 ## 11. Repair the season from the archive
 
