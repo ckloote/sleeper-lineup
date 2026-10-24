@@ -148,9 +148,18 @@ def current_weeks(league: dict) -> list[int]:
             "league.settings.leg is missing or not a number, so there is no way to "
             "tell which fantasy week it is; pass --weeks explicitly"
         )
-    weeks = {leg}
+    start = settings.get("start_week", ALL_STAT_WEEKS.start)
+    if not isinstance(start, int) or start not in ALL_STAT_WEEKS:
+        raise ValueError(
+            f"league.settings.start_week={start!r} is outside the "
+            f"{min(ALL_STAT_WEEKS)}-{max(ALL_STAT_WEEKS)} scoring weeks"
+        )
+    # A league may start after the NBA's opening fantasy week. Before Sleeper
+    # advances `leg`, still poll its configured first playable week so the
+    # scheduled ingest is ready when the draft finishes.
+    weeks = {max(leg, start)}
     last_scored = settings.get("last_scored_leg")
-    if isinstance(last_scored, int):
+    if isinstance(last_scored, int) and last_scored >= start:
         weeks.add(last_scored)
 
     known = sorted(w for w in weeks if w in ALL_STAT_WEEKS)

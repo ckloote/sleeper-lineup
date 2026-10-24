@@ -24,8 +24,8 @@ GAME_LINK_THRESHOLD = 0.99
 STATE = "COALESCE(state, CASE occurred WHEN 1 THEN 'final' WHEN 0 THEN 'postponed' END)"
 
 
-def season_progress(conn: sqlite3.Connection) -> tuple[int | None, bool]:
-    """(current week, complete) from this database's league payload.
+def season_progress(conn: sqlite3.Connection) -> tuple[int, int | None, bool]:
+    """(first matchup week, current week, complete) from the league payload.
 
     Historical gates and live-readiness gates differ in one number: how many
     weeks should exist. On a finished season it is all 25. On day one it is the
@@ -36,26 +36,38 @@ def season_progress(conn: sqlite3.Connection) -> tuple[int | None, bool]:
     try:
         league = identity.league_payload(conn)
     except (RuntimeError, identity.IdentityMismatch):
-        return None, True
-    leg = (league.get("settings") or {}).get("leg")
+        return min(EXPECTED_WEEKS), None, True
+    settings = league.get("settings") or {}
+    start = settings.get("start_week", min(EXPECTED_WEEKS))
+    if not isinstance(start, int) or start not in EXPECTED_WEEKS:
+        start = min(EXPECTED_WEEKS)
+    leg = settings.get("leg")
     complete = league.get("status") == "complete" or not isinstance(leg, int)
-    return (leg if isinstance(leg, int) else None), complete
+    # `leg` can lag the configured start week while a league is pre-draft or
+    # rolling over on Monday. The first configured matchup week is still the
+    # relevant week for the live readiness checks.
+    current = max(leg, start) if isinstance(leg, int) else None
+    return start, current, complete
 
 
 def completed_weeks(conn: sqlite3.Connection) -> set[int]:
     """Weeks that must be fully ingested: all of them, or those before this one."""
-    leg, complete = season_progress(conn)
+    start, leg, complete = season_progress(conn)
     if complete:
-        return set(EXPECTED_WEEKS)
-    return {w for w in EXPECTED_WEEKS if w < leg}
+        return {w for w in EXPECTED_WEEKS if w >= start}
+    if leg is None:
+        return set()
+    return {w for w in EXPECTED_WEEKS if start <= w < leg}
 
 
 def started_weeks(conn: sqlite3.Connection) -> set[int]:
     """Weeks with matchups by now: every completed week, and the current one."""
-    leg, complete = season_progress(conn)
+    start, leg, complete = season_progress(conn)
     if complete:
-        return set(EXPECTED_WEEKS)
-    return {w for w in EXPECTED_WEEKS if w <= leg}
+        return {w for w in EXPECTED_WEEKS if w >= start}
+    if leg is None:
+        return set()
+    return {w for w in EXPECTED_WEEKS if start <= w <= leg}
 
 
 @dataclass
@@ -335,7 +347,7 @@ def check_current_week_tipoffs(conn: sqlite3.Connection, season: str) -> Check:
 
     A finished season needs none, and passes.
     """
-    leg, complete = season_progress(conn)
+    _, leg, complete = season_progress(conn)
     opening = calendar.opening_night(conn, season)
     name = "this week's games have tipoff times"
     if complete or leg is None or opening is None:

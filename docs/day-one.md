@@ -165,9 +165,11 @@ print({k:s.get(k) for k in ('start_week','playoff_week_start','last_scored_leg',
 ```
 
 2025-26 gave `start_week 1, playoff_week_start 22, last_scored_leg 24, playoff_teams 8`.
-If those have moved, `ALL_STAT_WEEKS`, `REGULAR_SEASON_WEEKS` and `PLAYOFF_WEEKS` in
-`lockin/config.py` need updating. `last_scored_week()` already reads the setting rather
-than a constant, so `lockin managers` is safe either way; the ingest default is not.
+The league may choose a later `start_week`; ingest and the live gates honor it, so a
+league drafted after NBA week 1 can begin in week 2 without requiring week 1 matchups.
+The playoff boundary and scored-week range still need to match the supported structure.
+`last_scored_week()` reads the setting rather than a constant, so `lockin managers` is
+safe either way.
 
 Every `lockin ingest` also prints the same numbers on its `structure` line, and a
 `WARNING` beneath it when they disagree with `lockin/config.py` — so a format change made

@@ -53,6 +53,20 @@ def test_weeks_outside_the_scored_range_are_dropped():
     assert current_weeks(league(leg=1, last_scored_leg=0)) == [1]
 
 
+def test_a_league_starting_in_week_two_skips_week_one():
+    assert current_weeks(league(start_week=2, leg=1, last_scored_leg=1)) == [2]
+    assert current_weeks(league(start_week=2, leg=2, last_scored_leg=1)) == [2]
+
+
+def test_a_later_week_two_start_keeps_the_boundary_poll():
+    assert current_weeks(league(start_week=2, leg=3, last_scored_leg=2)) == [2, 3]
+
+
+def test_an_invalid_start_week_is_an_error():
+    with pytest.raises(ValueError, match="start_week=26"):
+        current_weeks(league(start_week=26, leg=2))
+
+
 def test_a_leg_outside_the_season_is_an_error_not_a_guess():
     """Preseason. Silently ingesting the wrong week is what this replaced."""
     with pytest.raises(ValueError, match="outside the 1-25"):

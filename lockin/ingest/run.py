@@ -32,10 +32,10 @@ class IngestRefused(Exception):
 def week_structure(league: dict) -> list[str]:
     """The league's own week numbering, and whether `lockin.config` agrees.
 
-    `config.ALL_STAT_WEEKS` and friends are 2025-26's structure written down. A
-    changed playoff format moves them, and day-one.md step 3 used to check that
-    by reading the new database before the step that creates it. Printing it
-    from the payload every run is the check, and it cannot come too early.
+    `config.ALL_STAT_WEEKS` bounds the stat weeks; the league may choose a later
+    first matchup week. A changed playoff format moves the playoff constants,
+    and day-one.md used to check that by reading the new database before the
+    step that creates it. Printing it from the payload every run is the check.
     """
     settings = league.get("settings") or {}
     start, playoffs = settings.get("start_week"), settings.get("playoff_week_start")
@@ -43,11 +43,13 @@ def week_structure(league: dict) -> list[str]:
         f"  structure   week {start} first, playoffs from {playoffs},"
         f" last scored {settings.get('last_scored_leg')}"
     ]
-    if start not in (None, ALL_STAT_WEEKS.start) or playoffs not in (None, PLAYOFF_WEEKS.start):
+    if (start is not None and start not in ALL_STAT_WEEKS) or (
+        playoffs is not None and playoffs not in PLAYOFF_WEEKS
+    ):
         lines.append(
-            f"  WARNING     lockin/config.py expects week {ALL_STAT_WEEKS.start} first and"
-            f" playoffs from {PLAYOFF_WEEKS.start}; update ALL_STAT_WEEKS,"
-            " REGULAR_SEASON_WEEKS and PLAYOFF_WEEKS before trusting the weekly gates"
+            f"  WARNING     supported start weeks are {ALL_STAT_WEEKS.start}-"
+            f"{ALL_STAT_WEEKS.stop - 1} and playoffs begin at week {PLAYOFF_WEEKS.start};"
+            " update the season structure before trusting the weekly gates"
         )
     return lines
 

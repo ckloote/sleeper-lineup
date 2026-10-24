@@ -89,3 +89,20 @@ def test_a_monday_before_sleeper_rolls_the_week_over_is_not_an_alarm(tmp_path):
     out = ingest(season, config_for(tmp_path, season), weeks=[2])
 
     assert not any("WARNING" in line for line in out), out
+
+
+def test_a_league_that_starts_in_week_two_passes_without_week_one(tmp_path):
+    """An intentional late draft must not make the launch gate require week 1."""
+    season = SyntheticSeason()
+    season.play_through(OPENING + timedelta(days=8))
+    season.settings = {"start_week": 2, "leg": 2, "last_scored_leg": 1}
+    cfg = config_for(tmp_path, season)
+
+    out = ingest(season, cfg, weeks=[2])
+
+    checks = gates(cfg, season)
+    assert not failed(checks), failed(checks)
+    assert not any("WARNING" in line for line in out), out
+    by_name = {c.name: c for c in checks}
+    assert by_name["every week so far of matchups ingested"].detail == "1/1 weeks present"
+    assert by_name["every completed week ingested"].detail == "0/0 weeks present"

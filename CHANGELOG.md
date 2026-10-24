@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 — 2026-10-24
+
+- Honor Sleeper's configured `start_week` for scheduled ingest, reconciliation,
+  completed-week coverage, and current-week tipoff checks. This supports leagues
+  that draft after NBA week 1 and begin play in week 2.
+- The league still needs `start_week=2` set in Sleeper after its draft settings
+  are available; verify the returned setting before relying on live advice.
+- Validated with 728 passing tests (1 skipped), Ruff checks, and 0.1.2 wheel and
+  source distribution builds.
+
 ## 0.1.1 — 2026-10-17
 
 - Pass `--dashboard-db` through the CLI to the web server, so the 2026 advice

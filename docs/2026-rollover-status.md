@@ -32,9 +32,12 @@ before ingest. The legacy date-only `player_status` rows remain less precise tha
 ## First ingest and live pages
 
 The 2026 league points to prior league `1283214955830575104`. Scoring, six
-starting slots, start week 1, playoff start week 22, and eight playoff teams
-match 2025. `last_scored_leg` is currently absent while the league is
-`pre_draft`; recheck it after the draft.
+starting slots, playoff start week 22, and eight playoff teams match 2025.
+On 2026-10-24, Sleeper still reports `pre_draft`, `start_week=1`, and `leg=1`.
+The league plans to draft on 2026-10-25 and begin scoring in week 2. Set
+`start_week=2` in Sleeper if available; the 0.1.2 week gates honor that setting.
+`last_scored_leg` is absent while the league is `pre_draft`; recheck it after
+the draft.
 
 The first `ingest --weeks current` completed for week 1. `db_identity` names the
 2026 league and season. The first new injury capture had 2,176 players seen and
