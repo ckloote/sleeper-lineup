@@ -50,7 +50,13 @@ from datetime import UTC, datetime
 import numpy as np
 
 from lockin import __version__, calendar, clock
-from lockin.backtest import DEFAULT_PATHS, greedy_thresholds, starter_dnp_scale
+from lockin.backtest import (
+    DEFAULT_PATHS,
+    greedy_thresholds,
+    starter_dnp_scale,
+    starter_rows,
+    voided_weeks,
+)
 from lockin.core.policy import Game
 from lockin.core.projections import (
     EWMAProjectionSource,
@@ -331,19 +337,13 @@ def load_context(
 
     # The started-player hazard correction, fit per week on strictly earlier
     # weeks. Live this is where the real injury feed replaces the proxy (§15).
-    starter_rows = np.zeros(len(panel.day), dtype=bool)
-    for (week, _), starters in lineups.items():
-        for pid in starters:
-            hist = panel.histories.get(pid)
-            if hist is None:
-                continue
-            base = panel.offsets[pid]
-            starter_rows[base + np.nonzero(hist.week == week)[0]] = True
+    # A voided week's lineups were filled after its games and are not evidence.
+    started = starter_rows(panel, lineups, voided_weeks(conn))
 
     panel_weeks = np.concatenate([h.week for h in panel.histories.values()])
     dnp_scale = {
         int(week): starter_dnp_scale(
-            panel, source, starter_rows, int(week), int(panel.day[panel_weeks == week].min())
+            panel, source, started, int(week), int(panel.day[panel_weeks == week].min())
         )
         for week in np.unique(panel_weeks)
         if (panel_weeks == week).any()

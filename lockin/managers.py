@@ -87,7 +87,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from lockin.backtest import greedy_thresholds, player_games, starter_dnp_scale
+from lockin.backtest import (
+    greedy_thresholds,
+    player_games,
+    starter_dnp_scale,
+    starter_rows,
+    voided_weeks,
+)
 from lockin.core.eligibility import NoValidLineup, assign_slots
 from lockin.core.policy import Game
 from lockin.core.projections import EWMAProjectionSource, ProjectionParams, SeasonPanel
@@ -445,16 +451,11 @@ def evaluate_managers(
 
     # Same point-in-time starter correction the backtest uses (§15): a lineup
     # slot is evidence of availability the hazard cannot otherwise see.
-    starter_rows = np.zeros(len(panel.day), dtype=bool)
-    for (week, _), starters in lineups.items():
-        for pid in starters:
-            hist = panel.histories.get(pid)
-            if hist is not None:
-                starter_rows[panel.offsets[pid] + np.nonzero(hist.week == week)[0]] = True
+    started = starter_rows(panel, lineups, voided_weeks(conn))
     panel_weeks = np.concatenate([h.week for h in panel.histories.values()])
     dnp_scale = {
         int(w): starter_dnp_scale(
-            panel, source, starter_rows, int(w), int(panel.day[panel_weeks == w].min())
+            panel, source, started, int(w), int(panel.day[panel_weeks == w].min())
         )
         for w in np.unique(panel_weeks)
     }

@@ -218,6 +218,49 @@ def starter_dnp_scale(
     return float(np.clip(realised / predicted, *bounds))
 
 
+def voided_weeks(conn: sqlite3.Connection) -> set[int]:
+    """Weeks the commissioner zeroed: every team's override total 0, points scored anyway.
+
+    Sleeper cannot start a league after the NBA's first fantasy week. A league
+    that drafts late plays week 1 regardless, with lineups filled after most
+    of its games, and the commissioner sets every team's `custom_points` to 0
+    so it does not count. That is 2026-27: drafted on 10-25, the last day of
+    week 1, and week 1 zeroed. Read from the season's own final polls, so a
+    replay of a season without one is unaffected.
+    """
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT week FROM weekly_matchup_teams_latest GROUP BY week"
+            " HAVING COUNT(*) = SUM(custom_points = 0) AND SUM(points > 0) > 0"
+        )
+    }
+
+
+def starter_rows(
+    panel: SeasonPanel,
+    lineups: dict[tuple[int, int], list[str]],
+    voided: set[int] = frozenset(),
+) -> np.ndarray:
+    """The panel's player-games played from a starting slot: `starter_dnp_scale`'s evidence.
+
+    A slot is evidence because it is filled before the games, by a manager who
+    read the injury report. A voided week's slots were filled after: its
+    2026-27 week 1 starters sat 1.2% of their games against 20.2% for the
+    bench, and 8.5% for 2025-26's real starters. Mixed into the correction it
+    would make every starter look safer than he is, so those weeks are left out.
+    """
+    rows = np.zeros(len(panel.day), dtype=bool)
+    for (week, _), starters in lineups.items():
+        if week in voided:
+            continue
+        for pid in starters:
+            hist = panel.histories.get(pid)
+            if hist is not None:
+                rows[panel.offsets[pid] + np.nonzero(hist.week == week)[0]] = True
+    return rows
+
+
 def greedy_thresholds(
     source: EWMAProjectionSource,
     sleeper_id: str,
@@ -355,14 +398,7 @@ def run_backtest(
 
     # A lineup slot is evidence of availability the model cannot otherwise see.
     # Fit the correction per week from strictly earlier weeks.
-    starter_rows = np.zeros(len(panel.day), dtype=bool)
-    for (week, _), starters in lineups.items():
-        for pid in starters:
-            hist = panel.histories.get(pid)
-            if hist is None:
-                continue
-            base = panel.offsets[pid]
-            starter_rows[base + np.nonzero(hist.week == week)[0]] = True
+    started = starter_rows(panel, lineups, voided_weeks(conn))
 
     week_start = {
         week: int(panel.day[panel_weeks == week].min())
@@ -370,7 +406,7 @@ def run_backtest(
         if (panel_weeks == week).any()
     }
     dnp_scale = {
-        week: starter_dnp_scale(panel, source, starter_rows, week, day)
+        week: starter_dnp_scale(panel, source, started, week, day)
         for week, day in week_start.items()
     }
 
