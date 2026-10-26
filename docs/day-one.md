@@ -171,6 +171,14 @@ The playoff boundary and scored-week range still need to match the supported str
 `last_scored_week()` reads the setting rather than a constant, so `lockin managers` is
 safe either way.
 
+In practice Sleeper would not start 2026-27 later: the league drafted on 10-25, the last
+day of week 1, kept `start_week 1`, and played week 1 with lineups filled after most of
+its games. The commissioner then zeroed it, setting every team's `custom_points` to 0 and
+leaving the player scores alone. Week 1 still counts for ingest and the gates, and its
+scores validate live scoring. Lockin reads the zeroing from the final polls
+(`backtest.voided_weeks`) and leaves that week's lineups out of the started-player
+correction, since slots filled after the games say nothing about who was available.
+
 Every `lockin ingest` also prints the same numbers on its `structure` line, and a
 `WARNING` beneath it when they disagree with `lockin/config.py` — so a format change made
 mid-season is caught by the cron log too, not only by this step.
@@ -336,9 +344,12 @@ uv run lockin digest
 
 **On opening morning the pass is an abstention.** With no games played it says
 `insufficient history`, and it keeps saying so — with a count — until 400 player-games
-have been played league-wide, which in 2025-26 was the Monday of week 2. It used to report
-both projected totals as 0.0, P(win) 50% and every threshold 0.0, which is what this step's
-old "P(win) near 50%" pass criterion was unknowingly accepting (review finding 3).
+have been played league-wide, which in 2025-26 was the Monday of week 2. The count is of
+currently rostered players, so a late draft starts it later: in 2026-27, after the 10-25
+draft, it was 317 on the Monday of week 2, and the first advice is expected Wednesday
+morning. It used to report both projected totals as 0.0, P(win) 50% and every threshold
+0.0, which is what this step's old "P(win) near 50%" pass criterion was unknowingly
+accepting (review finding 3).
 
 From then on it advises, reading what you have banked from the morning's matchup poll
 (`lockin/state.py`). It prints where the state came from: `read from the <time> poll`.
@@ -384,8 +395,11 @@ for another roster is not tracked. Yours needs a non-abstained, automatically in
 run every calendar morning, with every starter's reading checked against the final
 scores, except Monday, which needs only a run: nothing is banked before a week's first
 game, and Sleeper may not have rolled its week over by the 06:30 ingest, which leaves
-Monday's digest to abstain. A starter whose final score cannot settle a morning's reading
-— one that ties his final game with an earlier one, or is missing or unexplained — is
+Monday's digest to abstain. Any later morning on which no starter has yet played twice —
+usually Tuesday — likewise needs only a run, because no lock can show yet. That keeps a
+cold-start abstention on the Tuesday of week 2 from costing the gate a week. A starter
+whose final score cannot settle a morning's reading — one that ties his final game with
+an earlier one, or is missing or unexplained — is
 listed as unverified and blocks the week. Before his second game no lock can show, so
 those mornings are checked whatever his final score says. In 2025-26, 18 of 250
 roster-weeks had such a starter. The starters checked are those of the week's final

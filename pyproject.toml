@@ -1,6 +1,6 @@
 [project]
 name = "lockin"
-version = "0.1.2"
+version = "0.1.3"
 description = "Decision-support engine for a Sleeper NBA fantasy team in Lock-In mode"
 requires-python = ">=3.12,<3.13"
 dependencies = [

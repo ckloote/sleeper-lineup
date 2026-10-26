@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — 2026-10-26
+
+- Sleeper kept `start_week=1`. The league drafted on the last day of week 1 and
+  the commissioner zeroed that week, setting every team's `custom_points` to 0.
+  A week zeroed that way is now detected from its final polls, and its lineups,
+  filled after its games, are left out of the started-player DNP correction:
+  week 1's starters sat 1.2% of their games, against 8.5% for real starters in
+  2025-26. One shared mask now serves the digest, the backtest and the manager
+  scorecards. 2025-26 has no such week, so its replays are unchanged.
+- The shadow gate owes a morning only a run, as on Monday, when no starter has
+  yet played twice and so no lock can show. A cold-start abstention on the
+  Tuesday of week 2 no longer keeps that week from being clean.
+- Deploy before 2026-11-02: week 3's digest is the first that would have fit
+  the correction with week 1 included. No schema change or migration.
+- Validated with 735 passing tests (1 skipped), Ruff checks, and 0.1.3 wheel and
+  source distribution builds.
+
 ## 0.1.2 — 2026-10-24
 
 - Honor Sleeper's configured `start_week` for scheduled ingest, reconciliation,
