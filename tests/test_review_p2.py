@@ -286,7 +286,9 @@ def test_twelve_abstentions_fail_and_reruns_recover(history):
         )
         report = shadow.build(conn, season.season, 1)
         assert not report.gate()[0]
-        assert sum(len(w.failed_inference) for w in report.weeks) == 12
+        # Three of the twelve are owed only a run: 10-27, 11-03 and 11-04, when
+        # no starter had yet played twice and no lock could show.
+        assert sum(len(w.failed_inference) for w in report.weeks) == 9
         for r in originals:
             if r["as_of"] in ("2026-10-26", "2026-11-02"):
                 continue
@@ -354,6 +356,33 @@ def test_monday_is_owed_a_run_not_an_inference(history):
         report = shadow.build(conn, season.season, 1)
         assert report.weeks[-1].mornings_missing == ["roster 1 2026-11-02"]
         assert not report.gate()[0]
+
+
+def test_a_morning_before_anyone_has_played_twice_is_owed_a_run_too(history):
+    """2026-27's cold start held advice back through the Tuesday of week 2, the
+    first week that counted. No starter had played twice by then, so no lock
+    could show and the reading had nothing to get right — but the abstention
+    kept week 2 from being clean, and the gate a week further off."""
+    season, cfg = history
+    cold = "insufficient history: 390 player-games played so far. No advice today."
+
+    def abstain(day):
+        conn.execute(
+            "UPDATE digest_runs SET abstained=1, state_source=NULL, note=? WHERE as_of=?",
+            (cold, day),
+        )
+
+    with connect(cfg) as conn:
+        abstain("2026-10-27")  # 1002 has played once, on Monday; nobody twice
+        report = shadow.build(conn, season.season, 1)
+        assert report.gate()[0], shadow.render(report)
+        abstain("2026-10-28")  # 1002 has played Monday and Tuesday
+        report = shadow.build(conn, season.season, 1)
+        assert report.weeks[0].failed_inference == ["roster 1 2026-10-28"]
+        assert not report.gate()[0]
+        conn.execute("DELETE FROM digest_runs WHERE as_of='2026-10-27'")
+        missing = shadow.build(conn, season.season, 1).weeks[0].mornings_missing
+        assert "roster 1 2026-10-27" in missing  # still owed a run
 
 
 def test_finalized_weeks_are_named_before_any_live_run(history):

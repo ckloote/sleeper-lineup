@@ -283,6 +283,14 @@ def verdict(action: str, day: int, truth: Truth | None) -> tuple[str, str]:
     return FOLLOWED, "passed"
 
 
+def lock_can_show(truth: Truth, known_through: int) -> bool:
+    """Could a poll read the morning after ``known_through`` show him locked?
+
+    Only once he has played again: two of his games on or before it.
+    """
+    return sum(d <= known_through for d in truth.game_days) >= 2
+
+
 def expected_banked(truth: Truth, known_through: int) -> float | None | bool:
     """What a poll read on the morning after ``known_through`` should show as banked.
 
@@ -293,7 +301,7 @@ def expected_banked(truth: Truth, known_through: int) -> float | None | bool:
     So until his second game has tipped, nothing can show, and nothing banked
     is the right reading whatever the final score says — or fails to.
     """
-    if sum(d <= known_through for d in truth.game_days) < 2:
+    if not lock_can_show(truth, known_through):
         return None
     if truth.days is None:
         return False
@@ -420,6 +428,12 @@ def _mornings(
     first game, so there is no state to read, and its digest may abstain for want
     of the week itself: Sleeper need not have rolled over by the 06:30 ingest,
     which then fetches only the week just gone.
+
+    So is any morning on which no starter can yet show a lock: none has played
+    twice, so the reading has nothing to get right. Usually that is Tuesday. In
+    2026-27 it mattered: the cold start held advice back through the Tuesday of
+    week 2, the first week that counted, and that abstention would otherwise
+    have kept the week from being clean.
     """
     if opening is None or first_live is None:
         summary.partial = True
@@ -430,15 +444,16 @@ def _mornings(
         return
     if start > monday:
         summary.partial = True
+    starters = [t for (w, rid, _), t in truth.items() if w == week and rid == roster_id]
     day = monday
     while day <= sunday:
         label = f"roster {roster_id} {day.isoformat()}"
+        known_through = day.toordinal() - 1
         morning = [r for r in runs if r["as_of"] == day.isoformat()]
         inferred = [r for r in morning if r["state_source"] == "inferred" and not r["abstained"]]
-        checkable = any(
-            expected_banked(t, day.toordinal() - 1) is not False
-            for (w, rid, _), t in truth.items()
-            if w == week and rid == roster_id
+        checkable = any(expected_banked(t, known_through) is not False for t in starters)
+        nothing_to_show = bool(starters) and not any(
+            lock_can_show(t, known_through) for t in starters
         )
         if inferred and checkable:
             pass
@@ -449,7 +464,7 @@ def _mornings(
             summary.exemptions.append(label)
         elif not morning:
             summary.mornings_missing.append(label)
-        elif day == monday:
+        elif day == monday or nothing_to_show:
             pass
         elif inferred:
             summary.uncheckable.append(label)
