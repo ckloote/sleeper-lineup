@@ -1,3 +1,3 @@
 """Sleeper NBA Lock-In lineup decision engine."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"

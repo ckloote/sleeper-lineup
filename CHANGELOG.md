@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.4 — 2026-10-29
+
+- A lock shows in the matchup poll only once the player has played again. So a
+  player with a night off is called on the same game two mornings running, and
+  a lock made after the first call is invisible on the second. On 10-29 the
+  digest repeated Wednesday's LOCK calls on Sabonis and Coward, and counted
+  both as unlocked in its banked total, P(win) and thresholds. A repeated call
+  now says "Wed said LOCK; ignore if you locked". The full digest adds a
+  footnote naming who the totals count as unlocked, and the advice page marks
+  the row, the heading and the banked line. The digest does not assume the
+  earlier call was taken, so a missed check-in still gets the call. Only live
+  runs from earlier mornings count. With `--locked` there is no reminder.
+- No schema change or migration. The page computes the mark from the runs it
+  already stores, so restarting `lockin-serve` marks the 10-29 run's calls too.
+- A page test stamped a replay with the wall clock. From 2026-10-28 13:00 UTC
+  that replay outranked the synthetic live run the test then read back, so the
+  test failed. The replay now has a fixed stamp.
+- Validated with 744 passing tests (1 skipped), Ruff checks, and the 10-29
+  digest and page rerun from a copy of the 2026 database: same numbers, both
+  calls marked.
+
 ## 0.1.3 — 2026-10-26
 
 - Sleeper kept `start_week=1`. The league drafted on the last day of week 1 and
