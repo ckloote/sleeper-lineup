@@ -679,15 +679,17 @@ def test_a_replay_without_calls_is_still_labelled_historical(tmp_path, shape):
 
 def test_a_replayed_monday_is_labelled_historical_and_a_live_run_is_not(live):
     season, cfg = live
+    now = datetime.combine(season.today, datetime.min.time(), UTC) + timedelta(hours=13)
     with connect(cfg) as conn:
         replay = digest.morning(conn, season.season, 1, "2026-10-26", n_sims=30, params=SCALED)
         assert replay.retrospective and not replay.calls and replay.rules
-        digest.persist(conn, replay)
+        # Stamped before the live run, as the test means it. Left to the wall
+        # clock, the replay outranked that run from 2026-10-28 13:00 UTC on.
+        digest.persist(conn, replay, now=now - timedelta(hours=1))
         page = advice.render(advice.latest_run(conn, 1))
         assert "Historical replay" in page and "Tonight" not in page
         report = morning(conn, season)
         assert not report.abstained and report.rules
-        now = datetime.combine(season.today, datetime.min.time(), UTC) + timedelta(hours=13)
         digest.persist(conn, report, now=now)
         page = advice.render(advice.latest_run(conn, 1), today=report.as_of, now=now)
     assert "Historical replay" not in page and "Tonight" in page
