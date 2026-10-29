@@ -1,7 +1,7 @@
-"""Ingest runs: when the data under a digest was last complete.
+"""Runs: when the data under a digest was last complete, and what earlier digests said.
 
-The ingest writes, the digest and the advice page read. Kept apart from both so
-neither has to import the other.
+The ingest and the digest write, the digest and the advice page read. Kept apart
+from both so neither has to import the other.
 """
 
 from __future__ import annotations
@@ -73,3 +73,32 @@ def stats_fetch(conn: sqlite3.Connection, run_id: int, week: int) -> sqlite3.Row
     return conn.execute(
         "SELECT * FROM ingest_stats_fetches WHERE run_id = ? AND week = ?", (run_id, week)
     ).fetchone()
+
+
+def earlier_lock_calls(
+    conn: sqlite3.Connection, roster_id: int, week: int, as_of: str, before: str
+) -> dict[tuple[str, int], str]:
+    """Each game an earlier morning's digest said to LOCK, and the first morning it did.
+
+    Keyed by (sleeper_id, the game's day ordinal), as `recommendations.for_day`
+    stores a call. The poll cannot show a lock until the player has played again
+    (`lockin.state`), so one with a night off is called on the same game the
+    next morning too. This is how that second call knows it is a second call.
+
+    Only live runs for mornings before ``as_of``, made before ``before``, count:
+    a replay was never advice, a rerun the same morning is not a previous call,
+    and a run made after this one is the future.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.sleeper_id, c.for_day, MIN(r.as_of)
+          FROM recommendations c
+          JOIN digest_runs r ON r.run_id = c.run_id
+         WHERE r.roster_id = ? AND r.week = ? AND r.as_of < ? AND r.generated_at < ?
+           AND COALESCE(r.retrospective, 0) = 0
+           AND c.action = 'LOCK'
+         GROUP BY c.sleeper_id, c.for_day
+        """,
+        (roster_id, week, as_of, before),
+    )
+    return {(sid, day): first for sid, day, first in rows}

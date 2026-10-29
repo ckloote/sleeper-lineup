@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 
 from lockin import clock
 from lockin.projections import date_of, day_index
+from lockin.store import runs
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,9 @@ class Item:
     """When the call stops meaning anything: his next tip."""
     p_clear: float | None = None
     """A standing rule's chance of firing, as the notification printed it."""
+    said_lock_on: str | None = None
+    """For a call, the first earlier morning whose digest said LOCK on this same
+    game, as the notification printed it (`LockCall.said_lock_on`)."""
 
     def expired(self, now: datetime) -> bool:
         return self.deadline_status(now) == "closed"
@@ -186,6 +190,17 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
                 roster_id,
             ),
         )
+    # Looked up as the digest looked it up, from the runs before this one, so the
+    # page marks the calls the notification marked. They are inserted, never
+    # replaced, so the answer cannot have moved since.
+    said_lock: dict[tuple[str, int], str] = {}
+    if not (row["state_supplied"] or get("state_source") == "supplied"):
+        try:
+            said_lock = runs.earlier_lock_calls(
+                conn, roster_id, row["week"], row["as_of"], row["generated_at"]
+            )
+        except sqlite3.OperationalError:
+            pass  # a database too old to have the columns has no earlier calls to name
     items = [
         Item(
             sleeper_id=r["sleeper_id"],
@@ -198,6 +213,11 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
             rationale=r["rationale"] or "",
             expires_utc=r["expires_utc"] if "expires_utc" in r.keys() else None,
             p_clear=r["p_clear"] if "p_clear" in r.keys() else None,
+            said_lock_on=(
+                said_lock.get((r["sleeper_id"], r["for_day"]))
+                if r["action"] in ("LOCK", "PASS")
+                else None
+            ),
         )
         for r in conn.execute(
             f"""
@@ -424,6 +444,14 @@ def _inputs(run: Run) -> str:
     )
 
 
+def _said_lock(item: Item) -> str:
+    """The same call made on an earlier morning, which the poll cannot yet confirm."""
+    if not item.said_lock_on:
+        return ""
+    day = datetime.fromisoformat(item.said_lock_on).strftime("%A")
+    return f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; ignore if you locked him</div>"
+
+
 def _deadline(item: Item, now: datetime) -> str:
     if item.deadline_status(now) == "unknown deadline":
         return "<div class=deadline>unknown deadline — unavailable historical advice</div>"
@@ -473,7 +501,8 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             f'<td class=act><span class="tag {"lock" if i.action == "LOCK" else "pass"}">'
             f"{i.action}</span></td>"
             f"<td class=who>{html.escape(i.name)}"
-            f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}</td>"
+            f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}"
+            f"{_said_lock(i)}</td>"
             "<td class=num>"
             f"{'ride' if i.threshold is None else f'score {i.threshold:g} or more'}</td>"
             f"<td class=num>{'' if i.edge is None else f'{i.edge:.1%}'}</td>"
@@ -491,6 +520,13 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             hint = (
                 "These calls reconstruct a past morning;"
                 " their deadlines do not verify a live window."
+            )
+        elif locks and all(i.said_lock_on for i in locks):
+            heading = "Lock now &mdash; unless you already did"
+            hint = (
+                "Each LOCK below was called on an earlier morning too, and a lock shows"
+                " in the poll only once he has played again. If you took it, skip it."
+                " The rest are worth riding."
             )
         elif locks:
             heading = "Lock now &mdash; before each player's next tip"
@@ -569,6 +605,11 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
                 + (f" &mdash; {who}" if who else "")
                 + "</div>"
             )
+        # Beside the banked total, because it is the total they are missing from.
+        unseen = ""
+        if repeats := [html.escape(i.name) for i in run.calls if i.said_lock_on]:
+            until = "he plays" if len(repeats) == 1 else "each plays"
+            unseen = f"<div>counted as unlocked until {until} again: {', '.join(repeats)}</div>"
         # Each line guarded on its own field rather than on `p_win` standing in
         # for all of them. A row carrying a win probability and nothing else is
         # not a shape `persist` produces, but this is rendered into an HTTP
@@ -581,7 +622,7 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             f"<div class=pwin>{run.p_win:.0%}</div>"
             f"<div class=pwinlabel>chance to win, roster {run.roster_id}"
             f" v {run.opponent_roster_id}</div>"
-            f"{projected}{margin}{banked}</div>"
+            f"{projected}{margin}{banked}{unseen}</div>"
         )
 
     prompt = ""
@@ -597,9 +638,9 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
     elif run.state_source == "inferred":
         provenance = (
             f"Banked state was read from the matchup poll at"
-            f" {html.escape(run.poll_observed_at or '?')}. Last night's games are the calls"
-            " above, whatever you did with them; a lock you made on one just makes its"
-            " row moot."
+            f" {html.escape(run.poll_observed_at or '?')}. A lock shows there only once he"
+            " has played again, so every open window is a call above, whatever you did"
+            " with it; a lock you made on one just makes its row moot."
         )
     else:
         provenance = (
@@ -645,6 +686,7 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
   td.act {{ width:4.4rem; }}
   .who {{ font-weight:600; }}
   .game, .deadline {{ font-weight:400; font-size:.75rem; color:var(--mute); }}
+  .said {{ font-weight:400; font-size:.75rem; }}
   tr.expired td {{ opacity:.45; }}
   .watch {{ padding-left:1.1rem; margin:.3rem 0; font-size:.9rem; }}
   .tag {{ display:inline-block; padding:.12rem .45rem; border-radius:4px;

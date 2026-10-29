@@ -123,6 +123,11 @@ class LockCall:
     expires_utc: str | None = None
     """His next tipoff: when this window closes and the call stops meaning
     anything (review finding 7). None when the schedule has no time for it."""
+    said_lock_on: str | None = None
+    """The first earlier morning whose digest said LOCK on this same game, if one
+    did. The poll cannot show that lock until he plays again, so this call and
+    every number around it treat him as unlocked; the digest says so rather than
+    assuming the earlier call was taken."""
 
     @property
     def edge(self) -> float:
@@ -907,6 +912,16 @@ def build(
     # One per player, not one night per team (review finding 6): a player who
     # played Monday and next plays Thursday can still bank Monday on Wednesday,
     # whatever his teammates did on Tuesday. The window closes at his next tip.
+    #
+    # So Tuesday's digest called it too, and a lock made on Tuesday cannot show
+    # in the poll before Thursday. The earlier call is named, not assumed taken:
+    # assuming it would drop the call on the morning after a missed check-in.
+    # A supplied state already says what was taken.
+    said_lock = (
+        {}
+        if digest.state_source == SOURCE_SUPPLIED
+        else runs.earlier_lock_calls(conn, roster_id, week, as_of, before)
+    )
     for sleeper_id, games in mine.items():
         if sleeper_id in locked:
             continue
@@ -961,6 +976,7 @@ def build(
                 p_win_pass=call.p_win_pass,
                 break_even=break_even,
                 expires_utc=expires,
+                said_lock_on=said_lock.get((sleeper_id, game.day)),
             )
         )
     digest.calls.sort(key=lambda c: -c.score)
@@ -1109,6 +1125,9 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             )
             out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
             out.append(f"        {need}")
+            if call.said_lock_on:
+                said = datetime.fromisoformat(call.said_lock_on).strftime("%a")
+                out.append(f"        {said} said LOCK; ignore if you locked")
 
     by_night: dict[int, list[StandingRule]] = defaultdict(list)
     for rule in digest.rules:
@@ -1137,6 +1156,18 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             f"  {digest.margin['q10']:+.0f} / {digest.margin['q50']:+.0f}"
             f" / {digest.margin['q90']:+.0f}"
         )
+        # The calls say what to do; this says what the totals above do not know.
+        if repeats := [_short(c.name, 20) for c in digest.calls if c.said_lock_on]:
+            *rest, last = repeats
+            who, verb = (f"{', '.join(rest)} and {last}", "count") if rest else (last, "counts")
+            out.append("")
+            out.extend(
+                textwrap.wrap(
+                    "A lock shows in the poll only once he has played again, so"
+                    f" {who} {verb} as unlocked in every number here.",
+                    WIDTH,
+                )
+            )
         out.append(
             "\nForward nights assume you act on none of"
             "\nthe nights in between (§7.2) — the point"

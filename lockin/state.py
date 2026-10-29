@@ -10,10 +10,17 @@ The matchup poll says what actually happened, one game late. A player's
 counted value freezes when he is locked, so once he has played again the poll
 shows whether an earlier game was banked: counted equals an earlier game's score
 and not the latest one's. That is a **closed window** — decided, and knowable.
-Last night's game is the **open window**: counted equals its score whether or
+His latest game is the **open window**: counted equals its score whether or
 not it was locked, and the poll cannot tell yet. Those are exactly the calls
 the digest makes, so nothing is lost by not knowing them — and a user who
 already locked one simply ignores that line.
+
+The window stays open until his next tip, not just for one morning. A player
+with a night off is called on the same game two mornings running, and a lock
+made after the first call is invisible on the second, to the banked total and
+every number built on it. The digest names the earlier call
+(`LockCall.said_lock_on`) rather than assuming it was taken. Assuming it would
+drop the call on exactly the morning after a missed check-in.
 
 `core.locks.infer_lock` does the reading. It was written for completed weeks
 and is applied here to the week so far, where "his final game" means his latest

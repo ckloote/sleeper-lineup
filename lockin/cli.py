@@ -943,6 +943,7 @@ def digest(
                             "p_win_lock": c.p_win_lock,
                             "p_win_pass": c.p_win_pass,
                             "expires_utc": c.expires_utc,
+                            "said_lock_on": c.said_lock_on,
                         }
                         for c in report.calls
                     ],
@@ -974,7 +975,8 @@ def digest(
         source = {
             "supplied": "banked state as given on the command line",
             "inferred": f"banked state read from the {report.poll_observed_at} poll;\n"
-            "  last night's games are the calls above, whatever you did with them",
+            "  a lock shows there only once he has played again, so every open\n"
+            "  window is a call above, whatever you did with it",
             "assumed": "banked state ASSUMES you followed this engine on every\n"
             "  closed window — a replay with no poll from that morning;\n"
             "  pass --locked when you know it (§20)",

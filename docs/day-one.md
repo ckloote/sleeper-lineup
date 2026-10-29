@@ -372,8 +372,9 @@ it has never been observed live.
 
 Until the gate passes, check it by eye each morning, because the report can only judge a
 week once Sleeper has scored it. Compare the `BANKED` list with the locks you actually made.
-They should agree on every player whose next game has been played since he was locked. Last
-night's locks are not in it, by design: last night's games are the calls. A disagreement
+They should agree on every player whose next game has been played since he was locked. A lock
+on a game he has not played since is not in it, by design: that game is still a call, marked
+"said LOCK" when an earlier morning made the same call. A disagreement
 means the reading is wrong. Pass `--locked` and fix `lockin/state.py` before relying on it.
 
 Each Monday, once the week is scored:

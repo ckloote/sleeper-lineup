@@ -12,6 +12,11 @@ synthetic season whose schedule is built to expose it:
 - **Finding 7.** A call stays actionable only until that player's next tip,
   and a run before last night's slate is final must not read it as final.
 
+And one that followed from finding 6 and was seen live on 2026-10-29: a window
+open across two mornings is called on both, and a lock made after the first
+call cannot show in the poll on the second. The repeat is named, not assumed
+taken.
+
 The week built below is week 2 (Mon 26 Oct to Sun 1 Nov). The digest is read
 on Wednesday morning, so Tuesday is the last night observed.
 """
@@ -19,11 +24,13 @@ on Wednesday morning, so Tuesday is the last night observed.
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from live_fixture import OPENING, TEAMS, Fixture, SyntheticSeason, config_for, connect, ingest
 
+from lockin import advice
 from lockin import digest as digest_mod
 from lockin.core.policy import Game
 from lockin.core.projections import ProjectionParams
@@ -271,6 +278,124 @@ def test_the_rendered_calls_name_their_deadline(week):
     text = digest_mod.render(week.digest())
     assert "BEFORE WED 7:30PM TIP" in text, text
     assert all(len(line) <= digest_mod.WIDTH for line in text.splitlines())
+
+
+# ------------------------------------------------- a call made the morning before
+
+TUESDAY_RUN = "2026-10-27T13:00:00+00:00"
+
+
+def said_on(week, as_of: date = TUE, *, lock=True, at=TUESDAY_RUN, retrospective=False):
+    """Record a digest run for the morning of ``as_of`` that called A's Monday game."""
+    earlier = digest_mod.Digest(
+        as_of=as_of.isoformat(),
+        week=2,
+        roster_id=1,
+        opponent_roster_id=2,
+        known_through=as_of.toordinal() - 1,
+        retrospective=retrospective,
+        calls=[
+            digest_mod.LockCall(
+                sleeper_id=week.a,
+                name="A",
+                day=MON.toordinal(),
+                score=week.score(week.a, 0),
+                lock=lock,
+                p_win_lock=0.6,
+                p_win_pass=0.4,
+                break_even=0.0,
+            )
+        ],
+    )
+    with connect(week.cfg) as conn:
+        digest_mod.persist(conn, earlier, now=datetime.fromisoformat(at))
+
+
+def test_a_lock_called_the_morning_before_is_named_not_assumed_taken(week):
+    """Monday's game was called on Tuesday too. The poll cannot show a Tuesday lock
+    before Thursday, so Wednesday still calls it and says it is a repeat."""
+    said_on(week)
+
+    report = week.digest()
+
+    calls = {c.sleeper_id: c for c in report.calls}
+    assert calls[week.a].said_lock_on == TUE.isoformat()
+    assert week.a not in report.banked, "a printed call is not evidence it was taken"
+    assert calls[week.b].said_lock_on is None and calls[week.d].said_lock_on is None
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        pytest.param({"lock": False}, id="it said pass"),
+        pytest.param({"retrospective": True}, id="a replay, never advice"),
+        pytest.param({"as_of": WED, "at": "2026-10-28T12:00:00+00:00"}, id="this morning"),
+        pytest.param({"at": "2026-10-28T14:00:00+00:00"}, id="made after this run"),
+    ],
+)
+def test_only_an_earlier_mornings_live_lock_call_is_a_repeat(week, earlier):
+    said_on(week, **earlier)
+
+    report = week.digest()
+
+    assert {c.sleeper_id: c.said_lock_on for c in report.calls}[week.a] is None
+
+
+def test_a_supplied_state_already_says_what_was_taken(week):
+    said_on(week)
+
+    report = week.digest(locked={})
+
+    assert week.a in {c.sleeper_id for c in report.calls}
+    assert all(c.said_lock_on is None for c in report.calls)
+
+
+def test_the_notification_names_the_repeat_and_the_digest_its_cost(week):
+    said_on(week)
+    report = week.digest()
+
+    full, compact = digest_mod.render(report), digest_mod.render(report, compact=True)
+
+    for text in (full, compact):
+        assert "Tue said LOCK; ignore if you locked" in text, text
+        assert all(len(line) <= digest_mod.WIDTH for line in text.splitlines())
+    assert "counts as unlocked in every number here" in " ".join(full.split())
+    assert "counts as unlocked" not in compact, "the phone has no totals to qualify"
+
+
+def test_the_page_marks_the_call_the_notification_marked(week):
+    said_on(week)
+    report = week.digest()
+    with connect(week.cfg) as conn:
+        digest_mod.persist(conn, report, now=datetime.fromisoformat("2026-10-28T13:00:00+00:00"))
+        run = advice.latest_run(conn, 1)
+
+    page = advice.render(run, today=WED.isoformat(), now=datetime(2026, 10, 28, 14, tzinfo=UTC))
+
+    assert {i.sleeper_id: i.said_lock_on for i in run.calls} == {
+        c.sleeper_id: c.said_lock_on for c in report.calls
+    }
+    assert "Tuesday&rsquo;s digest said LOCK" in page
+    assert "counted as unlocked until he plays again" in page
+
+
+def test_a_night_whose_only_locks_are_repeats_says_so_in_the_heading(week):
+    said_on(week)
+    report = week.digest()
+    with connect(week.cfg) as conn:
+        digest_mod.persist(conn, report, now=datetime.fromisoformat("2026-10-28T13:00:00+00:00"))
+        run = advice.latest_run(conn, 1)
+    now = datetime(2026, 10, 28, 14, tzinfo=UTC)
+
+    def heading(lock: set[str]):
+        items = tuple(
+            replace(i, action="LOCK" if i.sleeper_id in lock else "PASS") if i.is_call else i
+            for i in run.items
+        )
+        return advice.render(replace(run, items=items), today=WED.isoformat(), now=now)
+
+    assert "Lock now &mdash; unless you already did" in heading({week.a})
+    assert "Lock now &mdash; before each player" in heading({week.a, week.b})
 
 
 def test_week_uses_real_team_codes():
