@@ -126,6 +126,27 @@ unverifiable readings or discrepancies keep the gate closed. Monday needs a run
 but can abstain before the league rolls over. See the
 [exact gate rules](docs/day-one.md#7-first-digest--and-the-first-week-which-it-will-decline-to-advise-on).
 
+### Bench-aware calls (experimental, off by default)
+
+By default a call compares banking tonight's score with riding the same player
+to the end of the week. With `LOCKIN_BENCH_AWARE=1` in `.env`, or
+`lockin digest --bench-aware` for one run, passing also counts benching him and
+starting a better bench player who plays later. A call that depends on this
+says `pass keeps slot for <player>`. `WATCH … assumed to start` means the
+projection and P(win) assume a lineup change only you can make. Bench players
+designated Out, IR or Suspended are left out.
+
+Check it before turning it on:
+
+```bash
+uv run --frozen lockin backtest --bench-aware
+```
+
+Enable it only if `rollout+bench` wins no fewer matchups than rollout and zeroes
+no more slots.
+On 2025-26 it does not: it loses about 12 points a week and more matchups,
+because projections overrate bench players by about a fifth. Leave it off.
+
 ### After the season
 
 Keep backups of the database and raw `snapshots/`: Sleeper can rewrite completed

@@ -514,3 +514,66 @@ def test_the_reconstruction_no_longer_consumes_the_calls_it_should_deliver(ctx, 
     sat = digest_mod.build(ctx, roster_id, "2026-01-10")
     calls = {c.sleeper_id: c for c in sat.calls}
     assert calls["1648"].score == 48.5 and calls["1648"].lock
+
+
+# ------------------------------------------------------------- bench-aware
+
+
+def test_bench_aware_digest_names_its_swaps_and_keeps_the_old_one_intact(ctx, roster_id, report):
+    """Off is the old digest; on, every named swap is a real bench player."""
+    off = digest_mod.build(ctx, roster_id, AS_OF, n_sims=200, n_paths=200, bench_aware=False)
+    assert [(c.sleeper_id, c.lock, c.break_even) for c in off.calls] == [
+        (c.sleeper_id, c.lock, c.break_even) for c in report.calls
+    ]
+    assert off.p_win == report.p_win
+    assert all(c.via == () for c in off.calls)
+    assert not off.model.endswith("bench-aware")
+
+    on = digest_mod.build(ctx, roster_id, AS_OF, n_sims=200, n_paths=200, bench_aware=True)
+    assert on.model.endswith("; bench-aware")
+    assert not on.abstained
+    week = on.week
+    bench = set(ctx.benches[(week, roster_id)]) - set(ctx.lineup_ids(week, roster_id))
+    for call in on.calls:
+        assert set(call.via) <= bench
+    for warn in on.warnings:
+        if warn.kind == "bench assumption":
+            assert warn.sleeper_id in bench
+    # With more options the team can only be projected higher.
+    assert on.my_total >= off.my_total - 1.0
+
+
+def test_bench_aware_replay_fields_a_full_lineup(ctx, roster_id):
+    """The replay makes its swaps and still counts one player per slot."""
+    import json
+
+    from lockin.backtest import greedy_thresholds
+    from lockin.rollout import Bench, replay_week
+
+    week = 12
+    starters = ctx.lineup_ids(week, roster_id)
+    games = lambda pid: player_games(ctx.panel, ctx.scores, pid, week)  # noqa: E731
+    mine = {pid: games(pid) for pid in starters if games(pid)}
+    opponent_id = ctx.opponents[(week, roster_id)]
+    theirs = {pid: games(pid) for pid in ctx.lineup_ids(week, opponent_id) if games(pid)}
+    positions = {
+        row[0]: json.loads(row[1])
+        for row in ctx.conn.execute("SELECT sleeper_id, positions FROM players")
+    }
+    bench = Bench.from_lineup(
+        ctx.slot_names[(week, roster_id)],
+        starters,
+        {pid: games(pid) for pid in ctx.benches[(week, roster_id)] if games(pid)},
+        positions,
+    )
+    rng = np.random.default_rng(1)
+    cache = SimulationCache(source=ctx.source, n_sims=200, dnp_scale=ctx.dnp_scale)
+    thresholds = {
+        pid: greedy_thresholds(ctx.source, pid, theirs[pid], week, rng, 200) for pid in theirs
+    }
+    result = replay_week(mine, theirs, thresholds, week, cache, rng, bench=bench)
+    assert len(result.counted) <= len(starters)
+    assert set(result.counted) <= set(starters) | set(bench.games)
+    assert set(result.locked) <= set(result.counted)
+    # The caller's bench is not consumed by the replay.
+    assert set(bench.games) == {pid for pid in ctx.benches[(week, roster_id)] if games(pid)}

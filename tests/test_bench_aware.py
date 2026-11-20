@@ -1,0 +1,163 @@
+"""Bench-aware lock/pass: passing keeps a slot open for a bench player.
+
+The pass branch used to be the player's own continuation and nothing else, so a
+decent night from a mid-level starter with one game left was banked even when a
+better bench player had several games still to come. These pin the fix at the
+level it lives: `with_bench` fields each branch, and the winprob functions
+compare them.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from lockin.config import env_flag
+from lockin.core.policy import Game
+from lockin.core.winprob import evaluate_lock, lock_threshold
+from lockin.rollout import Bench, with_bench
+
+N = 4000
+
+
+def row(mean: float, sd: float = 6.0, seed: int = 0) -> np.ndarray:
+    return np.random.default_rng(seed).normal(mean, sd, N).clip(min=0.0)
+
+
+def bench(slots, starters, positions, bench_games=None) -> Bench:
+    games = bench_games or {}
+    return Bench.from_lineup(slots, starters, games, positions)
+
+
+def decide(plan, score, opponent, banked=0.0):
+    args = dict(
+        banked=banked,
+        contributions=plan.passing[None, :],
+        player=0,
+        opponent=opponent,
+        others_if_locked=plan.others_if_locked,
+    )
+    return evaluate_lock(**args, lock_value=score), lock_threshold(**args)
+
+
+def test_others_if_locked_omitted_is_the_old_comparison():
+    contributions = np.vstack([row(25, seed=1), row(30, seed=2)])
+    opponent = row(55, sd=10, seed=3)
+    old = evaluate_lock(0.0, contributions, 0, 30.0, opponent)
+    same = evaluate_lock(0.0, contributions, 0, 30.0, opponent, others_if_locked=None)
+    assert old == same
+    assert lock_threshold(0.0, contributions, 0, opponent) == lock_threshold(
+        0.0, contributions, 0, opponent, others_if_locked=None
+    )
+
+
+def test_a_better_bench_player_turns_a_lock_into_a_pass():
+    """30 tonight, one game left worth ~25: bank it, unless the bench has a 40."""
+    slots = ("C", "UTIL")
+    b = bench(slots, ["s1", "s2"], {"s1": ["C"], "s2": ["SF"], "b1": ["C"]}, {"b1": []})
+    # s2 is strong enough to keep UTIL in either branch, so b1 only plays if
+    # s1's slot stays open.
+    rows = {"s1": row(25, seed=1), "s2": row(45, seed=2)}
+    opponent = row(75, sd=12, seed=3)
+
+    old = evaluate_lock(0.0, np.vstack([rows["s1"], rows["s2"]]), 0, 30.0, opponent)
+    assert old.lock
+
+    plan = with_bench(b, rows, {"b1": row(40, seed=4)}, [], "s1", N)
+    assert plan is not None
+    assert plan.brought_in == ("b1",)
+    call, threshold = decide(plan, 30.0, opponent)
+    assert not call.lock
+    assert threshold > 30.0
+
+
+def test_an_ineligible_bench_player_changes_nothing():
+    """A guard cannot take a C-only slot, however good he is."""
+    slots = ("C",)
+    b = bench(slots, ["s1"], {"s1": ["C"], "b1": ["PG"]}, {"b1": []})
+    rows = {"s1": row(25, seed=1)}
+    opponent = row(30, sd=10, seed=3)
+
+    plan = with_bench(b, rows, {"b1": row(40, seed=4)}, [], "s1", N)
+    assert plan is not None
+    assert plan.brought_in == ()
+    np.testing.assert_array_equal(plan.passing, rows["s1"])
+    old = evaluate_lock(0.0, rows["s1"][None, :], 0, 30.0, opponent)
+    new, _ = decide(plan, 30.0, opponent)
+    assert (new.lock, new.p_win_pass, new.p_win_lock) == (
+        old.lock,
+        old.p_win_pass,
+        old.p_win_lock,
+    )
+
+
+def test_one_bench_player_fills_one_slot():
+    slots = ("UTIL", "UTIL")
+    b = bench(slots, ["s1", "s2"], {"s1": ["SF"], "s2": ["SF"], "b1": ["SF"]}, {"b1": []})
+    rows = {"s1": row(20, sd=0.1, seed=1), "s2": row(22, sd=0.1, seed=2)}
+    plan = with_bench(b, rows, {"b1": row(40, sd=0.1, seed=4)}, [], None, N)
+    assert plan is not None
+    assert sorted(plan.fielded.values()) == ["b1", "s2"]
+    assert plan.passing.mean() == pytest.approx(62, abs=0.5)
+
+
+def test_locking_frees_the_bench_player_for_another_slot():
+    """The lock branch fields its other slots with the bench too."""
+    slots = ("C", "UTIL")
+    b = bench(slots, ["s1", "s2"], {"s1": ["C"], "s2": ["SF"], "b1": ["C"]}, {"b1": []})
+    rows = {"s1": row(25, sd=0.1, seed=1), "s2": row(10, sd=0.1, seed=2)}
+    plan = with_bench(b, rows, {"b1": row(40, sd=0.1, seed=4)}, [], "s1", N)
+    assert plan is not None
+    # Locked, s1 holds C, so b1 goes to UTIL over the 10-point s2.
+    assert plan.others_if_locked.mean() == pytest.approx(40, abs=0.5)
+    assert plan.brought_in == ()
+
+
+def test_locked_players_stay_pinned_to_their_slots():
+    slots = ("C", "UTIL")
+    b = bench(slots, ["s1", "s2"], {"s1": ["C"], "s2": ["C"], "b1": ["C"]}, {"b1": []})
+    rows = {"s2": row(10, sd=0.1, seed=2)}
+    plan = with_bench(b, rows, {"b1": row(40, sd=0.1, seed=4)}, ["s1"], None, N)
+    assert plan is not None
+    assert plan.fielded["C"] == "s1"
+    assert plan.fielded["UTIL"] == "b1"
+
+
+def test_no_usable_bench_falls_back():
+    b = bench(("C",), ["s1"], {"s1": ["C"]})
+    assert with_bench(b, {"s1": row(25)}, {}, [], "s1", N) is None
+
+
+def test_an_illegal_lineup_on_file_falls_back():
+    """Positions that cannot make a legal lineup are no reason to stop advising."""
+    b = bench(("C",), ["s1"], {"s1": ["PG"], "b1": ["PG"]}, {"b1": []})
+    assert with_bench(b, {"s1": row(25)}, {"b1": row(40)}, [], "s1", N) is None
+
+
+def test_bench_excludes_starters_and_needs_one_starter_per_slot():
+    games = {"s1": [Game(0, 1, True, 10.0)], "b1": [Game(0, 2, False, 0.0)]}
+    b = Bench.from_lineup(("C",), ["s1"], games, {"s1": ["C"], "b1": ["C"]})
+    assert list(b.games) == ["b1"]
+    assert b.slot_of == {"s1": "C"}
+    with pytest.raises(ValueError):
+        Bench.from_lineup(("C", "UTIL"), ["s1"], games, {})
+
+
+def test_duplicate_slots_get_distinct_keys():
+    b = Bench.from_lineup(("UTIL", "UTIL"), ["s1", "s2"], {}, {})
+    assert b.slot_of == {"s1": "UTIL#1", "s2": "UTIL#2"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("", False), ("0", False), ("off", False), ("1", True), ("TRUE", True), (" yes ", True)],
+)
+def test_env_flag(monkeypatch, raw, expected):
+    monkeypatch.setenv("LOCKIN_BENCH_AWARE", raw)
+    assert env_flag("LOCKIN_BENCH_AWARE") is expected
+
+
+def test_env_flag_rejects_typos(monkeypatch):
+    monkeypatch.setenv("LOCKIN_BENCH_AWARE", "ture")
+    with pytest.raises(ValueError):
+        env_flag("LOCKIN_BENCH_AWARE")

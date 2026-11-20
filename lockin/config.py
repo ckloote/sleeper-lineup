@@ -46,6 +46,10 @@ class Config:
     unobserved change is unrecoverable. The database is disposable and gets
     rebuilt; snapshots must not be. See lockin/store/snapshots.py.
     """
+    bench_aware: bool = False
+    """Price each lock call's pass branch with the bench in play
+    (`lockin.rollout.Bench`). ``LOCKIN_BENCH_AWARE=1``. Off until its backtest
+    shows it does not cost wins or zero more slots."""
 
     @classmethod
     def from_env(cls) -> Config:
@@ -58,7 +62,19 @@ class Config:
             timezone=os.environ.get("LOCKIN_TZ", DEFAULT_TZ),
             db_path=Path(db).expanduser(),
             snapshot_root=Path(snaps).expanduser(),
+            bench_aware=env_flag("LOCKIN_BENCH_AWARE"),
         )
+
+
+def env_flag(name: str) -> bool:
+    """An on/off setting. Anything but a recognised value is an error, not off:
+    a typo'd ``LOCKIN_BENCH_AWARE=ture`` should not silently run the old model."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    raise ValueError(f"{name}={raw!r}: expected 1/0, true/false, yes/no or on/off")
 
 
 ENV_FILE = ".env"

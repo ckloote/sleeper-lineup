@@ -567,7 +567,19 @@ def calibrate(as_json: bool, draws: int, holdout_from: int, cold_start: bool) ->
     show_default=True,
     help="First held-out fantasy week.",
 )
-def backtest(as_json: bool, paths: int, seeds: int, workers: int | None, holdout_from: int) -> None:
+@click.option(
+    "--bench-aware",
+    is_flag=True,
+    help="Also replay rollout with the bench in play, and compare it with rollout.",
+)
+def backtest(
+    as_json: bool,
+    paths: int,
+    seeds: int,
+    workers: int | None,
+    holdout_from: int,
+    bench_aware: bool,
+) -> None:
     """Replay every roster under each stopping policy. Nonzero on failure.
 
     The season is replayed once per seed, in parallel. One replay is one draw of
@@ -581,7 +593,7 @@ def backtest(as_json: bool, paths: int, seeds: int, workers: int | None, holdout
         pass  # the identity check and the schema, before any worker opens the file
     seed_list = [backtest_mod.DEFAULT_SEED + i for i in range(seeds)]
     replays = backtest_mod.run_seeds(
-        cfg.db_path, cfg.season, seed_list, n_paths=paths, workers=workers
+        cfg.db_path, cfg.season, seed_list, n_paths=paths, workers=workers, bench_aware=bench_aware
     )
     checks, result = backtest_mod.run(
         None, cfg.season, holdout_from=holdout_from, result=replays[0], extra=replays[1:]
@@ -645,8 +657,40 @@ def backtest(as_json: bool, paths: int, seeds: int, workers: int | None, holdout
                 f" flipped +{b}/-{c}, z={z:+.2f}, by matchup {z_matchup:+.2f}"
             )
         click.echo("")
+        if bench_aware:
+            _bench_report(replays, holdout_from)
 
     _render(checks, "Phase 4-5 stopping-policy backtest", as_json)
+
+
+def _bench_report(replays: list, holdout_from: int) -> None:
+    """Rollout with the bench against plain rollout, on the same roster-weeks."""
+    ours, base = backtest_mod.ROLLOUT_BENCH, backtest_mod.ROLLOUT
+    click.echo("  rollout+bench vs rollout, both against a greedy opponent, same draws.")
+    for label, frm in (("all weeks", 1), (f"held out (wk {holdout_from}+)", holdout_from)):
+        click.echo(f"  {label}:")
+        for replay in replays:
+            part = replay.holdout(frm)
+            rows = [r for r in part.rows if ours in r.points and base in r.points]
+            if not rows:
+                click.echo(f"    seed {replay.seed}  no roster-weeks")
+                continue
+            gain = float(np.mean([r.points[ours] - r.points[base] for r in rows]))
+            zeroed = sum(r.zeroed[ours] for r in rows), sum(r.zeroed[base] for r in rows)
+            locked = sum(r.locked[ours] for r in rows), sum(r.locked[base] for r in rows)
+            pairs, clusters = backtest_mod.head_to_head_by_matchup(part, ours, base)
+            b, c, z = backtest_mod.mcnemar(pairs)
+            z_matchup = backtest_mod.clustered_mcnemar(pairs, clusters)
+            click.echo(
+                f"    seed {replay.seed}  {len(rows)} roster-weeks, points {gain:+.1f}/week,"
+                f" zeroed {zeroed[0]} v {zeroed[1]}, locked {locked[0]} v {locked[1]};"
+                f" wins {int(pairs[:, 0].sum())} v {int(pairs[:, 1].sum())} of {len(pairs)},"
+                f" flipped +{b}/-{c}, z={z:+.2f}, by matchup {z_matchup:+.2f}"
+            )
+    click.echo(
+        "\n  gate for turning it on: wins not worse, and zeroed slots not up."
+        "\n  the bench is each week's final poll; past seasons carry no designations.\n"
+    )
 
 
 def _manager_labels(cfg: Config, conn, *, refresh: bool) -> dict[int, str]:
@@ -865,6 +909,11 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
     default=None,
     help="What you have already banked, as 'sleeper_id:score,...'. Default: reconstructed.",
 )
+@click.option(
+    "--bench-aware/--no-bench-aware",
+    default=None,
+    help="Count swapping in a bench player as part of passing. Default: LOCKIN_BENCH_AWARE.",
+)
 def digest(
     as_of: str | None,
     roster: int | None,
@@ -873,6 +922,7 @@ def digest(
     notify: bool,
     no_write: bool,
     locked: str | None,
+    bench_aware: bool | None,
 ) -> None:
     """The daily recommendation: what to lock now, and the standing rules.
 
@@ -909,6 +959,7 @@ def digest(
                 locked=banked,
                 live=live,
                 now=now,
+                bench_aware=cfg.bench_aware if bench_aware is None else bench_aware,
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from None

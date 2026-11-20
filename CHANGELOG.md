@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- **Bench-aware lock/pass, off by default.** A lock call's "pass" used to be
+  priced as the same player riding out his own remaining games. That misses a
+  real option: pass, then bench him and start someone who plays later. Leaving
+  it out made passing look too weak, so the digest locked mid-level nights that
+  a stronger bench player would have beaten. With `LOCKIN_BENCH_AWARE=1` (or
+  `lockin digest --bench-aware`), each branch of a call fields the best legal
+  lineup from the unlocked starters and the bench, chosen on expected value.
+  Locking pins the player to his slot. Passing keeps that slot open for a bench
+  player. A call that turns on this says "pass keeps slot for …". When the
+  projection assumes a bench player starts, WATCH says "assumed to start".
+- Bench players designated Out, IR or Suspended are left out. They get the raw
+  DNP hazard, not the starter correction. A bench player who can't be
+  projected is skipped, and the call falls back to the old pricing rather than
+  abstaining.
+- `lockin backtest --bench-aware` replays a `rollout+bench` policy on the same
+  draws as rollout. It makes the swaps it priced, then reports points, zeroed
+  slots, locks and paired wins. The existing gates are unchanged.
+- **It fails that gate on 2025-26 and stays off.** Over 3 seeds it lost 12–13
+  points a week, zeroed 64–76 slots against 46–49, and flipped about 8 matchups
+  to wins and 30 to losses (z ≈ −3.5). Bench player-weeks are projected about
+  21% above what they score; starters run about 9% below. Even an in-sample 21%
+  haircut still lost. A retry needs a bench value correction fit on strictly
+  earlier weeks.
+- No schema change or migration. With the flag off, the digest's calls and
+  numbers are unchanged; the model id gains "; bench-aware" when it is on.
+
 ## 0.1.4 — 2026-10-29
 
 - A lock shows in the matchup poll only once the player has played again. So a

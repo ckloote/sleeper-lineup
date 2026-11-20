@@ -34,6 +34,7 @@ cutoff.
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import sqlite3
 import statistics
@@ -54,7 +55,7 @@ from lockin.core.projections import (
     SeasonPanel,
 )
 from lockin.projections import load_panel, observed_scores
-from lockin.rollout import SimulationCache, replay_week
+from lockin.rollout import Bench, SimulationCache, replay_week
 from lockin.store.db import connect_readonly
 from lockin.verify import Check, scoring_settings
 
@@ -84,6 +85,10 @@ GREEDY = "greedy"
 ROLLOUT = "rollout"
 ACTUAL = "actual"
 ORACLE = "oracle"
+ROLLOUT_BENCH = "rollout+bench"
+"""Rollout with the bench in play (`lockin.rollout.Bench`), making the swaps it
+prices. Replayed only on request, and kept out of `REPLAYED_POLICIES` so the
+Phase 4-5 gates read exactly what they always have."""
 REPLAYED_POLICIES = (NEVER_LOCK, LOCK_FIRST, GREEDY, ROLLOUT)
 ALL_POLICIES = (*REPLAYED_POLICIES, ORACLE)
 
@@ -322,8 +327,14 @@ def run_backtest(
     n_sims: int | None = None,
     seed: int = DEFAULT_SEED,
     panel: SeasonPanel | None = None,
+    bench_aware: bool = False,
 ) -> BacktestResult:
     """Replay all ten rosters, all weeks, under every policy.
+
+    ``bench_aware`` adds `ROLLOUT_BENCH`, on the same draws as `ROLLOUT` (one
+    cache), so the two are paired. Its bench is the week's final poll, and no
+    designations exist for a past season, so no one is excluded as out: the
+    raw hazard is all that keeps an injured bench player from being started.
 
     ``n_sims``, rollout's paths per P(win) estimate, defaults to ``n_paths``.
     They used to default separately, so ``--paths`` sharpened greedy's
@@ -337,10 +348,11 @@ def run_backtest(
     panel_weeks = np.concatenate([h.week for h in panel.histories.values()])
 
     lineups: dict[tuple[int, int], list[str]] = defaultdict(list)
+    slot_names: dict[tuple[int, int], list[str | None]] = defaultdict(list)
     matchups: dict[tuple[int, int], int | None] = {}
     for row in conn.execute(
         """
-        SELECT week, roster_id, matchup_id, sleeper_id
+        SELECT week, roster_id, matchup_id, sleeper_id, slot
           FROM weekly_matchups_latest
          WHERE is_starter = 1
          ORDER BY week, roster_id, slot_index
@@ -348,6 +360,7 @@ def run_backtest(
     ):
         key = (row["week"], row["roster_id"])
         lineups[key].append(row["sleeper_id"])
+        slot_names[key].append(row["slot"])
         matchups[key] = row["matchup_id"]
 
     actuals = {
@@ -414,6 +427,33 @@ def run_backtest(
         source=source, n_sims=n_sims, dnp_scale=dnp_scale, ride_unprojectable=True
     )
 
+    benches: dict[tuple[int, int], list[str]] = defaultdict(list)
+    positions: dict[tuple[str, int], list[str]] = {}
+    current: dict[str, list[str]] = {}
+    if bench_aware:
+        for row in conn.execute(
+            "SELECT week, roster_id, sleeper_id FROM weekly_matchups_latest WHERE is_starter = 0"
+        ):
+            benches[(row["week"], row["roster_id"])].append(row["sleeper_id"])
+        for row in conn.execute(
+            "SELECT sleeper_id, fantasy_week, pit_positions FROM box_scores"
+            " WHERE pit_positions IS NOT NULL AND pit_positions != '[]'"
+        ):
+            positions[(row["sleeper_id"], row["fantasy_week"])] = json.loads(row["pit_positions"])
+        current = {
+            row[0]: json.loads(row[1])
+            for row in conn.execute("SELECT sleeper_id, positions FROM players")
+        }
+
+    def bench_for(week: int, roster_id: int) -> Bench | None:
+        slots, starters = slot_names.get((week, roster_id), []), lineups[(week, roster_id)]
+        if not starters or any(s is None for s in slots):
+            return None
+        ids = [p for p in benches.get((week, roster_id), []) if p not in starters]
+        games = {p: games_for(p, week) for p in ids if games_for(p, week)}
+        held = {p: positions.get((p, week)) or current.get(p, []) for p in [*starters, *games]}
+        return Bench.from_lineup([str(s) for s in slots], starters, games, held)
+
     result = BacktestResult(rows=[], seed=seed, n_paths=n_paths)
     for (week, roster_id), starters in sorted(lineups.items()):
         entry = RosterWeek(
@@ -470,6 +510,20 @@ def run_backtest(
             zeros[ROLLOUT] = sum(1 for v in outcome.counted.values() if v == 0.0)
             locks[ROLLOUT] = len(outcome.locked)
             entry.rollout_decisions = outcome.decisions
+            bench = bench_for(week, roster_id) if bench_aware else None
+            if bench is not None:
+                benched = replay_week(
+                    mine,
+                    theirs,
+                    {pid: thresholds_for(pid, week) for pid in theirs},
+                    week,
+                    cache,
+                    stream(seed, ROLLOUT_STREAM, week, roster_id),
+                    bench=bench,
+                )
+                totals[ROLLOUT_BENCH] = benched.total
+                zeros[ROLLOUT_BENCH] = sum(1 for v in benched.counted.values() if v == 0.0)
+                locks[ROLLOUT_BENCH] = len(benched.locked)
         else:
             # Weeks 23-24 drop eliminated teams and week 25 is unscored, so
             # there is no opponent and no win to play for. Left absent rather
@@ -908,12 +962,16 @@ def wins_flipped(
     return wins, games
 
 
-def _replay(job: tuple[str, str, int, int, ProjectionParams | None]) -> BacktestResult:
+def _replay(
+    job: tuple[str, str, int, int, ProjectionParams | None, bool],
+) -> BacktestResult:
     """One seed's replay, in a worker process with its own read-only connection."""
-    db_path, season, seed, n_paths, params = job
+    db_path, season, seed, n_paths, params, bench_aware = job
     conn = connect_readonly(Path(db_path))
     try:
-        return run_backtest(conn, season, params=params, n_paths=n_paths, seed=seed)
+        return run_backtest(
+            conn, season, params=params, n_paths=n_paths, seed=seed, bench_aware=bench_aware
+        )
     finally:
         conn.close()
 
@@ -926,6 +984,7 @@ def run_seeds(
     n_paths: int = DEFAULT_PATHS,
     params: ProjectionParams | None = None,
     workers: int | None = None,
+    bench_aware: bool = False,
 ) -> list[BacktestResult]:
     """Replay the season once per seed, in parallel. Results come back in seed order.
 
@@ -933,7 +992,7 @@ def run_seeds(
     at 2,000 paths take about as long as two on the Pi's four cores. Workers are
     spawned rather than forked, so none inherits a connection or a thread.
     """
-    jobs = [(str(db_path), season, s, n_paths, params) for s in seeds]
+    jobs = [(str(db_path), season, s, n_paths, params, bench_aware) for s in seeds]
     workers = min(len(jobs), workers or multiprocessing.cpu_count())
     if workers <= 1:
         return [_replay(job) for job in jobs]
