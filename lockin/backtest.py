@@ -47,6 +47,7 @@ from pathlib import Path
 
 import numpy as np
 
+from lockin import rotation
 from lockin.core.policy import Game, WeekOutcome, continuation_value, lock_first_thresholds, replay
 from lockin.core.projections import (
     EWMAProjectionSource,
@@ -450,9 +451,18 @@ def run_backtest(
         if not starters or any(s is None for s in slots):
             return None
         ids = [p for p in benches.get((week, roster_id), []) if p not in starters]
+        # The bench is fixed for the week here, so who is a regular is read from
+        # polls before the week's first game. `lockin.rotation` skips nights with
+        # no poll, so 2025-26's sparse polls leave few regulars.
+        days = [g.day for p in [*starters, *ids] for g in games_for(p, week)]
+        if not days:
+            return None
+        ids = rotation.regulars(conn, panel, roster_id, ids, through_day=min(days) - 1)
         games = {p: games_for(p, week) for p in ids if games_for(p, week)}
         held = {p: positions.get((p, week)) or current.get(p, []) for p in [*starters, *games]}
-        return Bench.from_lineup([str(s) for s in slots], starters, games, held)
+        return Bench.from_lineup(
+            [str(s) for s in slots], starters, games, held, regulars=list(games)
+        )
 
     result = BacktestResult(rows=[], seed=seed, n_paths=n_paths)
     for (week, roster_id), starters in sorted(lineups.items()):

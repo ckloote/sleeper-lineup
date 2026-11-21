@@ -25,8 +25,24 @@
   21% above what they score; starters run about 9% below. Even an in-sample 21%
   haircut still lost. A retry needs a bench value correction fit on strictly
   earlier weeks.
-- No schema change or migration. With the flag off, the digest's calls and
-  numbers are unchanged; the model id gains "; bench-aware" when it is on.
+- **Only rotation regulars are bench candidates** (`lockin/rotation.py`). That
+  backtest's bench was each week's final poll, which holds mostly players
+  pulled for a reason. Bench regulars there played 55% of their games and
+  scored 0.54× projection. A player who sits only on nights he has no game was
+  barely in it. A regular is someone this roster started on at least 60% of
+  his game nights (at least 3). That is read from the first poll after each
+  slate and before the next day's first tip. He must also have played his last
+  game. Regulars get the starter DNP correction. Everyone else on the bench is
+  left out.
+- **Bench shadow, on by default.** With bench-aware calls off, each digest also
+  builds the bench-aware digest for the same morning and records it in two new
+  tables, `bench_shadow_runs` and `bench_shadow`, keyed to the live run. Calls
+  and the notification are unchanged. `digest.log` gets a `bench shadow:` line
+  naming the regulars and any call that would flip. A failed shadow is
+  recorded and never stops the digest. `LOCKIN_BENCH_SHADOW=0` turns it off.
+- The two new tables are created by `CREATE TABLE IF NOT EXISTS` on the next
+  run, with no migration. With bench-aware off, the digest's calls and numbers
+  are unchanged; the model id gains "; bench-aware" when it is on.
 
 ## 0.1.4 — 2026-10-29
 

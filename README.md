@@ -147,6 +147,13 @@ no more slots.
 On 2025-26 it does not: it loses about 12 points a week and more matchups,
 because projections overrate bench players by about a fifth. Leave it off.
 
+Bench candidates are now only rotation regulars: players you start on most
+nights they have a game (`lockin/rotation.py`). Last season's polls are too
+sparse to test that, so each digest records what the bench-aware engine would
+have said, without sending it (`bench_shadow_runs`, `bench_shadow`, and a
+`bench shadow:` line in `logs/digest.log`). `LOCKIN_BENCH_SHADOW=0` turns that
+off.
+
 ### After the season
 
 Keep backups of the database and raw `snapshots/`: Sleeper can rewrite completed

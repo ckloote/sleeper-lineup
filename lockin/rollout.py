@@ -61,7 +61,7 @@ class SimulationCache:
     """Per-week hazard correction for started players, fit on prior weeks only.
     See ``lockin.backtest.starter_dnp_scale`` for why it is needed."""
     contributions: dict[tuple[str, int, int], np.ndarray] = field(default_factory=dict)
-    bench_rows: dict[tuple[str, int, int], np.ndarray | None] = field(default_factory=dict)
+    bench_rows: dict[tuple[str, int, int, bool], np.ndarray | None] = field(default_factory=dict)
     """`bench_contribution`'s results. Kept apart from ``contributions``: the
     same player and cutoffs mean a different thing on the bench."""
     thresholds: dict[tuple[str, int], dict[int, float]] = field(default_factory=dict)
@@ -167,6 +167,7 @@ class SimulationCache:
         *,
         known_through: int,
         start: int,
+        regular: bool = False,
     ) -> np.ndarray | None:
         """What a **bench** player would count if moved into a slot from ``start``.
 
@@ -177,16 +178,18 @@ class SimulationCache:
 
         Two differences from :meth:`contribution`, both conservative:
 
-        - **No starter hazard correction.** ``dnp_scale`` halves the DNP hazard
-          because a manager who started someone had read the injury report.
-          Nobody has vouched for a bench player, so he gets the raw hazard.
-          Overrating his availability would make passing look safer than it is,
-          which is how a slot ends the week on 0.0.
+        - **No starter hazard correction, unless he is a regular.** ``dnp_scale``
+          halves the DNP hazard because a manager who started someone had read
+          the injury report. Nobody has vouched for a bench player, so he gets
+          the raw hazard. Overrating his availability would make passing look
+          safer than it is, which is how a slot ends the week on 0.0. A
+          ``regular`` (`lockin.rotation`) is someone the manager starts on his
+          game nights, so he gets the starter correction.
         - **No fallback.** A bench player with nothing left, or who cannot be
           projected, returns None and is simply not an option. It is never a
           reason to stop advising.
         """
-        key = (sleeper_id, known_through, start)
+        key = (sleeper_id, known_through, start, regular)
         if key in self.bench_rows:
             return self.bench_rows[key]
         ahead = [g for g in games if g.day >= start and g.day > known_through]
@@ -200,6 +203,7 @@ class SimulationCache:
                     [week] * len(ahead),
                     rng=rng,
                     n_paths=self.n_sims,
+                    dnp_scale=self.dnp_scale.get(week, 1.0) if regular else 1.0,
                 )
             except InsufficientHistory:
                 value = None
@@ -239,6 +243,9 @@ class Bench:
     who cannot be moved in (IR, designated out)."""
     positions: dict[str, tuple[str, ...]]
     """Starters' and bench players' eligible positions."""
+    regulars: frozenset[str] = frozenset()
+    """Bench players the manager starts on his game nights (`lockin.rotation`),
+    priced with the starter hazard correction."""
 
     @classmethod
     def from_lineup(
@@ -247,6 +254,7 @@ class Bench:
         starters: Sequence[str],
         games: dict[str, list[Game]],
         positions: dict[str, Sequence[str]],
+        regulars: Sequence[str] = (),
     ) -> Bench:
         """``starters`` in the same order as ``slots`` — the poll's slot order."""
         if len(slots) != len(starters):
@@ -256,10 +264,13 @@ class Bench:
             slot_of={pid: _slot_key(slots, i) for i, pid in enumerate(starters)},
             games={pid: list(g) for pid, g in games.items() if pid not in starters},
             positions={pid: tuple(pos) for pid, pos in positions.items()},
+            regulars=frozenset(regulars),
         )
 
     def copy(self) -> Bench:
-        return Bench(self.slots, dict(self.slot_of), dict(self.games), dict(self.positions))
+        return Bench(
+            self.slots, dict(self.slot_of), dict(self.games), dict(self.positions), self.regulars
+        )
 
 
 def bench_rows(
@@ -278,7 +289,13 @@ def bench_rows(
         if pid in lineup:
             continue
         row = cache.bench_contribution(
-            pid, games, week, rng, known_through=known_through, start=start
+            pid,
+            games,
+            week,
+            rng,
+            known_through=known_through,
+            start=start,
+            regular=pid in bench.regulars,
         )
         if row is not None:
             out[pid] = row

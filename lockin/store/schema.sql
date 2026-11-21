@@ -582,6 +582,34 @@ CREATE TABLE IF NOT EXISTS digest_warnings (
 );
 
 
+-- The bench-aware engine's view of the same morning as a live run: recorded,
+-- never sent (`Config.bench_shadow`). Kept to compare against what was done and
+-- what followed before bench-aware calls are trusted. The 2025-26 backtest
+-- failed (CHANGELOG), and only this season's daily polls can test the rotation
+-- version, so the evidence has to be collected live.
+CREATE TABLE IF NOT EXISTS bench_shadow_runs (
+    run_id          TEXT PRIMARY KEY,   -- the digest_runs row it shadows
+    model           TEXT,
+    p_win           REAL,
+    projected       REAL,
+    candidates      TEXT,               -- JSON: the regulars it could field
+    error           TEXT                -- why it failed; the rest is then NULL
+);
+
+CREATE TABLE IF NOT EXISTS bench_shadow (
+    run_id          TEXT NOT NULL,
+    sleeper_id      TEXT NOT NULL,
+    action          TEXT NOT NULL,      -- LOCK / PASS / THRESHOLD, as recommendations
+    for_day         INTEGER NOT NULL,
+    score           REAL,               -- the score a call is about
+    threshold       REAL,               -- break-even, or the standing rule
+    p_win_lock      REAL,
+    p_win_pass      REAL,
+    via             TEXT,               -- JSON: who passing keeps the slot for
+    PRIMARY KEY (run_id, sleeper_id, action, for_day)
+);
+
+
 -- ------------------------------------------------------------------ bookkeeping
 
 -- Data migrations that have run, by name (lockin/store/db.py). Additive column

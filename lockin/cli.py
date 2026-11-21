@@ -689,7 +689,8 @@ def _bench_report(replays: list, holdout_from: int) -> None:
             )
     click.echo(
         "\n  gate for turning it on: wins not worse, and zeroed slots not up."
-        "\n  the bench is each week's final poll; past seasons carry no designations.\n"
+        "\n  the bench is each week's final poll, regulars only (lockin/rotation.py);"
+        "\n  a season without daily polls has few regulars, and none carry designations.\n"
     )
 
 
@@ -960,6 +961,7 @@ def digest(
                 live=live,
                 now=now,
                 bench_aware=cfg.bench_aware if bench_aware is None else bench_aware,
+                shadow=cfg.bench_shadow,
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from None
@@ -1040,6 +1042,8 @@ def digest(
             f"\n  and a close lock/pass call can flip below it (§21 W8). This ran {sims}."
             f"\n  {written} row(s) written to recommendations."
         )
+    if (shadow_text := digest_mod.render_shadow(report)) is not None:
+        click.echo("\n" + shadow_text)
     if notify:
         sent = notify_mod.send(digest_mod.render(report, compact=True), cfg)
         click.echo(f"  notification: {sent}")

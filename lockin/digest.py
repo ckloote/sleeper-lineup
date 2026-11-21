@@ -50,7 +50,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from lockin import __version__, calendar, clock
+from lockin import __version__, calendar, clock, rotation
 from lockin.backtest import (
     DEFAULT_PATHS,
     greedy_thresholds,
@@ -215,6 +215,13 @@ class Digest:
     """Which engine produced it: lockin's version and a hash of the projection
     parameters. Recomputing later gives a different answer (§20), so the record
     must say what it was computed with."""
+    shadow: Digest | None = None
+    """The same morning priced bench-aware, recorded but never sent
+    (`Config.bench_shadow`). None when it was not run or failed."""
+    shadow_error: str | None = None
+    """Why the shadow failed. A failed shadow never stops the digest."""
+    candidates: tuple[str, ...] = ()
+    """The bench regulars a bench-aware run could field. Empty otherwise."""
 
     @property
     def as_of_day(self) -> int:
@@ -552,6 +559,11 @@ def bench_for(
 ) -> Bench | None:
     """This roster's bench as `lockin.rollout.Bench`, or None if it can't be built.
 
+    Only rotation regulars are candidates (`lockin.rotation`): players this
+    manager starts on most of their game nights, who played their last game.
+    The rest of the bench was the source of the failed 2025-26 backtest, and is
+    left out rather than corrected.
+
     None is never a reason to abstain: the digest then prices calls exactly as
     it did before bench players were considered.
     """
@@ -578,6 +590,7 @@ def bench_for(
         for pid in ctx.benches.get(key, [])
         if pid not in starters and designation.get(pid, "") not in UNAVAILABLE
     ]
+    ids = rotation.regulars(conn, ctx.panel, roster_id, ids, through_day=known_through)
     if not ids:
         return None
     slate = week_slate(conn, ctx.panel, ctx.scores, ctx.season, week, ids, known_through, live=live)
@@ -589,7 +602,7 @@ def bench_for(
     for pid in [*starters, *games]:
         row = conn.execute("SELECT positions FROM players WHERE sleeper_id = ?", (pid,)).fetchone()
         positions[pid] = json.loads(row[0]) if row and row[0] else []
-    return Bench.from_lineup([str(s) for s in slots], starters, games, positions)
+    return Bench.from_lineup([str(s) for s in slots], starters, games, positions, regulars=ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,12 +742,17 @@ def morning(
     now: datetime | None = None,
     params: ProjectionParams | None = None,
     bench_aware: bool = False,
+    shadow: bool = False,
 ) -> Digest:
     """The digest the cron runs: load, then build — or abstain before any game.
 
     One function for `lockin digest` and for the lifecycle rehearsal
     (`tests/test_lifecycle.py`), so the rehearsal exercises the sequence the
     cron runs rather than a copy of it.
+
+    ``shadow`` also builds the bench-aware digest for the same morning, from the
+    same context and seed, and attaches it as ``shadow``. It is skipped when
+    ``bench_aware`` is already on or the digest made no calls and no rules.
     """
     if live and (problem := calendar.disagreement(conn, season, as_of)):
         return abstain(conn, season, roster_id, as_of, problem)
@@ -742,17 +760,14 @@ def morning(
         ctx = load_context(conn, season, params=params)
     except NoGamesYet as exc:
         return abstain(conn, season, roster_id, as_of, f"insufficient history: {exc}")
-    return build(
-        ctx,
-        roster_id,
-        as_of,
-        n_sims=n_sims,
-        n_paths=n_sims,
-        locked=locked,
-        live=live,
-        now=now,
-        bench_aware=bench_aware,
-    )
+    args = dict(n_sims=n_sims, n_paths=n_sims, locked=locked, live=live, now=now)
+    digest = build(ctx, roster_id, as_of, bench_aware=bench_aware, **args)
+    if shadow and not bench_aware and (digest.calls or digest.rules):
+        try:
+            digest.shadow = build(ctx, roster_id, as_of, bench_aware=True, **args)
+        except Exception as exc:  # noqa: BLE001 - the shadow must never cost the digest
+            digest.shadow_error = f"{type(exc).__name__}: {exc}"
+    return digest
 
 
 def build(
@@ -1003,6 +1018,7 @@ def build(
     )
     if bench is not None:
         names.update(player_names(conn, list(bench.games)))
+        digest.candidates = tuple(bench.games)
 
     # -- 1. calls on games whose lock window is still open ----------------
     # One per player, not one night per team (review finding 6): a player who
@@ -1470,4 +1486,76 @@ def persist(
         " VALUES (?, ?, ?, ?, ?)",
         [(run_id, w.sleeper_id, w.kind, w.detail, w.short) for w in warnings.values()],
     )
+    persist_shadow(conn, run_id, digest)
     return len(rows)
+
+
+def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> None:
+    """Record the bench-aware shadow of run ``run_id``, if one was attempted."""
+    shadow = digest.shadow
+    if shadow is None and digest.shadow_error is None:
+        return
+    if shadow is None:
+        conn.execute(
+            "INSERT INTO bench_shadow_runs (run_id, error) VALUES (?, ?)",
+            (run_id, digest.shadow_error),
+        )
+        return
+    conn.execute(
+        "INSERT INTO bench_shadow_runs (run_id, model, p_win, projected, candidates)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (run_id, shadow.model, shadow.p_win, shadow.my_total, json.dumps(shadow.candidates)),
+    )
+
+    def finite(x: float) -> float | None:
+        return x if np.isfinite(x) else None
+
+    conn.executemany(
+        "INSERT INTO bench_shadow (run_id, sleeper_id, action, for_day, score, threshold,"
+        " p_win_lock, p_win_pass, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                run_id,
+                c.sleeper_id,
+                "LOCK" if c.lock else "PASS",
+                c.day,
+                c.score,
+                finite(c.break_even),
+                c.p_win_lock,
+                c.p_win_pass,
+                json.dumps(c.via),
+            )
+            for c in shadow.calls
+        ]
+        + [
+            (run_id, r.sleeper_id, "THRESHOLD", r.night, None, r.threshold, None, None, None)
+            for r in shadow.rules
+        ],
+    )
+
+
+def render_shadow(digest: Digest) -> str | None:
+    """One line per call the bench-aware shadow would make differently.
+
+    For the log, not the notification: the shadow is evidence being collected,
+    not advice.
+    """
+    if digest.shadow_error:
+        return f"bench shadow failed: {digest.shadow_error}"
+    shadow = digest.shadow
+    if shadow is None:
+        return None
+    live = {(c.sleeper_id, c.day): c for c in digest.calls}
+    lines = []
+    for c in shadow.calls:
+        was = live.get((c.sleeper_id, c.day))
+        if was is None or was.lock == c.lock:
+            continue
+        line = f"  {c.name}: {'LOCK' if was.lock else 'PASS'} -> {'LOCK' if c.lock else 'PASS'}"
+        if c.via:
+            line += " (keeps slot for " + ", ".join(names_of(shadow, p) for p in c.via) + ")"
+        lines.append(line)
+    pool = ", ".join(names_of(shadow, p) for p in shadow.candidates) or "none"
+    odds = "" if shadow.p_win is None else f"P(win) {shadow.p_win:.0%}, "
+    head = f"bench shadow: {odds}regulars on the bench: {pool}"
+    return "\n".join([head, *(lines or ["  every call agrees"])])
