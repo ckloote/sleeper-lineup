@@ -1387,7 +1387,7 @@ def explain(
         if call.via:
             # Who goes out is read from the lineup the model fielded: re-solving
             # the slots can keep him and bench someone else.
-            start = ", ".join(report.names.get(p, p) for p in call.via)
+            start = ", ".join(report.names.get(p, p) for p in call.bench_in or call.via)
             line = f"    Passing lets you start {start}"
             if call.bench_out:
                 line += " in place of " + ", ".join(report.names.get(p, p) for p in call.bench_out)

@@ -137,6 +137,10 @@ class LockCall:
     """Bench players the pass branch starts in his place, which locking him
     would rule out (`lockin.rollout.Branches.brought_in`). Empty when the call
     did not turn on the bench, or the bench was not considered."""
+    bench_in: tuple[str, ...] = ()
+    """Every bench player that lineup starts, when ``via`` is set: ``via`` plus
+    any the lock lineup would start too. The instructions name all of them, or
+    following them would leave a slot empty."""
     bench_out: tuple[str, ...] = ()
     """Starters that lineup sends to the bench, when ``via`` is set. Read from
     the lineup the model fielded, not assumed to be him: re-solving the slots
@@ -1162,6 +1166,7 @@ def build(
                 expires_utc=expires,
                 said_lock_on=said_lock.get((sleeper_id, game.day)),
                 via=tuple(via),
+                bench_in=swap.arriving if swap else (),
                 bench_out=swap.sent_out if swap else (),
                 moves=swap.moves(bench.slot_of) if swap and bench else (),
             )
@@ -1237,9 +1242,8 @@ def build(
         # The totals above field the best lineup the bench allows. When that is
         # not the one on file, say so: the numbers assume a change only the
         # manager can make.
-        fielded = set(plan.fielded.values())
-        out = sorted(names.get(p, p) for p in unlocked if p not in fielded)
-        for pid in sorted(p for p in fielded if p in bench.games):
+        out = [names.get(p, p) for p in plan.sent_out]
+        for pid in plan.arriving:
             when = starts_from(bench, pid, known_through)
             digest.warnings.append(
                 Warning(
@@ -1343,7 +1347,7 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
             out.append(f"        {need}")
             if call.via:
-                who = ", ".join(_short(names_of(digest, p), 16) for p in call.via)
+                who = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_in or call.via)
                 out.append(f"        pass: start {who}")
                 if call.bench_out:
                     sit = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_out)
@@ -1582,7 +1586,8 @@ def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> Non
 
     conn.executemany(
         "INSERT INTO bench_shadow (run_id, sleeper_id, action, for_day, score, threshold,"
-        " p_win_lock, p_win_pass, via, bench_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " p_win_lock, p_win_pass, via, bench_in, bench_out)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 run_id,
@@ -1594,12 +1599,25 @@ def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> Non
                 c.p_win_lock,
                 c.p_win_pass,
                 json.dumps(c.via),
+                json.dumps(c.bench_in),
                 json.dumps(c.bench_out),
             )
             for c in shadow.calls
         ]
         + [
-            (run_id, r.sleeper_id, "THRESHOLD", r.night, None, r.threshold, None, None, None, None)
+            (
+                run_id,
+                r.sleeper_id,
+                "THRESHOLD",
+                r.night,
+                None,
+                r.threshold,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             for r in shadow.rules
         ],
     )
@@ -1614,7 +1632,8 @@ def swap_text(digest: Digest, call: LockCall) -> str:
     """
     if not call.via:
         return ""
-    text = "; passing lets you start " + ", ".join(names_of(digest, p) for p in call.via)
+    arriving = call.bench_in or call.via
+    text = "; passing lets you start " + ", ".join(names_of(digest, p) for p in arriving)
     if call.bench_out:
         text += " in place of " + ", ".join(names_of(digest, p) for p in call.bench_out)
     return text

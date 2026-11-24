@@ -379,14 +379,38 @@ class Branches:
     """Bench players the pass branch uses and the lock branch does not: the swap
     that passing pays for."""
     sent_out: tuple[str, ...] = ()
-    """Current starters the pass branch's lineup leaves out. Not necessarily
-    the player deciding: the lineup is re-solved, so he may only change slot
-    while someone else goes to the bench."""
+    """Current starters the pass lineup sends to the bench: anyone in a slot
+    now whose slot it gives to someone else. Read from the current slot
+    assignments, so a starter with no games this week, who has no projection,
+    is still named. Not necessarily the player deciding: the lineup is
+    re-solved, so he may only change slot while someone else goes out."""
+    arriving: tuple[str, ...] = ()
+    """Bench players the pass lineup starts, all of them. ``brought_in`` is
+    only those the lock lineup does not also use; a manager following the pass
+    lineup has to start every one of these."""
 
     def moves(self, slot_of: dict[str, str]) -> tuple[tuple[str, str], ...]:
         """``(player, slot key)`` for everyone the pass lineup puts in a slot he
         does not hold now, bench players included, in slot order."""
         return tuple((p, slot) for slot, p in self.fielded.items() if slot_of.get(p) != slot)
+
+
+def lineup_changes(
+    bench: Bench, fielded: dict[str, str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Who ``fielded`` sends to the bench, and who it starts, against the
+    current slot assignments.
+
+    Out is a current starter missing from the new lineup whose slot it fills
+    with someone else. One whose slot it leaves empty can stay where he is.
+    In is everyone the new lineup starts who holds no slot now.
+    """
+    playing = set(fielded.values())
+    out = tuple(
+        sorted(p for p, slot in bench.slot_of.items() if p not in playing and slot in fielded)
+    )
+    arriving = tuple(sorted(p for p in playing if p not in bench.slot_of))
+    return out, arriving
 
 
 def with_bench(
@@ -413,17 +437,16 @@ def with_bench(
         return None
     zero = np.zeros(n_sims)
     total = sum((pool[p] for p in passing.values() if p not in locked), zero)
-    fielded = set(passing.values())
-    out = tuple(sorted(p for p in rows if p not in fielded))
+    out, arriving = lineup_changes(bench, passing)
     if deciding is None:
-        return Branches(total, None, passing, (), out)
+        return Branches(total, None, passing, (), out, arriving)
     banking = _field(bench, pool, locked, deciding)
     if banking is None:
         return None
     others = sum((pool[p] for p in banking.values() if p not in locked and p != deciding), zero)
     used = set(banking.values())
     brought = tuple(sorted(p for p in passing.values() if p in extra and p not in used))
-    return Branches(total, others, passing, brought, out)
+    return Branches(total, others, passing, brought, out, arriving)
 
 
 @dataclass(slots=True)

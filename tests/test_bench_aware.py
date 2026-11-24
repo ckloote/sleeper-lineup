@@ -402,3 +402,86 @@ def test_the_swap_names_who_the_fielded_lineup_benches_not_the_deciding_player()
     d = Digest("2026-11-23", 5, 4, 7, 0, names=names, calls=[call])
     assert swap_text(d, call) == "; passing lets you start P1002 in place of P1003"
     assert "P1006" not in swap_text(d, call)
+
+
+def test_the_swap_starts_every_bench_player_the_pass_lineup_uses():
+    """Review of PR #3: both lineups started 1004 at G, so ``via`` was only 1002,
+    and "start 1002, bench 1003 and 1007" left G empty. Arrivals come from the
+    pass lineup against the current slots, not from the difference between
+    the two branches."""
+    slots = ("F", "G", "UTIL")
+    positions = {"1003": ["SF"], "1007": ["PG"], "1006": ["SF"], "1004": ["PG"], "1002": ["PG"]}
+    b = bench(slots, ["1003", "1007", "1006"], positions, {"1004": [], "1002": []})
+    rows = {
+        "1003": row(11, sd=0.1, seed=1),
+        "1007": row(5, sd=0.1, seed=2),
+        "1006": row(30, sd=0.1, seed=3),
+    }
+    extra = {"1004": row(35, sd=0.1, seed=4), "1002": row(25, sd=0.1, seed=5)}
+    plan = with_bench(b, rows, extra, [], "1006", N)
+    assert plan is not None
+    # 1002 and 1004 are both guards, so which of G and UTIL each takes is a tie.
+    assert plan.fielded["F"] == "1006"
+    assert sorted(plan.fielded.values()) == ["1002", "1004", "1006"]
+    assert plan.brought_in == ("1002",)
+    assert plan.arriving == ("1002", "1004")
+    assert plan.sent_out == ("1003", "1007")
+
+
+def test_a_starter_with_no_games_is_named_when_his_slot_goes_to_someone_else():
+    """Review of PR #3: 1003 held F with no games this week, so he had no row
+    and vanished from the instructions while 1006 took F."""
+    slots = ("F", "UTIL")
+    positions = {"1003": ["SF"], "1006": ["SF"], "1002": ["PG"], "1008": ["SF"]}
+    b = bench(slots, ["1003", "1006"], positions, {"1002": [], "1008": []})
+    rows = {"1006": row(30, sd=0.1, seed=2)}  # 1003: no games, no row
+    # 1008 is there so the lock lineup, 1006 pinned at UTIL, can fill F.
+    extra = {"1002": row(25, sd=0.1, seed=4), "1008": row(8, sd=0.1, seed=5)}
+    plan = with_bench(b, rows, extra, [], "1006", N)
+    assert plan is not None
+    assert plan.fielded == {"F": "1006", "UTIL": "1002"}
+    assert plan.sent_out == ("1003",)
+
+
+def test_a_starter_whose_slot_stays_empty_is_not_sent_to_the_bench():
+    from lockin.rollout import lineup_changes
+
+    b = bench(("F", "C"), ["1003", "1005"], {"1003": ["SF"], "1005": ["C"]})
+    # Nobody can play C this week: 1005 stays where he is, harmlessly.
+    assert lineup_changes(b, {"F": "1003"}) == ((), ())
+    assert lineup_changes(b, {"F": "1009"}) == (("1003",), ("1009",))
+
+
+def test_the_instructions_name_every_arrival_and_departure():
+    from lockin.digest import Digest, LockCall, render, swap_text
+
+    call = LockCall(
+        "1006",
+        "P1006",
+        1,
+        20.0,
+        False,
+        0.1,
+        0.2,
+        25.0,
+        via=("1002",),
+        bench_in=("1002", "1004"),
+        bench_out=("1003", "1007"),
+    )
+    names = {p: f"P{p}" for p in ("1002", "1003", "1004", "1006", "1007")}
+    d = Digest(
+        "2026-11-23",
+        5,
+        4,
+        7,
+        0,
+        names=names,
+        calls=[call],
+        p_win=0.5,
+        my_total=200.0,
+        opponent_total=210.0,
+        margin={"q10": -40, "q50": -10, "q90": 20},
+    )
+    assert swap_text(d, call) == "; passing lets you start P1002, P1004 in place of P1003, P1007"
+    text = render(d)
+    assert "pass: start P1002, P1004" in text and "and bench P1003, P1007" in text
