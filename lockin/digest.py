@@ -612,6 +612,13 @@ def bench_for(
     )
 
 
+def starts_from(bench: Bench, sleeper_id: str, known_through: int) -> str:
+    """When the projection first counts a fielded bench player: "tonight",
+    unless tonight's game has already tipped (`tipped`), then that date."""
+    first = bench.promotable_from.get(sleeper_id, known_through + 1)
+    return "tonight" if first <= known_through + 1 else date_of(first)
+
+
 def tipped(
     slate: WeekSlate,
     games: dict[str, list[Game]],
@@ -1215,12 +1222,13 @@ def build(
         fielded = set(plan.fielded.values())
         out = sorted(names.get(p, p) for p in unlocked if p not in fielded)
         for pid in sorted(p for p in fielded if p in bench.games):
+            when = starts_from(bench, pid, known_through)
             digest.warnings.append(
                 Warning(
                     sleeper_id=pid,
                     name=names.get(pid, pid),
                     kind="bench assumption",
-                    detail="the projection and P(win) assume he starts from tonight"
+                    detail=f"the projection and P(win) assume he starts from {when}"
                     + (f", in place of {', '.join(out)}" if out else ""),
                     short="assumed to start",
                 )

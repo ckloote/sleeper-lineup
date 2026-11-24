@@ -356,3 +356,13 @@ def test_an_unknown_tip_bars_only_a_game_dated_today():
     games = {"later": [Game(0, TODAY + 2, False, 0.0)], "today": [Game(0, TODAY, False, 0.0)]}
     now = "2026-11-23T20:00:00+00:00"
     assert tipped(_slate({}), games, TODAY - 1, before=now, live=True) == {"today": TODAY + 1}
+
+
+def test_the_bench_assumption_names_the_first_game_it_counts():
+    from lockin.digest import starts_from
+
+    games = {"b1": [Game(0, TODAY, False, 0.0), Game(1, TODAY + 1, False, 0.0)]}
+    open_ = Bench.from_lineup(("C",), ["s1"], games, {})
+    shut = Bench.from_lineup(("C",), ["s1"], games, {}, promotable_from={"b1": TODAY + 1})
+    assert starts_from(open_, "b1", TODAY - 1) == "tonight"
+    assert starts_from(shut, "b1", TODAY - 1) == "2026-11-24"
