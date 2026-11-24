@@ -628,7 +628,8 @@ def tipped(
     it. The game stays in his week, to be simulated for his availability, and
     he is promotable only from the day after. Live, a tipoff that is missing or
     cannot be placed in time counts as passed, as it does for a call
-    ("tipoff unknown; no call"). A replay's run moment is before any tip.
+    ("tipoff unknown; no call"), but only for a game dated today: a later one
+    cannot have tipped yet. A replay's run moment is before any tip.
     """
     moment = clock.aware_utc(before)
     out: dict[str, int] = {}
@@ -637,7 +638,10 @@ def tipped(
         if nxt is None:
             continue
         tip = clock.aware_utc(slate.tipoff.get((pid, nxt.day)))
-        if (tip is None and live) or (tip is not None and moment is not None and tip <= moment):
+        # An unknown tip time can only have passed once the game's date has
+        # arrived; a game later in the week is promotable whatever its hour.
+        unknown_today = tip is None and live and nxt.day <= known_through + 1
+        if unknown_today or (tip is not None and moment is not None and tip <= moment):
             out[pid] = nxt.day + 1
     return out
 

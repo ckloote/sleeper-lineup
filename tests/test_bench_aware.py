@@ -347,3 +347,12 @@ def test_a_live_build_without_now_reads_the_clock_once_for_every_deadline(monkey
     with pytest.raises(Stop):
         digest_mod.build(ctx, 4, "2026-11-23", live=True, bench_aware=True)
     assert seen and seen[0] is not None and seen[0].tzinfo is not None
+
+
+def test_an_unknown_tip_bars_only_a_game_dated_today():
+    """A game later in the week cannot have tipped, whatever its hour."""
+    from lockin.digest import tipped
+
+    games = {"later": [Game(0, TODAY + 2, False, 0.0)], "today": [Game(0, TODAY, False, 0.0)]}
+    now = "2026-11-23T20:00:00+00:00"
+    assert tipped(_slate({}), games, TODAY - 1, before=now, live=True) == {"today": TODAY + 1}
