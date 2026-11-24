@@ -459,6 +459,8 @@ def run_backtest(
             return None
         ids = rotation.regulars(conn, panel, roster_id, ids, through_day=min(days) - 1)
         games = {p: games_for(p, week) for p in ids if games_for(p, week)}
+        if not games:
+            return None
         held = {p: positions.get((p, week)) or current.get(p, []) for p in [*starters, *games]}
         return Bench.from_lineup(
             [str(s) for s in slots], starters, games, held, regulars=list(games)
@@ -527,7 +529,8 @@ def run_backtest(
                     theirs,
                     {pid: thresholds_for(pid, week) for pid in theirs},
                     week,
-                    cache,
+                    # Isolated, so the experiment cannot change later baselines.
+                    cache.isolated(),
                     stream(seed, ROLLOUT_STREAM, week, roster_id),
                     bench=bench,
                 )

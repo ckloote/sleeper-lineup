@@ -29,8 +29,9 @@ coincide the behaviour is exactly the Phase 5 behaviour, which is pinned by
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections import ChainMap
+from collections.abc import MutableMapping, Sequence
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -60,11 +61,13 @@ class SimulationCache:
     dnp_scale: dict[int, float] = field(default_factory=dict)
     """Per-week hazard correction for started players, fit on prior weeks only.
     See ``lockin.backtest.starter_dnp_scale`` for why it is needed."""
-    contributions: dict[tuple[str, int, int], np.ndarray] = field(default_factory=dict)
-    bench_rows: dict[tuple[str, int, int, bool], np.ndarray | None] = field(default_factory=dict)
+    contributions: MutableMapping[tuple[str, int, int], np.ndarray] = field(default_factory=dict)
+    bench_rows: MutableMapping[tuple[str, int, int, bool], np.ndarray | None] = field(
+        default_factory=dict
+    )
     """`bench_contribution`'s results. Kept apart from ``contributions``: the
     same player and cutoffs mean a different thing on the bench."""
-    thresholds: dict[tuple[str, int], dict[int, float]] = field(default_factory=dict)
+    thresholds: MutableMapping[tuple[str, int], dict[int, float]] = field(default_factory=dict)
     misses: int = 0
     ride_unprojectable: bool = False
     """What to do with a player who cannot be projected but has games left.
@@ -80,6 +83,25 @@ class SimulationCache:
     the old behaviour, explicitly. For the handful of early-season players it
     touches it reads the final game's real score — hindsight, but hindsight
     about a decision nobody could make, not about one being graded."""
+
+    def isolated(self) -> SimulationCache:
+        """A cache that reads this one's draws but keeps its own writes.
+
+        For an experimental replay sharing a backtest with the baseline. Reads
+        fall through, so where both walks ask for the same continuation they
+        get the same samples and the comparison stays paired. Writes stay in
+        the overlay. Otherwise a continuation the experiment drew on a night
+        the baseline never visited would be served to a later roster-week's
+        baseline in place of its own draw, and the experiment would move the
+        baseline it is measured against (review of PR #3, finding 2).
+        """
+        return replace(
+            self,
+            contributions=ChainMap({}, self.contributions),
+            bench_rows=ChainMap({}, self.bench_rows),
+            thresholds=ChainMap({}, self.thresholds),
+            misses=0,
+        )
 
     def contribution(
         self,

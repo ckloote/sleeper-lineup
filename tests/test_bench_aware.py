@@ -201,3 +201,59 @@ def test_a_swap_in_with_nothing_left_after_the_swap_is_no_option():
     rng = np.random.default_rng(0)
     assert cache.bench_contribution("b1", games, 5, rng, known_through=9, start=11) is None
     assert source.days == []
+
+
+class NoisySource:
+    """Draws that depend on the rng, so a served sample shows whose stream it came from."""
+
+    def project_path(self, sleeper_id, day, days, weeks, *, rng, n_paths, dnp_scale=1.0):
+        return rng.normal(30.0, 12.0, (n_paths, len(days))).clip(min=0.0)
+
+
+def _after_bench_replay(isolate: bool | None):
+    """The shared cache after roster A's baseline and, optionally, its bench replay.
+
+    ``isolate`` None skips the bench replay; True runs it on `isolated()`.
+    """
+    from lockin.rollout import SimulationCache, replay_week
+
+    def week(*days):
+        return [Game(i, d, True, 10.0 + 7 * i) for i, d in enumerate(days)]
+
+    a = {"a1": week(1, 3, 6), "a2": week(2, 5)}
+    opp = {"o1": week(1, 4, 6)}
+    greedy = {pid: {g.index: 25.0 for g in games} for pid, games in {**a, **opp}.items()}
+    cache = SimulationCache(source=NoisySource(), n_sims=64)
+    replay_week(a, opp, greedy, 5, cache, np.random.default_rng(1))
+    if isolate is not None:
+        # No bench candidates at all: the swap step still runs every night.
+        empty = Bench.from_lineup(("UTIL", "UTIL"), list(a), {}, {})
+        shared = cache.isolated() if isolate else cache
+        replay_week(a, opp, greedy, 5, shared, np.random.default_rng(1), bench=empty)
+    return cache
+
+
+def test_the_bench_replay_cannot_move_a_later_baseline():
+    """Whatever a later roster-week's baseline reads is what the baseline wrote."""
+    baseline = _after_bench_replay(None)
+    after = _after_bench_replay(True)
+    assert after.contributions.keys() == baseline.contributions.keys()
+    for key, row in baseline.contributions.items():
+        np.testing.assert_array_equal(after.contributions[key], row)
+    assert not after.bench_rows
+
+
+def test_without_isolation_the_bench_replay_leaks():
+    """Pins that the setup above can see the leak, so its pass means something:
+    the swap step draws continuations on nights the baseline never visited."""
+    baseline = _after_bench_replay(None)
+    leaked = _after_bench_replay(False)
+    assert set(leaked.contributions) > set(baseline.contributions)
+
+
+def test_an_isolated_cache_reads_the_baseline_draws():
+    """Pairing: where both walks ask for the same continuation, they share it."""
+    cache = _after_bench_replay(None)
+    view = cache.isolated()
+    key = next(iter(cache.contributions))
+    assert view.contributions[key] is cache.contributions[key]
