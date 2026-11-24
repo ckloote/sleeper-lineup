@@ -134,9 +134,11 @@ class LockCall:
     every number around it treat him as unlocked; the digest says so rather than
     assuming the earlier call was taken."""
     via: tuple[str, ...] = ()
-    """Bench players the pass branch starts in his place, which locking him
-    would rule out (`lockin.rollout.Branches.brought_in`). Empty when the call
-    did not turn on the bench, or the bench was not considered."""
+    """Bench players the modeled pass lineup starts and the modeled lock lineup
+    leaves on the bench (`lockin.rollout.Branches.brought_in`). The lock lineup
+    is the solver's choice, not the only legal one, so this is never a claim
+    that locking rules them out: with two equal guards it can be a tie. Empty
+    when the call did not turn on the bench, or the bench was not considered."""
     bench_in: tuple[str, ...] = ()
     """Every bench player the pass lineup starts: ``via`` plus any the lock
     lineup would start too. Recorded whenever the bench was in play, even with
@@ -867,9 +869,10 @@ def build(
     and the run refuses to read a slate that has not finished. ``now`` is the
     moment of the run, which closes any call whose next tipoff has passed.
 
-    ``bench_aware`` prices every call with the roster's bench in play: passing
-    keeps the slot open for a bench player who plays later, which locking
-    rules out (`lockin.rollout.Bench`). Off, the calls are exactly as before.
+    ``bench_aware`` prices every call with the roster's bench in play: each
+    branch fields the best lineup it can from the starters and the bench, and
+    locking pins the player to his slot (`lockin.rollout.Bench`). Off, the
+    calls are exactly as before.
     """
     conn = ctx.conn
     if live and now is None:
@@ -1345,17 +1348,14 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
             out.append(f"        {need}")
             if call.via:
+                # The two modeled lineups, as they are: the pass lineup to field,
+                # and who of it the lock lineup leaves out. Never "locking rules
+                # him out": the lock lineup is the solver's pick, not the only one.
                 short = lambda ps: ", ".join(_short(names_of(digest, p), 16) for p in ps)  # noqa: E731
-                if set(call.bench_in) <= set(call.via):
-                    out.append(f"        pass: start {short(call.via)}")
-                else:
-                    # Passing frees a slot for ``via``; the rest of the pass
-                    # lineup's arrivals happen whichever way the call goes.
-                    out.append(f"        pass also starts {short(call.via)}")
-                    out.append(f"        pass lineup: start {short(call.bench_in)}")
+                out.append(f"        pass: start {short(call.bench_in or call.via)}")
                 if call.bench_out:
-                    sit = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_out)
-                    out.append(f"        and bench {sit}")
+                    out.append(f"        and bench {short(call.bench_out)}")
+                out.append(f"        lock lineup sits {short(call.via)}")
             if call.said_lock_on:
                 said = datetime.fromisoformat(call.said_lock_on).strftime("%a")
                 out.append(f"        {said} said LOCK; ignore if you locked")
@@ -1646,24 +1646,23 @@ def pass_lineup(plans: list[Branches], bench: Bench | None) -> dict[str, tuple]:
 
 
 def swap_text(digest: Digest, call: LockCall) -> str:
-    """What passing makes possible, and the lineup it means; "" without a swap.
+    """The two modeled lineups behind a call that turned on the bench; "" otherwise.
 
-    "; passing lets you start X in place of Y", or, when the pass lineup also
-    starts bench players locking would start too, "; passing lets you start X;
-    the pass lineup starts X, Z in place of Y, W". Only ``via`` is credited to
-    passing: naming Z there would suggest locking gives him up, when
-    ``p_win_lock`` assumes he starts. Who goes out is read from the lineup the
-    model fielded (``bench_out``), never assumed to be the player deciding.
+    "; the pass lineup starts X, Z in place of Y, W; the lock lineup leaves X
+    on the bench". It describes what the solver chose for each branch and
+    claims nothing more. Saying passing "lets you" start X, or that locking
+    "rules him out", would overstate it: the lock lineup is one legal choice,
+    and with two equal guards X could start there too. Who goes out is read
+    from the lineup the model fielded (``bench_out``), never assumed to be the
+    player deciding.
     """
     if not call.via:
         return ""
     names = lambda ps: ", ".join(names_of(digest, p) for p in ps)  # noqa: E731
-    text = "; passing lets you start " + names(call.via)
-    if not set(call.bench_in) <= set(call.via):
-        text += "; the pass lineup starts " + names(call.bench_in)
+    text = "; the pass lineup starts " + names(call.bench_in or call.via)
     if call.bench_out:
         text += " in place of " + names(call.bench_out)
-    return text
+    return text + "; the lock lineup leaves " + names(call.via) + " on the bench"
 
 
 def render_shadow(digest: Digest) -> str | None:

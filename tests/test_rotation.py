@@ -202,7 +202,10 @@ def test_the_log_line_names_only_the_calls_that_change():
     live = digest(calls=[call("holiday", True), call("allen", False)], shadow=shadow)
     text = render_shadow(live)
     assert "P(win) 18%" in text and "Karl-Anthony Towns" in text
-    assert "HOLIDAY: LOCK -> PASS (passing lets you start Karl-Anthony Towns)" in text
+    assert (
+        "HOLIDAY: LOCK -> PASS (the pass lineup starts Karl-Anthony Towns;"
+        " the lock lineup leaves Karl-Anthony Towns on the bench)"
+    ) in text
     assert "ALLEN" not in text
     assert render_shadow(digest()) is None
     assert render_shadow(digest(shadow_error="boom")) == "bench shadow failed: boom"

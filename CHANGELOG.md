@@ -11,7 +11,8 @@
   lineup from the unlocked starters and the bench, chosen on expected value.
   Locking pins the player to his slot. Passing keeps that slot open for a bench
   player. A call that turns on this says "pass: start …" and, when the
-  re-solved lineup sends someone to the bench, "and bench …". That player is
+  re-solved lineup sends someone to the bench, "and bench …", then
+  "lock lineup sits …" for whom the modeled lock lineup leaves out. That player is
   not always the one deciding, so `explain` lists the slot moves. When the
   projection assumes a bench player starts, WATCH says "assumed to start".
 - Bench players designated Out, IR or Suspended are left out. They get the raw

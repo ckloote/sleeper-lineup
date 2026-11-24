@@ -400,7 +400,10 @@ def test_the_swap_names_who_the_fielded_lineup_benches_not_the_deciding_player()
     )
     names = {"1002": "P1002", "1003": "P1003", "1006": "P1006"}
     d = Digest("2026-11-23", 5, 4, 7, 0, names=names, calls=[call])
-    assert swap_text(d, call) == "; passing lets you start P1002 in place of P1003"
+    assert swap_text(d, call) == (
+        "; the pass lineup starts P1002 in place of P1003;"
+        " the lock lineup leaves P1002 on the bench"
+    )
     assert "P1006" not in swap_text(d, call)
 
 
@@ -452,10 +455,12 @@ def test_a_starter_whose_slot_stays_empty_is_not_sent_to_the_bench():
     assert lineup_changes(b, {"F": "1009"}) == (("1003",), ("1009",))
 
 
-def test_only_what_passing_makes_possible_is_credited_to_passing():
-    """Review of PR #3: both lineups start 1004, only the pass lineup 1002. Saying
-    "passing lets you start 1002, 1004" suggested locking gives up 1004, when
-    p_win_lock assumes he starts. The full lineup is still spelled out."""
+def test_the_call_describes_the_two_modeled_lineups_and_claims_no_more():
+    """Review of PR #3: both lineups start 1004, only the pass lineup 1002.
+    Crediting 1004 to passing suggested locking gives him up, and then saying
+    locking "rules out" 1002 overstated it too: the lock lineup is the solver's
+    pick, and a legal one could start 1002. So the text says what each modeled
+    lineup does, and nothing about what locking makes impossible."""
     from lockin.digest import Digest, LockCall, render, swap_text
 
     call = LockCall(
@@ -486,16 +491,17 @@ def test_only_what_passing_makes_possible_is_credited_to_passing():
         margin={"q10": -40, "q50": -10, "q90": 20},
     )
     assert swap_text(d, call) == (
-        "; passing lets you start P1002; the pass lineup starts P1002, P1004"
-        " in place of P1003, P1007"
+        "; the pass lineup starts P1002, P1004 in place of P1003, P1007;"
+        " the lock lineup leaves P1002 on the bench"
     )
     text = render(d)
-    assert "pass also starts P1002" in text
-    assert "pass lineup: start P1002, P1004" in text and "and bench P1003, P1007" in text
-    assert "passing lets you start P1002, P1004" not in swap_text(d, call)
+    assert "pass: start P1002, P1004" in text and "and bench P1003, P1007" in text
+    assert "lock lineup sits P1002" in text
+    for overclaim in ("lets you", "rules out", "rule out"):
+        assert overclaim not in swap_text(d, call) and overclaim not in text
 
 
-def test_a_one_for_one_swap_reads_as_one_line():
+def test_a_one_for_one_swap():
     from lockin.digest import Digest, LockCall, swap_text
 
     call = LockCall(
@@ -512,7 +518,10 @@ def test_a_one_for_one_swap_reads_as_one_line():
         bench_out=("1003",),
     )
     d = Digest("2026-11-23", 5, 4, 7, 0, names={"1002": "P1002", "1003": "P1003"})
-    assert swap_text(d, call) == "; passing lets you start P1002 in place of P1003"
+    assert swap_text(d, call) == (
+        "; the pass lineup starts P1002 in place of P1003;"
+        " the lock lineup leaves P1002 on the bench"
+    )
 
 
 def test_a_swap_both_lineups_make_is_recorded_though_passing_adds_nothing():

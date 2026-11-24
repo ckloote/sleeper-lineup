@@ -635,3 +635,43 @@ def test_explain_explains_the_call_the_digest_made(season_db, monkeypatch):
         assert f"    {c['action']} — P(win)" in why.output, why.output
         if c["break_even"] is not None:
             assert f"break-even: score {c['break_even']:g} or more" in why.output
+
+
+def test_explain_describes_the_modeled_lineups_without_overclaiming(season_db, monkeypatch):
+    """Review of PR #3: explain said passing let you start a player "which
+    locking rules out", when the lock lineup was only the solver's pick."""
+    import dataclasses
+
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    real = digest_mod.build
+
+    def build(*a, **kw):
+        report = real(*a, **kw)
+        towns = next(c for c in report.calls if "Towns" in c.name)
+        report.names.update({"b1": "Bench One", "b2": "Bench Two", "s9": "Starter Nine"})
+        swapped = dataclasses.replace(
+            towns,
+            via=("b1",),
+            bench_in=("b1", "b2"),
+            bench_out=("s9",),
+            moves=(("b1", "UTIL#1"), ("b2", "G")),
+        )
+        report.calls = [swapped if c is towns else c for c in report.calls]
+        return report
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    monkeypatch.setattr(digest_mod, "build", build)
+    out = CliRunner().invoke(
+        cli.main, ["explain", "Towns", "--date", AS_OF, "--sims", "50", "--bench-aware"]
+    )
+    assert out.exit_code == 0, out.output
+    assert (
+        "The modeled PASS lineup starts Bench One, Bench Two in place of Starter Nine."
+        in out.output
+    )
+    assert "The modeled LOCK lineup leaves Bench One on the bench." in out.output
+    assert "UTIL  Bench One" in out.output and "G     Bench Two" in out.output
+    assert "rules out" not in out.output and "lets you" not in out.output

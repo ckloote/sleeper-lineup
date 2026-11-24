@@ -376,8 +376,9 @@ class Branches:
     fielded: dict[str, str]
     """The pass branch's lineup, ``{slot key: player}``."""
     brought_in: tuple[str, ...]
-    """Bench players the pass branch uses and the lock branch does not: the swap
-    that passing pays for."""
+    """Bench players the pass lineup uses and the lock lineup, as solved, does
+    not. The lock lineup is one optimal choice, so this is what the two modeled
+    lineups differ by, not who locking makes impossible."""
     sent_out: tuple[str, ...] = ()
     """Current starters the pass lineup sends to the bench: anyone in a slot
     now whose slot it gives to someone else. Read from the current slot

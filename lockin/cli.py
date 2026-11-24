@@ -1387,12 +1387,15 @@ def explain(
         if call.via:
             # Who goes out is read from the lineup the model fielded: re-solving
             # the slots can keep him and bench someone else.
+            # The two modeled lineups, as chosen. Not "locking rules him out":
+            # the lock lineup is the solver's pick, and a tie could start him.
             named = lambda ps: ", ".join(report.names.get(p, p) for p in ps)  # noqa: E731
-            click.echo(f"    Passing lets you start {named(call.via)}, which locking rules out.")
-            line = f"    The pass lineup starts {named(call.bench_in or call.via)}"
+            line = f"    The modeled PASS lineup starts {named(call.bench_in or call.via)}"
             if call.bench_out:
                 line += f" in place of {named(call.bench_out)}"
-            click.echo(line + ". The pass branch prices that lineup:")
+            click.echo(line + ".")
+            click.echo(f"    The modeled LOCK lineup leaves {named(call.via)} on the bench.")
+            click.echo("    The PASS lineup, slot by slot where it changes:")
             for p, slot in call.moves:
                 click.echo(f"      {slot.split('#')[0]:<5} {report.names.get(p, p)}")
 
