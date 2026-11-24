@@ -537,6 +537,13 @@ def run_backtest(
                 totals[ROLLOUT_BENCH] = benched.total
                 zeros[ROLLOUT_BENCH] = sum(1 for v in benched.counted.values() if v == 0.0)
                 locks[ROLLOUT_BENCH] = len(benched.locked)
+            elif bench_aware:
+                # No regulars to field: the policy is rollout, so it scores what
+                # rollout scored. Leaving the week out would compare the two on
+                # only the weeks where the bench can matter, and inflate the gain.
+                totals[ROLLOUT_BENCH] = totals[ROLLOUT]
+                zeros[ROLLOUT_BENCH] = zeros[ROLLOUT]
+                locks[ROLLOUT_BENCH] = locks[ROLLOUT]
         else:
             # Weeks 23-24 drop eliminated teams and week 25 is unscored, so
             # there is no opponent and no win to play for. Left absent rather
