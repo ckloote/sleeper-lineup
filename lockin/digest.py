@@ -808,6 +808,11 @@ def morning(
         ctx = load_context(conn, season, params=params)
     except NoGamesYet as exc:
         return abstain(conn, season, roster_id, as_of, f"insufficient history: {exc}")
+    if live and now is None:
+        # Read once, here, so the digest and its shadow are taken at the same
+        # instant. Each `build` reading the clock itself could put a tipoff
+        # between them and record the gap as a policy difference.
+        now = datetime.now(UTC)
     args = dict(n_sims=n_sims, n_paths=n_sims, locked=locked, live=live, now=now)
     digest = build(ctx, roster_id, as_of, bench_aware=bench_aware, **args)
     if shadow and not bench_aware and (digest.calls or digest.rules):

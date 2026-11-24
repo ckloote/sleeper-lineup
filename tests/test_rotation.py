@@ -235,3 +235,19 @@ def test_no_shadow_when_bench_aware_is_already_on_or_nothing_was_called(monkeypa
     digest_mod.morning(None, "2026", ROSTER, date_of(MON + 1), shadow=True)
     digest_mod.morning(None, "2026", ROSTER, date_of(MON + 1), shadow=True, bench_aware=True)
     assert seen == [False, True]
+
+
+def test_a_live_morning_takes_the_digest_and_its_shadow_at_one_instant(monkeypatch):
+    seen = []
+
+    def build(ctx, roster_id, as_of, *, bench_aware, now, **_):
+        seen.append(now)
+        return digest(calls=[call("holiday", True)])
+
+    monkeypatch.setattr(digest_mod, "load_context", lambda *a, **k: None)
+    monkeypatch.setattr(digest_mod.calendar, "disagreement", lambda *a: None)
+    monkeypatch.setattr(digest_mod, "build", build)
+    out = digest_mod.morning(None, "2026", ROSTER, date_of(MON + 1), live=True, shadow=True)
+    assert out.shadow is not None
+    assert len(seen) == 2 and seen[0] is seen[1]
+    assert seen[0] is not None and seen[0].tzinfo is not None
