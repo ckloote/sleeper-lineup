@@ -843,6 +843,11 @@ def build(
     rules out (`lockin.rollout.Bench`). Off, the calls are exactly as before.
     """
     conn = ctx.conn
+    if live and now is None:
+        # One clock for every deadline in the run. Left None, the calls would
+        # read the real clock while the run moment, and with it the bench's
+        # tipoff checks, fell back to a replay's morning (review of PR #3).
+        now = datetime.now(UTC)
     if live and (problem := calendar.disagreement(conn, ctx.season, as_of)):
         return abstain(conn, ctx.season, roster_id, as_of, problem)
     day = day_index(as_of)

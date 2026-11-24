@@ -322,3 +322,28 @@ def test_a_tipped_game_is_still_simulated_before_the_next_one_counts():
     )
     assert source.days == [[TODAY, TODAY + 1]]
     np.testing.assert_array_equal(rows["b1"], np.full(8, 20.0))
+
+
+def test_a_live_build_without_now_reads_the_clock_once_for_every_deadline(monkeypatch):
+    """Calls used the real clock and the bench the replay morning, when ``now`` was omitted."""
+    from types import SimpleNamespace
+
+    from lockin import digest as digest_mod
+
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def slate_in_progress(as_of, now):
+        seen.append(now)
+        raise Stop
+
+    monkeypatch.setattr(digest_mod.calendar, "disagreement", lambda *a: None)
+    monkeypatch.setattr(digest_mod, "resolve_week", lambda *a: 5)
+    monkeypatch.setattr(digest_mod, "stats_evidence", lambda *a: SimpleNamespace(problem=None))
+    monkeypatch.setattr(digest_mod, "slate_in_progress", slate_in_progress)
+    ctx = SimpleNamespace(conn=None, season="2026")
+    with pytest.raises(Stop):
+        digest_mod.build(ctx, 4, "2026-11-23", live=True, bench_aware=True)
+    assert seen and seen[0] is not None and seen[0].tzinfo is not None
