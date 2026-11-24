@@ -173,8 +173,9 @@ class SimulationCache:
 
         Only his games on or after ``start`` can count: a player has to be in a
         starting slot when his game tips (§7.6), so the games he sits through
-        on the bench are gone. From ``start`` on he is played under the same
-        base policy as a starter, every game bankable.
+        on the bench are gone. They are still simulated, because what happens
+        in them shapes his availability for the rest. From ``start`` on he is
+        played under the same base policy as a starter, every game bankable.
 
         Two differences from :meth:`contribution`, both conservative:
 
@@ -192,9 +193,12 @@ class SimulationCache:
         key = (sleeper_id, known_through, start, regular)
         if key in self.bench_rows:
             return self.bench_rows[key]
-        ahead = [g for g in games if g.day >= start and g.day > known_through]
+        # Every game after the cutoff is simulated, including the ones he sits
+        # through before ``start``: they cannot count, but rest, back-to-backs
+        # and DNP state carry from them into the games that can.
+        ahead = [g for g in games if g.day > known_through]
         value: np.ndarray | None = None
-        if ahead:
+        if any(g.day >= start for g in ahead):
             try:
                 paths = self.source.project_path(
                     sleeper_id,
@@ -208,7 +212,13 @@ class SimulationCache:
             except InsufficientHistory:
                 value = None
             else:
-                value = apply_base_policy(paths, base_policy_thresholds(paths))
+                # As in `contribution`: a game before ``start`` is a threshold no
+                # score clears, and the last game is always one he can count.
+                thresholds = [
+                    float("inf") if game.day < start else threshold
+                    for game, threshold in zip(ahead, base_policy_thresholds(paths), strict=True)
+                ]
+                value = apply_base_policy(paths, thresholds)
         self.bench_rows[key] = value
         return value
 

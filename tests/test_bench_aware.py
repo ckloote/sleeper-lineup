@@ -161,3 +161,43 @@ def test_env_flag_rejects_typos(monkeypatch):
     monkeypatch.setenv("LOCKIN_BENCH_AWARE", "ture")
     with pytest.raises(ValueError):
         env_flag("LOCKIN_BENCH_AWARE")
+
+
+class RecordingSource:
+    """Hands out fixed paths and records which days it was asked to project."""
+
+    def __init__(self, paths: np.ndarray):
+        self.paths = paths
+        self.days: list[list[int]] = []
+
+    def project_path(self, sleeper_id, day, days, weeks, *, rng, n_paths, dnp_scale=1.0):
+        self.days.append(list(days))
+        return self.paths[:n_paths, : len(days)]
+
+
+def test_a_swap_in_is_simulated_through_the_games_he_sits_out():
+    """Wednesday on the bench still happens: it is projected, never counted."""
+    from lockin.rollout import SimulationCache
+
+    # Wednesday 90 on every path: banked if it could count. Thursday 20, Friday 30.
+    paths = np.tile([90.0, 20.0, 30.0], (8, 1))
+    source = RecordingSource(paths)
+    cache = SimulationCache(source=source, n_sims=8)
+    games = [Game(0, 10, False, 0.0), Game(1, 11, False, 0.0), Game(2, 12, False, 0.0)]
+    row = cache.bench_contribution(
+        "b1", games, 5, np.random.default_rng(0), known_through=9, start=11
+    )
+    assert source.days == [[10, 11, 12]]
+    # Thursday 20 is below riding on to Friday's 30, so Friday counts.
+    np.testing.assert_array_equal(row, np.full(8, 30.0))
+
+
+def test_a_swap_in_with_nothing_left_after_the_swap_is_no_option():
+    from lockin.rollout import SimulationCache
+
+    source = RecordingSource(np.full((8, 3), 50.0))
+    cache = SimulationCache(source=source, n_sims=8)
+    games = [Game(0, 10, False, 0.0)]
+    rng = np.random.default_rng(0)
+    assert cache.bench_contribution("b1", games, 5, rng, known_through=9, start=11) is None
+    assert source.days == []
