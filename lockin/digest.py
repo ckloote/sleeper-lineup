@@ -138,16 +138,17 @@ class LockCall:
     would rule out (`lockin.rollout.Branches.brought_in`). Empty when the call
     did not turn on the bench, or the bench was not considered."""
     bench_in: tuple[str, ...] = ()
-    """Every bench player that lineup starts, when ``via`` is set: ``via`` plus
-    any the lock lineup would start too. The instructions name all of them, or
-    following them would leave a slot empty."""
+    """Every bench player the pass lineup starts: ``via`` plus any the lock
+    lineup would start too. Recorded whenever the bench was in play, even with
+    ``via`` empty, because ``p_win_pass`` assumes that lineup. Instructions for
+    fielding it name all of them, or following them would leave a slot empty;
+    what *passing* makes possible is ``via`` alone."""
     bench_out: tuple[str, ...] = ()
-    """Starters that lineup sends to the bench, when ``via`` is set. Read from
-    the lineup the model fielded, not assumed to be him: re-solving the slots
-    can keep him and bench someone else."""
+    """Starters the pass lineup sends to the bench, recorded as ``bench_in`` is.
+    Read from the lineup the model fielded, not assumed to be him: re-solving
+    the slots can keep him and bench someone else."""
     moves: tuple[tuple[str, str], ...] = ()
-    """``(player, slot)`` for every slot change that lineup needs, when ``via``
-    is set."""
+    """``(player, slot)`` for every slot change the pass lineup needs."""
 
     @property
     def edge(self) -> float:
@@ -1152,7 +1153,6 @@ def build(
             brought_in=via,
             plans=plans,
         )
-        swap = plans[0] if via and plans and bench is not None else None
         digest.calls.append(
             LockCall(
                 sleeper_id=sleeper_id,
@@ -1166,9 +1166,7 @@ def build(
                 expires_utc=expires,
                 said_lock_on=said_lock.get((sleeper_id, game.day)),
                 via=tuple(via),
-                bench_in=swap.arriving if swap else (),
-                bench_out=swap.sent_out if swap else (),
-                moves=swap.moves(bench.slot_of) if swap and bench else (),
+                **pass_lineup(plans, bench),
             )
         )
     digest.calls.sort(key=lambda c: -c.score)
@@ -1347,8 +1345,14 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
             out.append(f"        {need}")
             if call.via:
-                who = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_in or call.via)
-                out.append(f"        pass: start {who}")
+                short = lambda ps: ", ".join(_short(names_of(digest, p), 16) for p in ps)  # noqa: E731
+                if set(call.bench_in) <= set(call.via):
+                    out.append(f"        pass: start {short(call.via)}")
+                else:
+                    # Passing frees a slot for ``via``; the rest of the pass
+                    # lineup's arrivals happen whichever way the call goes.
+                    out.append(f"        pass also starts {short(call.via)}")
+                    out.append(f"        pass lineup: start {short(call.bench_in)}")
                 if call.bench_out:
                     sit = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_out)
                     out.append(f"        and bench {sit}")
@@ -1623,19 +1627,42 @@ def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> Non
     )
 
 
-def swap_text(digest: Digest, call: LockCall) -> str:
-    """ "; passing lets you start X in place of Y", or "" without a swap.
+def pass_lineup(plans: list[Branches], bench: Bench | None) -> dict[str, tuple]:
+    """A call's ``bench_in``, ``bench_out`` and ``moves``: the pass lineup's
+    changes against the current slots.
 
-    Who comes in is ``via``; who goes out is read from the lineup the model
-    fielded (``bench_out``). Saying "bench him" instead would be wrong whenever
-    re-solving the slots keeps him and benches someone else.
+    Kept whether or not passing is what makes them possible, so with ``via``
+    empty too: ``p_win_pass`` assumes that lineup either way, and the shadow
+    row is how it can be reconstructed later.
+    """
+    if not plans or bench is None:
+        return {}
+    plan = plans[0]
+    return {
+        "bench_in": plan.arriving,
+        "bench_out": plan.sent_out,
+        "moves": plan.moves(bench.slot_of),
+    }
+
+
+def swap_text(digest: Digest, call: LockCall) -> str:
+    """What passing makes possible, and the lineup it means; "" without a swap.
+
+    "; passing lets you start X in place of Y", or, when the pass lineup also
+    starts bench players locking would start too, "; passing lets you start X;
+    the pass lineup starts X, Z in place of Y, W". Only ``via`` is credited to
+    passing: naming Z there would suggest locking gives him up, when
+    ``p_win_lock`` assumes he starts. Who goes out is read from the lineup the
+    model fielded (``bench_out``), never assumed to be the player deciding.
     """
     if not call.via:
         return ""
-    arriving = call.bench_in or call.via
-    text = "; passing lets you start " + ", ".join(names_of(digest, p) for p in arriving)
+    names = lambda ps: ", ".join(names_of(digest, p) for p in ps)  # noqa: E731
+    text = "; passing lets you start " + names(call.via)
+    if not set(call.bench_in) <= set(call.via):
+        text += "; the pass lineup starts " + names(call.bench_in)
     if call.bench_out:
-        text += " in place of " + ", ".join(names_of(digest, p) for p in call.bench_out)
+        text += " in place of " + names(call.bench_out)
     return text
 
 

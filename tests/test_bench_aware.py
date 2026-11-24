@@ -452,7 +452,10 @@ def test_a_starter_whose_slot_stays_empty_is_not_sent_to_the_bench():
     assert lineup_changes(b, {"F": "1009"}) == (("1003",), ("1009",))
 
 
-def test_the_instructions_name_every_arrival_and_departure():
+def test_only_what_passing_makes_possible_is_credited_to_passing():
+    """Review of PR #3: both lineups start 1004, only the pass lineup 1002. Saying
+    "passing lets you start 1002, 1004" suggested locking gives up 1004, when
+    p_win_lock assumes he starts. The full lineup is still spelled out."""
     from lockin.digest import Digest, LockCall, render, swap_text
 
     call = LockCall(
@@ -460,10 +463,10 @@ def test_the_instructions_name_every_arrival_and_departure():
         "P1006",
         1,
         20.0,
-        False,
-        0.1,
-        0.2,
-        25.0,
+        True,
+        0.172,
+        0.062,
+        15.0,
         via=("1002",),
         bench_in=("1002", "1004"),
         bench_out=("1003", "1007"),
@@ -482,6 +485,54 @@ def test_the_instructions_name_every_arrival_and_departure():
         opponent_total=210.0,
         margin={"q10": -40, "q50": -10, "q90": 20},
     )
-    assert swap_text(d, call) == "; passing lets you start P1002, P1004 in place of P1003, P1007"
+    assert swap_text(d, call) == (
+        "; passing lets you start P1002; the pass lineup starts P1002, P1004"
+        " in place of P1003, P1007"
+    )
     text = render(d)
-    assert "pass: start P1002, P1004" in text and "and bench P1003, P1007" in text
+    assert "pass also starts P1002" in text
+    assert "pass lineup: start P1002, P1004" in text and "and bench P1003, P1007" in text
+    assert "passing lets you start P1002, P1004" not in swap_text(d, call)
+
+
+def test_a_one_for_one_swap_reads_as_one_line():
+    from lockin.digest import Digest, LockCall, swap_text
+
+    call = LockCall(
+        "1006",
+        "P1006",
+        1,
+        20.0,
+        False,
+        0.1,
+        0.2,
+        25.0,
+        via=("1002",),
+        bench_in=("1002",),
+        bench_out=("1003",),
+    )
+    d = Digest("2026-11-23", 5, 4, 7, 0, names={"1002": "P1002", "1003": "P1003"})
+    assert swap_text(d, call) == "; passing lets you start P1002 in place of P1003"
+
+
+def test_a_swap_both_lineups_make_is_recorded_though_passing_adds_nothing():
+    """Review of PR #3: both branches start 1004 at G over 1007, so ``via`` is
+    empty, but p_win_pass assumes that lineup and the shadow row must say so."""
+    slots = ("F", "G")
+    positions = {"1006": ["SF"], "1007": ["PG"], "1004": ["PG"]}
+    b = bench(slots, ["1006", "1007"], positions, {"1004": []})
+    rows = {"1006": row(30, sd=0.1, seed=1), "1007": row(5, sd=0.1, seed=2)}
+    plan = with_bench(b, rows, {"1004": row(35, sd=0.1, seed=3)}, [], "1006", N)
+    assert plan is not None
+    assert plan.brought_in == ()
+    assert (plan.arriving, plan.sent_out) == (("1004",), ("1007",))
+    assert plan.moves(b.slot_of) == (("1004", "G"),)
+
+    from lockin.digest import pass_lineup
+
+    assert pass_lineup([plan], b) == {
+        "bench_in": ("1004",),
+        "bench_out": ("1007",),
+        "moves": (("1004", "G"),),
+    }
+    assert pass_lineup([], b) == {} and pass_lineup([plan], None) == {}

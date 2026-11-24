@@ -251,3 +251,30 @@ def test_a_live_morning_takes_the_digest_and_its_shadow_at_one_instant(monkeypat
     assert out.shadow is not None
     assert len(seen) == 2 and seen[0] is seen[1]
     assert seen[0] is not None and seen[0].tzinfo is not None
+
+
+def test_the_shadow_row_keeps_the_pass_lineup_when_passing_adds_no_one(conn):
+    shadow = digest(
+        calls=[
+            LockCall(
+                "holiday",
+                "H",
+                MON,
+                40.0,
+                True,
+                0.3,
+                0.2,
+                38.0,
+                bench_in=("1004",),
+                bench_out=("1007",),
+            )
+        ],
+        p_win=0.36,
+        my_total=250.0,
+        model="x; bench-aware",
+    )
+    persist(conn, digest(calls=[call("holiday", True)], shadow=shadow))
+    via, arriving, out = conn.execute(
+        "SELECT via, bench_in, bench_out FROM bench_shadow"
+    ).fetchone()
+    assert (json.loads(via), json.loads(arriving), json.loads(out)) == ([], ["1004"], ["1007"])
