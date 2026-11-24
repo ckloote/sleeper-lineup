@@ -1256,8 +1256,19 @@ def dashboard(out: Path, names: bool) -> None:
     default=None,
     help="What you have already banked, as 'sleeper_id:score,...'. Default: reconstructed.",
 )
+@click.option(
+    "--bench-aware/--no-bench-aware",
+    default=None,
+    help="Explain the bench-aware call, as `digest --bench-aware` makes it."
+    " Default: LOCKIN_BENCH_AWARE.",
+)
 def explain(
-    player: str, as_of: str | None, roster: int | None, sims: int, locked: str | None
+    player: str,
+    as_of: str | None,
+    roster: int | None,
+    sims: int,
+    locked: str | None,
+    bench_aware: bool | None,
 ) -> None:
     """Why the engine says what it says about one player.
 
@@ -1297,6 +1308,9 @@ def explain(
                 locked=banked,
                 live=live,
                 now=now,
+                # The policy the digest ran, so an explanation never argues with
+                # the call it explains.
+                bench_aware=cfg.bench_aware if bench_aware is None else bench_aware,
             )
         except (ValueError, projections_mod.NoGamesYet) as exc:
             raise click.ClickException(str(exc)) from None
@@ -1370,6 +1384,12 @@ def explain(
             f"\n    The gap is {call.edge:.2%} of win probability, which is what"
             f"\n    the call is worth — not the {abs(call.score - call.break_even):.1f} points."
         )
+        if call.via:
+            swaps = ", ".join(report.names.get(p, p) for p in call.via)
+            click.echo(
+                f"    Passing keeps his slot for {swaps}: the pass branch prices"
+                "\n    benching him and starting them instead."
+            )
 
     rules = [r for r in report.rules if r.sleeper_id == pid]
     if rules:

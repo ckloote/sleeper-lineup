@@ -577,3 +577,61 @@ def test_bench_aware_replay_fields_a_full_lineup(ctx, roster_id):
     assert set(result.locked) <= set(result.counted)
     # The caller's bench is not consumed by the replay.
     assert set(bench.games) == {pid for pid in ctx.benches[(week, roster_id)] if games(pid)}
+
+
+@pytest.mark.parametrize(
+    ("env", "args", "expected"),
+    [
+        (None, [], False),
+        ("1", [], True),
+        (None, ["--bench-aware"], True),
+        ("1", ["--no-bench-aware"], False),
+    ],
+)
+def test_explain_builds_with_the_digests_bench_mode(season_db, monkeypatch, env, args, expected):
+    """`explain` used to rebuild every call without the bench, so with bench-aware
+    calls on it could say LOCK about a call the digest made as PASS."""
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    seen = []
+    real = digest_mod.build
+
+    def build(*a, **kw):
+        seen.append(kw.get("bench_aware"))
+        return real(*a, **kw)
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    if env is None:
+        monkeypatch.delenv("LOCKIN_BENCH_AWARE", raising=False)
+    else:
+        monkeypatch.setenv("LOCKIN_BENCH_AWARE", env)
+    monkeypatch.setattr(digest_mod, "build", build)
+    out = CliRunner().invoke(cli.main, ["explain", "Towns", "--date", AS_OF, "--sims", "50", *args])
+    assert out.exit_code == 0, out.output
+    assert seen == [expected]
+
+
+def test_explain_explains_the_call_the_digest_made(season_db, monkeypatch):
+    """Same verdict and break-even, player by player, with bench-aware calls on."""
+    flag = "--bench-aware"
+    import json
+
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    monkeypatch.delenv("LOCKIN_BENCH_AWARE", raising=False)
+    common = ["--date", AS_OF, "--sims", "200", flag]
+    out = CliRunner().invoke(cli.main, ["digest", *common, "--json", "--no-write"])
+    assert out.exit_code == 0, out.output
+    calls = json.loads(out.output)["calls"]
+    assert calls, "week 12 midweek should have lock calls"
+    for c in calls:
+        why = CliRunner().invoke(cli.main, ["explain", c["sleeper_id"], *common])
+        assert why.exit_code == 0, why.output
+        assert f"    {c['action']} — P(win)" in why.output, why.output
+        if c["break_even"] is not None:
+            assert f"break-even: score {c['break_even']:g} or more" in why.output
