@@ -366,3 +366,39 @@ def test_the_bench_assumption_names_the_first_game_it_counts():
     shut = Bench.from_lineup(("C",), ["s1"], games, {}, promotable_from={"b1": TODAY + 1})
     assert starts_from(open_, "b1", TODAY - 1) == "tonight"
     assert starts_from(shut, "b1", TODAY - 1) == "2026-11-24"
+
+
+def test_the_swap_names_who_the_fielded_lineup_benches_not_the_deciding_player():
+    """Review of PR #3: passing on 1006 moved him UTIL -> F, benched 1003, and
+    started 1002 at UTIL. "Bench him and start them" told the manager to bench
+    1006, the 30-point player the model kept, and keep the 11-point 1003."""
+    from lockin.digest import Digest, LockCall, swap_text
+
+    slots = ("F", "UTIL")
+    positions = {"1003": ["SF"], "1006": ["SF"], "1002": ["PG"]}
+    b = bench(slots, ["1003", "1006"], positions, {"1002": []})
+    rows = {"1003": row(11, sd=0.1, seed=1), "1006": row(30, sd=0.1, seed=2)}
+    plan = with_bench(b, rows, {"1002": row(25, sd=0.1, seed=4)}, [], "1006", N)
+    assert plan is not None
+    assert plan.fielded == {"F": "1006", "UTIL": "1002"}
+    assert plan.brought_in == ("1002",)
+    assert plan.sent_out == ("1003",)
+    assert plan.moves(b.slot_of) == (("1006", "F"), ("1002", "UTIL"))
+
+    call = LockCall(
+        "1006",
+        "P1006",
+        1,
+        20.0,
+        False,
+        0.1,
+        0.2,
+        25.0,
+        via=plan.brought_in,
+        bench_out=plan.sent_out,
+        moves=plan.moves(b.slot_of),
+    )
+    names = {"1002": "P1002", "1003": "P1003", "1006": "P1006"}
+    d = Digest("2026-11-23", 5, 4, 7, 0, names=names, calls=[call])
+    assert swap_text(d, call) == "; passing lets you start P1002 in place of P1003"
+    assert "P1006" not in swap_text(d, call)

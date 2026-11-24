@@ -10,7 +10,9 @@
   `lockin digest --bench-aware`), each branch of a call fields the best legal
   lineup from the unlocked starters and the bench, chosen on expected value.
   Locking pins the player to his slot. Passing keeps that slot open for a bench
-  player. A call that turns on this says "pass keeps slot for …". When the
+  player. A call that turns on this says "pass: start …" and, when the
+  re-solved lineup sends someone to the bench, "and bench …". That player is
+  not always the one deciding, so `explain` lists the slot moves. When the
   projection assumes a bench player starts, WATCH says "assumed to start".
 - Bench players designated Out, IR or Suspended are left out. They get the raw
   DNP hazard, not the starter correction. A bench player who can't be

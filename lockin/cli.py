@@ -1385,11 +1385,15 @@ def explain(
             f"\n    the call is worth — not the {abs(call.score - call.break_even):.1f} points."
         )
         if call.via:
-            swaps = ", ".join(report.names.get(p, p) for p in call.via)
-            click.echo(
-                f"    Passing keeps his slot for {swaps}: the pass branch prices"
-                "\n    benching him and starting them instead."
-            )
+            # Who goes out is read from the lineup the model fielded: re-solving
+            # the slots can keep him and bench someone else.
+            start = ", ".join(report.names.get(p, p) for p in call.via)
+            line = f"    Passing lets you start {start}"
+            if call.bench_out:
+                line += " in place of " + ", ".join(report.names.get(p, p) for p in call.bench_out)
+            click.echo(line + ". The pass branch prices that lineup:")
+            for p, slot in call.moves:
+                click.echo(f"      {slot.split('#')[0]:<5} {report.names.get(p, p)}")
 
     rules = [r for r in report.rules if r.sleeper_id == pid]
     if rules:

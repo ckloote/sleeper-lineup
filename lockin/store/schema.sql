@@ -605,7 +605,8 @@ CREATE TABLE IF NOT EXISTS bench_shadow (
     threshold       REAL,               -- break-even, or the standing rule
     p_win_lock      REAL,
     p_win_pass      REAL,
-    via             TEXT,               -- JSON: who passing keeps the slot for
+    via             TEXT,               -- JSON: who passing lets you start
+    bench_out       TEXT,               -- JSON: who that lineup benches
     PRIMARY KEY (run_id, sleeper_id, action, for_day)
 );
 

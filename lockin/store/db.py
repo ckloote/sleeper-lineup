@@ -154,6 +154,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     },
     "ingest_runs": {"skipped": "TEXT"},
     "weekly_matchup_teams": {"poll_complete": "INTEGER"},
+    "bench_shadow": {"bench_out": "TEXT"},
 }
 
 

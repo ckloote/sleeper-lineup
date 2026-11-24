@@ -378,6 +378,15 @@ class Branches:
     brought_in: tuple[str, ...]
     """Bench players the pass branch uses and the lock branch does not: the swap
     that passing pays for."""
+    sent_out: tuple[str, ...] = ()
+    """Current starters the pass branch's lineup leaves out. Not necessarily
+    the player deciding: the lineup is re-solved, so he may only change slot
+    while someone else goes to the bench."""
+
+    def moves(self, slot_of: dict[str, str]) -> tuple[tuple[str, str], ...]:
+        """``(player, slot key)`` for everyone the pass lineup puts in a slot he
+        does not hold now, bench players included, in slot order."""
+        return tuple((p, slot) for slot, p in self.fielded.items() if slot_of.get(p) != slot)
 
 
 def with_bench(
@@ -404,15 +413,17 @@ def with_bench(
         return None
     zero = np.zeros(n_sims)
     total = sum((pool[p] for p in passing.values() if p not in locked), zero)
+    fielded = set(passing.values())
+    out = tuple(sorted(p for p in rows if p not in fielded))
     if deciding is None:
-        return Branches(total, None, passing, ())
+        return Branches(total, None, passing, (), out)
     banking = _field(bench, pool, locked, deciding)
     if banking is None:
         return None
     others = sum((pool[p] for p in banking.values() if p not in locked and p != deciding), zero)
     used = set(banking.values())
     brought = tuple(sorted(p for p in passing.values() if p in extra and p not in used))
-    return Branches(total, others, passing, brought)
+    return Branches(total, others, passing, brought, out)
 
 
 @dataclass(slots=True)
@@ -795,6 +806,7 @@ def decision_for(
     opponent_known: dict[str, float] | None = None,
     bench: Bench | None = None,
     brought_in: list[str] | None = None,
+    plans: list[Branches] | None = None,
 ) -> tuple[RolloutDecision, float]:
     """One lock/pass call, and the break-even it was taken against.
 
@@ -809,7 +821,8 @@ def decision_for(
     cannot disagree: LOCK exactly when the score is at or above it.
 
     With ``bench``, the bench players the pass branch would bring in because he
-    was not banked are appended to ``brought_in``, so the call can name them.
+    was not banked are appended to ``brought_in``, so the call can name them,
+    and the branches it compared to ``plans``, so it can say who goes out.
     """
     opponent = opponent_totals(
         opponent_lineup, opponent_thresholds, week, day, cache, rng, known=opponent_known
@@ -824,6 +837,8 @@ def decision_for(
         if plan is not None:
             if brought_in is not None:
                 brought_in.extend(plan.brought_in)
+            if plans is not None:
+                plans.append(plan)
             args = dict(
                 banked=sum(locked.values()),
                 contributions=plan.passing[None, :],

@@ -69,6 +69,7 @@ from lockin.core.winprob import win_probability
 from lockin.projections import NoGamesYet, date_of, day_index, load_panel, observed_scores
 from lockin.rollout import (
     Bench,
+    Branches,
     SimulationCache,
     bench_rows,
     decision_for,
@@ -136,6 +137,13 @@ class LockCall:
     """Bench players the pass branch starts in his place, which locking him
     would rule out (`lockin.rollout.Branches.brought_in`). Empty when the call
     did not turn on the bench, or the bench was not considered."""
+    bench_out: tuple[str, ...] = ()
+    """Starters that lineup sends to the bench, when ``via`` is set. Read from
+    the lineup the model fielded, not assumed to be him: re-solving the slots
+    can keep him and bench someone else."""
+    moves: tuple[tuple[str, str], ...] = ()
+    """``(player, slot)`` for every slot change that lineup needs, when ``via``
+    is set."""
 
     @property
     def edge(self) -> float:
@@ -1123,6 +1131,7 @@ def build(
         ):
             continue  # he has tipped again: the window is shut
         via: list[str] = []
+        plans: list[Branches] = []
         call, break_even = decision_for(
             mine,
             theirs,
@@ -1137,7 +1146,9 @@ def build(
             opponent_known=opponent_known,
             bench=bench,
             brought_in=via,
+            plans=plans,
         )
+        swap = plans[0] if via and plans and bench is not None else None
         digest.calls.append(
             LockCall(
                 sleeper_id=sleeper_id,
@@ -1151,6 +1162,8 @@ def build(
                 expires_utc=expires,
                 said_lock_on=said_lock.get((sleeper_id, game.day)),
                 via=tuple(via),
+                bench_out=swap.sent_out if swap else (),
+                moves=swap.moves(bench.slot_of) if swap and bench else (),
             )
         )
     digest.calls.sort(key=lambda c: -c.score)
@@ -1331,7 +1344,10 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             out.append(f"        {need}")
             if call.via:
                 who = ", ".join(_short(names_of(digest, p), 16) for p in call.via)
-                out.append(f"        pass keeps slot for {who}")
+                out.append(f"        pass: start {who}")
+                if call.bench_out:
+                    sit = ", ".join(_short(names_of(digest, p), 16) for p in call.bench_out)
+                    out.append(f"        and bench {sit}")
             if call.said_lock_on:
                 said = datetime.fromisoformat(call.said_lock_on).strftime("%a")
                 out.append(f"        {said} said LOCK; ignore if you locked")
@@ -1487,12 +1503,7 @@ def persist(
                 if np.isfinite(call.break_even)
                 else " no score is worth banking"
             )
-            + (
-                "; passing keeps his slot for "
-                + ", ".join(digest.names.get(p, p) for p in call.via)
-                if call.via
-                else ""
-            ),
+            + swap_text(digest, call),
             run_id,
             call.expires_utc,
             None,
@@ -1571,7 +1582,7 @@ def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> Non
 
     conn.executemany(
         "INSERT INTO bench_shadow (run_id, sleeper_id, action, for_day, score, threshold,"
-        " p_win_lock, p_win_pass, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " p_win_lock, p_win_pass, via, bench_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 run_id,
@@ -1583,14 +1594,30 @@ def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> Non
                 c.p_win_lock,
                 c.p_win_pass,
                 json.dumps(c.via),
+                json.dumps(c.bench_out),
             )
             for c in shadow.calls
         ]
         + [
-            (run_id, r.sleeper_id, "THRESHOLD", r.night, None, r.threshold, None, None, None)
+            (run_id, r.sleeper_id, "THRESHOLD", r.night, None, r.threshold, None, None, None, None)
             for r in shadow.rules
         ],
     )
+
+
+def swap_text(digest: Digest, call: LockCall) -> str:
+    """ "; passing lets you start X in place of Y", or "" without a swap.
+
+    Who comes in is ``via``; who goes out is read from the lineup the model
+    fielded (``bench_out``). Saying "bench him" instead would be wrong whenever
+    re-solving the slots keeps him and benches someone else.
+    """
+    if not call.via:
+        return ""
+    text = "; passing lets you start " + ", ".join(names_of(digest, p) for p in call.via)
+    if call.bench_out:
+        text += " in place of " + ", ".join(names_of(digest, p) for p in call.bench_out)
+    return text
 
 
 def render_shadow(digest: Digest) -> str | None:
@@ -1612,7 +1639,7 @@ def render_shadow(digest: Digest) -> str | None:
             continue
         line = f"  {c.name}: {'LOCK' if was.lock else 'PASS'} -> {'LOCK' if c.lock else 'PASS'}"
         if c.via:
-            line += " (keeps slot for " + ", ".join(names_of(shadow, p) for p in c.via) + ")"
+            line += " (" + swap_text(shadow, c).removeprefix("; ") + ")"
         lines.append(line)
     pool = ", ".join(names_of(shadow, p) for p in shadow.candidates) or "none"
     odds = "" if shadow.p_win is None else f"P(win) {shadow.p_win:.0%}, "

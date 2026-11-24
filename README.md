@@ -132,7 +132,9 @@ By default a call compares banking tonight's score with riding the same player
 to the end of the week. With `LOCKIN_BENCH_AWARE=1` in `.env`, or
 `lockin digest --bench-aware` for one run, passing also counts benching him and
 starting a better bench player who plays later. A call that depends on this
-says `pass keeps slot for <player>`. `WATCH … assumed to start` means the
+says `pass: start <player>`, then `and bench <player>` for whoever the lineup
+sends to the bench. That isn't always the player being decided, so check
+`lockin explain <player> --bench-aware` for the slot moves. `WATCH … assumed to start` means the
 projection and P(win) assume a lineup change only you can make. Bench players
 designated Out, IR or Suspended are left out.
 
