@@ -278,6 +278,10 @@ class Bench:
     regulars: frozenset[str] = frozenset()
     """Bench players the manager starts on his game nights (`lockin.rotation`),
     priced with the starter hazard correction."""
+    promotable_from: dict[str, int] = field(default_factory=dict)
+    """The first day each bench player can still be moved in for, where that is
+    later than the caller's swap night: today's game has already tipped. The
+    game is still simulated, but it cannot count."""
 
     @classmethod
     def from_lineup(
@@ -287,6 +291,7 @@ class Bench:
         games: dict[str, list[Game]],
         positions: dict[str, Sequence[str]],
         regulars: Sequence[str] = (),
+        promotable_from: dict[str, int] | None = None,
     ) -> Bench:
         """``starters`` in the same order as ``slots`` — the poll's slot order."""
         if len(slots) != len(starters):
@@ -297,11 +302,17 @@ class Bench:
             games={pid: list(g) for pid, g in games.items() if pid not in starters},
             positions={pid: tuple(pos) for pid, pos in positions.items()},
             regulars=frozenset(regulars),
+            promotable_from=dict(promotable_from or {}),
         )
 
     def copy(self) -> Bench:
         return Bench(
-            self.slots, dict(self.slot_of), dict(self.games), dict(self.positions), self.regulars
+            self.slots,
+            dict(self.slot_of),
+            dict(self.games),
+            dict(self.positions),
+            self.regulars,
+            dict(self.promotable_from),
         )
 
 
@@ -326,7 +337,7 @@ def bench_rows(
             week,
             rng,
             known_through=known_through,
-            start=start,
+            start=max(start, bench.promotable_from.get(pid, start)),
             regular=pid in bench.regulars,
         )
         if row is not None:

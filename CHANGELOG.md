@@ -40,6 +40,14 @@
   and the notification are unchanged. `digest.log` gets a `bench shadow:` line
   naming the regulars and any call that would flip. A failed shadow is
   recorded and never stops the digest. `LOCKIN_BENCH_SHADOW=0` turns it off.
+- Review fixes (PR #3):
+  - A swap-in's games before the swap night are simulated for his availability,
+    rather than dropped, and are never counted.
+  - The `--bench-aware` backtest replays on an isolated cache, so it can no
+    longer change rollout's numbers or the existing gates.
+  - A bench player whose game has already tipped can be moved in only from
+    the day after. A live rerun used to price a promotion into a game already
+    under way.
 - The two new tables are created by `CREATE TABLE IF NOT EXISTS` on the next
   run, with no migration. With bench-aware off, the digest's calls and numbers
   are unchanged; the model id gains "; bench-aware" when it is on.

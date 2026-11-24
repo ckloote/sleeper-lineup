@@ -257,3 +257,68 @@ def test_an_isolated_cache_reads_the_baseline_draws():
     view = cache.isolated()
     key = next(iter(cache.contributions))
     assert view.contributions[key] is cache.contributions[key]
+
+
+def _slate(tips: dict[tuple[str, int], str]):
+    from lockin.slate import WeekSlate
+
+    slate = WeekSlate()
+    slate.tipoff.update(tips)
+    return slate
+
+
+TODAY = 739943  # 2026-11-23
+
+
+def test_a_bench_player_whose_game_has_tipped_is_promotable_only_from_tomorrow():
+    from lockin.digest import tipped
+
+    games = {
+        "gone": [Game(0, TODAY, False, 0.0), Game(1, TODAY + 1, False, 0.0)],
+        "later": [Game(0, TODAY, False, 0.0)],
+        "unknown": [Game(0, TODAY, False, 0.0)],
+    }
+    slate = _slate(
+        {
+            ("gone", TODAY): "2026-11-23T19:00:00+00:00",
+            ("later", TODAY): "2026-11-24T00:30:00+00:00",
+        }
+    )
+    now = "2026-11-23T20:00:00+00:00"
+    assert tipped(slate, games, TODAY - 1, before=now, live=True) == {
+        "gone": TODAY + 1,
+        "unknown": TODAY + 1,
+    }
+    # A replay runs that morning, before any tip, and an unknown tip is no bar.
+    morning = "2026-11-23T13:00:00+00:00"
+    assert tipped(slate, games, TODAY - 1, before=morning, live=False) == {}
+
+
+def test_no_swap_into_a_game_already_under_way():
+    """His only game left has tipped: the call is priced as if he were not there."""
+    from lockin.rollout import SimulationCache, bench_rows
+
+    source = RecordingSource(np.full((8, 2), 50.0))
+    cache = SimulationCache(source=source, n_sims=8)
+    games = {"b1": [Game(0, TODAY, False, 0.0)]}
+    rng = np.random.default_rng(0)
+    open_ = Bench.from_lineup(("C",), ["s1"], games, {})
+    shut = Bench.from_lineup(("C",), ["s1"], games, {}, promotable_from={"b1": TODAY + 1})
+    assert set(bench_rows(cache, open_, {}, 5, rng, known_through=TODAY - 1, start=TODAY)) == {"b1"}
+    assert bench_rows(cache, shut, {}, 5, rng, known_through=TODAY - 1, start=TODAY) == {}
+    assert shut.copy().promotable_from == {"b1": TODAY + 1}
+
+
+def test_a_tipped_game_is_still_simulated_before_the_next_one_counts():
+    from lockin.rollout import SimulationCache, bench_rows
+
+    # Today 90 on every path, tomorrow 20: today must not be what counts.
+    source = RecordingSource(np.tile([90.0, 20.0], (8, 1)))
+    cache = SimulationCache(source=source, n_sims=8)
+    games = {"b1": [Game(0, TODAY, False, 0.0), Game(1, TODAY + 1, False, 0.0)]}
+    shut = Bench.from_lineup(("C",), ["s1"], games, {}, promotable_from={"b1": TODAY + 1})
+    rows = bench_rows(
+        cache, shut, {}, 5, np.random.default_rng(0), known_through=TODAY - 1, start=TODAY
+    )
+    assert source.days == [[TODAY, TODAY + 1]]
+    np.testing.assert_array_equal(rows["b1"], np.full(8, 20.0))

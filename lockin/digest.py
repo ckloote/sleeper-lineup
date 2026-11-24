@@ -602,7 +602,44 @@ def bench_for(
     for pid in [*starters, *games]:
         row = conn.execute("SELECT positions FROM players WHERE sleeper_id = ?", (pid,)).fetchone()
         positions[pid] = json.loads(row[0]) if row and row[0] else []
-    return Bench.from_lineup([str(s) for s in slots], starters, games, positions, regulars=ids)
+    return Bench.from_lineup(
+        [str(s) for s in slots],
+        starters,
+        games,
+        positions,
+        regulars=ids,
+        promotable_from=tipped(slate, games, known_through, before=before, live=live),
+    )
+
+
+def tipped(
+    slate: WeekSlate,
+    games: dict[str, list[Game]],
+    known_through: int,
+    *,
+    before: str,
+    live: bool,
+) -> dict[str, int]:
+    """Bench players whose next game has tipped by ``before``: the day after it.
+
+    A live rerun after a bench player's tip still has ``known_through`` at
+    yesterday, so today's game is ahead of the cutoff. But a player has to be
+    in a slot at tipoff for a game to count, so moving him in now cannot count
+    it. The game stays in his week, to be simulated for his availability, and
+    he is promotable only from the day after. Live, a tipoff that is missing or
+    cannot be placed in time counts as passed, as it does for a call
+    ("tipoff unknown; no call"). A replay's run moment is before any tip.
+    """
+    moment = clock.aware_utc(before)
+    out: dict[str, int] = {}
+    for pid, week in games.items():
+        nxt = next((g for g in week if g.day > known_through), None)
+        if nxt is None:
+            continue
+        tip = clock.aware_utc(slate.tipoff.get((pid, nxt.day)))
+        if (tip is None and live) or (tip is not None and moment is not None and tip <= moment):
+            out[pid] = nxt.day + 1
+    return out
 
 
 @dataclass(frozen=True, slots=True)
