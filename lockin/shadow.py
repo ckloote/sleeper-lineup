@@ -423,6 +423,8 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
         _mornings(summary, by_week[week], week, opening, roster_id, first_live, truth)
         _calls(conn, report, summary, by_week[week], truth, answers)
         _state(conn, report, summary, by_week[week], truth)
+        if answers is not None:
+            _ledger_state(conn, report, summary, by_week[week], answers)
         _forecasts(conn, report, by_week[week])
 
     pids = {c.sleeper_id for c in report.calls} | {m.sleeper_id for m in report.misses}
@@ -573,6 +575,72 @@ def _calls(
                     else "new data in between"
                     if ra["as_of"] == rb["as_of"]
                     else "a night of games in between",
+                )
+            )
+
+
+def _ledger_state(
+    conn: sqlite3.Connection,
+    report: ShadowReport,
+    summary: WeekSummary,
+    runs: list[sqlite3.Row],
+    answers: dict[tuple[str, int], ledger_mod.Answer],
+) -> None:
+    """Each ledger morning's BANKED list against the week's final answers.
+
+    A run should have banked every lock the week ended with on a game played by
+    then. The final answers can say a call was followed while the morning in
+    between ran on the wrong state: locked Monday, tapped Thursday, and
+    Wednesday's digest priced him unlocked (review of PR #4, finding 1).
+
+    One exemption, because a lock can be made after a digest runs: an answer
+    recorded after the run and before the roster's next live run (or with none
+    after it this week) may be a lock made in between, so the run is not faulted.
+    A banked player whose final answer is not a lock (undone since) is a miss.
+    """
+    live = [r for r in runs if not r["abstained"]]
+    for i, run in enumerate(live):
+        if run["state_source"] != "ledger":
+            continue
+        known_through = day_index(run["as_of"]) - 1
+        following = live[i + 1]["generated_at"] if i + 1 < len(live) else None
+        banked = {
+            r["sleeper_id"]: r["score"]
+            for r in conn.execute(
+                "SELECT sleeper_id, score FROM digest_banked WHERE run_id = ?", (run["run_id"],)
+            )
+        }
+        locked: dict[str, ledger_mod.Answer] = {}
+        for (pid, day), ans in answers.items():
+            if ans.decision == "LOCK" and day <= known_through:
+                if pid not in locked or day > locked[pid].game_day:
+                    locked[pid] = ans
+        for pid in sorted(set(locked) | set(banked)):
+            summary.state_checked += 1
+            ans = locked.get(pid)
+            if ans is not None and pid in banked:
+                continue
+            if ans is not None:
+                after = ans.recorded_at > run["generated_at"]
+                if after and (following is None or ans.recorded_at < following):
+                    continue  # may have been locked after this digest ran
+                detail = (
+                    f"locked {date_of(ans.game_day)}, recorded after this digest"
+                    if after
+                    else f"locked {date_of(ans.game_day)} and recorded, but not banked"
+                )
+            else:
+                detail = f"banked {banked[pid]:.1f}, but the final answer is not a lock"
+            summary.state_misses += 1
+            report.misses.append(
+                StateMiss(
+                    summary.week,
+                    run["roster_id"],
+                    pid,
+                    run["as_of"],
+                    banked.get(pid),
+                    None,
+                    detail,
                 )
             )
 

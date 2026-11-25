@@ -89,7 +89,7 @@ def test_a_ledger_week_is_judged_by_its_answers(played):
     report = report_for(season, cfg)
     week = next(w for w in report.weeks if w.week == WEEK)
     assert week.ledger
-    assert week.state_checked == 0 and week.state_misses == 0
+    assert week.state_checked > 0 and week.state_misses == 0, report.misses
     assert not week.failed_inference and not week.uncheckable and not week.final_incomplete
     assert week.calls[shadow.UNANSWERED] == 0
     verdicts = {(c.sleeper_id, c.for_day): c.verdict for c in report.calls if c.action == "LOCK"}
@@ -131,3 +131,43 @@ def test_each_ledger_verdict(action, answers, expected):
         for key, decision in answers.items()
     }
     assert shadow.ledger_verdict(action, 5, "p", recorded)[0] == expected
+
+
+def copy_of(played, tmp_path):
+    season, cfg, taken, passed = played
+    copy = config_for(tmp_path, season)
+    shutil.copy(cfg.db_path, copy.db_path)
+    return season, copy, taken
+
+
+def test_a_lock_recorded_after_a_later_digest_is_a_state_miss(played, tmp_path):
+    """Locked Monday, tapped Thursday: the mornings in between ran on the wrong state,
+    though the final answer says the call was followed (review of PR #4)."""
+    season, copy, (pid, day) = copy_of(played, tmp_path)
+    with connect(copy) as conn:
+        conn.execute(
+            "UPDATE lock_ledger SET recorded_at = ? WHERE sleeper_id = ? AND game_day = ?",
+            ((nine_am(TUESDAY + timedelta(days=6)) + timedelta(hours=2)).isoformat(), pid, day),
+        )
+    report = report_for(season, copy)
+    week = next(w for w in report.weeks if w.week == WEEK)
+    late = [m for m in report.misses if m.sleeper_id == pid]
+    assert late and all("recorded after this digest" in m.detail for m in late)
+    assert not week.clean
+    assert next(c for c in report.calls if (c.sleeper_id, c.for_day) == (pid, day)).verdict == (
+        shadow.FOLLOWED
+    )
+
+
+def test_a_lock_recorded_before_the_next_digest_is_not_a_miss(played):
+    season, cfg, (pid, _), _ = played
+    report = report_for(season, cfg)
+    assert not [m for m in report.misses if m.sleeper_id == pid]
+
+
+def test_a_lock_undone_after_mornings_banked_it_is_a_miss(played, tmp_path):
+    season, copy, (pid, day) = copy_of(played, tmp_path)
+    answer(copy, pid, day, "UNDO", nine_am(TUESDAY + timedelta(days=7)))
+    report = report_for(season, copy)
+    undone = [m for m in report.misses if m.sleeper_id == pid]
+    assert undone and all("final answer is not a lock" in m.detail for m in undone)

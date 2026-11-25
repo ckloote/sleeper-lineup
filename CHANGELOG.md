@@ -38,6 +38,18 @@
   - A PASS call needs no answer.
   - Weeks before the ledger are reported as before, with a note that the final
     poll they are checked against may itself be wrong.
+  - Each ledger morning's `BANKED` list is checked against the week's final
+    answers. A lock tapped after a later digest had already run on the wrong
+    state is a miss, and so is a banked lock undone since. A tap between a
+    digest and the next one is not, since the lock may have been made in
+    between.
+- Review fixes (PR #4):
+  - A replay's page shows the answers as of its morning and takes none.
+  - An abstaining digest's page keeps the week's answers, the unanswered calls
+    and their buttons.
+  - A replay reads the ledger from the first morning a live run did.
+  - No answers are taken once the calendar says the call's week is over.
+  - With two locks recorded for one player, the warning names the one counted.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for
