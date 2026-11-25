@@ -39,10 +39,13 @@
   - Weeks before the ledger are reported as before, with a note that the final
     poll they are checked against may itself be wrong.
   - Each ledger morning's `BANKED` list is checked against the week's final
-    answers. A lock tapped after a later digest had already run on the wrong
-    state is a miss, and so is a banked lock undone since. A tap between a
-    digest and the next one is not, since the lock may have been made in
-    between.
+    answers, score included.
+    - A lock is known to have been made before his next tip (the deadline the
+      digest printed) and no later than its tap. A morning is a miss for
+      missing it only once both had passed; until then the decision may still
+      have been open.
+    - A banked score that is not the final lock's game score is a miss,
+      however it was corrected, and so is a banked lock undone since.
 - Review fixes (PR #4):
   - A replay's page shows the answers as of its morning and takes none.
   - An abstaining digest's page keeps the week's answers, the unanswered calls
@@ -50,6 +53,11 @@
   - A replay reads the ledger from the first morning a live run did.
   - No answers are taken once the calendar says the call's week is over.
   - With two locks recorded for one player, the warning names the one counted.
+  - A week's poll-read runs still need a whole final poll after a midweek
+    switch to the ledger.
+  - A replay reads the ledger as of its live run's time (or 09:00 local), not
+    13:00 UTC, which is 08:00 Eastern in winter.
+  - A replay follows the state source its own morning's live run saved.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for

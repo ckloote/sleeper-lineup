@@ -7,7 +7,7 @@ keeps rewriting. A LOCK call nobody answered blocks the week.
 from __future__ import annotations
 
 import shutil
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from live_fixture import SyntheticSeason, config_for, connect, ingest
@@ -140,23 +140,78 @@ def copy_of(played, tmp_path):
     return season, copy, taken
 
 
-def test_a_lock_recorded_after_a_later_digest_is_a_state_miss(played, tmp_path):
-    """Locked Monday, tapped Thursday: the mornings in between ran on the wrong state,
-    though the final answer says the call was followed (review of PR #4)."""
+def deadline_and_runs(conn, pid, day):
+    """The call's printed deadline, and the week's ledger runs, oldest first."""
+    tip = conn.execute(
+        "SELECT MIN(expires_utc) FROM recommendations WHERE sleeper_id = ? AND for_day = ?",
+        (pid, day),
+    ).fetchone()[0]
+    runs = conn.execute(
+        "SELECT run_id, generated_at FROM digest_runs WHERE week = ? AND state_source = 'ledger'"
+        " AND NOT abstained ORDER BY generated_at",
+        (WEEK,),
+    ).fetchall()
+    return datetime.fromisoformat(tip.replace("Z", "+00:00")), [
+        (r[0], datetime.fromisoformat(r[1])) for r in runs
+    ]
+
+
+def test_a_lock_whose_window_closed_before_a_digest_is_a_miss_however_soon_tapped(played, tmp_path):
+    """His next tip passed before the run, so the lock was made before it: tapping
+    a minute after the run does not excuse a BANKED list without him."""
     season, copy, (pid, day) = copy_of(played, tmp_path)
     with connect(copy) as conn:
+        tip, runs = deadline_and_runs(conn, pid, day)
+        run_id, ran_at = next((r, at) for r, at in runs if at > tip)
+        conn.execute("DELETE FROM digest_banked WHERE run_id = ? AND sleeper_id = ?", (run_id, pid))
         conn.execute(
             "UPDATE lock_ledger SET recorded_at = ? WHERE sleeper_id = ? AND game_day = ?",
-            ((nine_am(TUESDAY + timedelta(days=6)) + timedelta(hours=2)).isoformat(), pid, day),
+            ((ran_at + timedelta(minutes=1)).isoformat(), pid, day),
         )
     report = report_for(season, copy)
-    week = next(w for w in report.weeks if w.week == WEEK)
-    late = [m for m in report.misses if m.sleeper_id == pid]
-    assert late and all("recorded after this digest" in m.detail for m in late)
-    assert not week.clean
-    assert next(c for c in report.calls if (c.sleeper_id, c.for_day) == (pid, day)).verdict == (
-        shadow.FOLLOWED
-    )
+    [miss] = [m for m in report.misses if m.sleeper_id == pid]
+    assert "before his next tip, recorded after this digest" in miss.detail
+    assert not next(w for w in report.weeks if w.week == WEEK).clean
+    verdict = next(c for c in report.calls if (c.sleeper_id, c.for_day) == (pid, day)).verdict
+    assert verdict == shadow.FOLLOWED, "the final answer alone would have passed it"
+
+
+def test_a_lock_tapped_while_its_window_was_open_faults_no_earlier_morning(played, tmp_path):
+    """Played Monday, next tips Friday, locked and tapped Thursday: Tuesday's and
+    Wednesday's digests were right to price him unlocked."""
+    season, copy, (pid, day) = copy_of(played, tmp_path)
+    with connect(copy) as conn:
+        tip, runs = deadline_and_runs(conn, pid, day)
+        tapped = tip - timedelta(minutes=1)
+        for run_id, at in runs:
+            if at < tapped:
+                conn.execute(
+                    "DELETE FROM digest_banked WHERE run_id = ? AND sleeper_id = ?", (run_id, pid)
+                )
+        conn.execute(
+            "UPDATE lock_ledger SET recorded_at = ? WHERE sleeper_id = ? AND game_day = ?",
+            (tapped.isoformat(), pid, day),
+        )
+    report = report_for(season, copy)
+    assert not [m for m in report.misses if m.sleeper_id == pid]
+
+
+def test_a_banked_score_that_is_not_the_locked_games_is_a_miss(played, tmp_path):
+    """Corrected from an 18-point game to a 43-point one: a morning that banked 18
+    ran on the wrong record, though the player is banked either way."""
+    season, copy, (pid, day) = copy_of(played, tmp_path)
+    with connect(copy) as conn:
+        run_id, have = conn.execute(
+            "SELECT run_id, score FROM digest_banked WHERE sleeper_id = ? LIMIT 1", (pid,)
+        ).fetchone()
+        conn.execute(
+            "UPDATE digest_banked SET score = ? WHERE run_id = ? AND sleeper_id = ?",
+            (have - 25.0, run_id, pid),
+        )
+    report = report_for(season, copy)
+    [miss] = [m for m in report.misses if m.sleeper_id == pid]
+    assert miss.detail.startswith(f"banked {have - 25.0:.1f}, but the lock was {have:.1f}")
+    assert not next(w for w in report.weeks if w.week == WEEK).clean
 
 
 def test_a_lock_recorded_before_the_next_digest_is_not_a_miss(played):
@@ -206,3 +261,39 @@ def test_an_all_ledger_week_does_not_need_the_final_poll(played, tmp_path):
         incomplete_final_poll(conn)
     week = next(w for w in report_for(season, copy).weeks if w.week == WEEK)
     assert not week.final_incomplete
+
+
+def test_three_mornings_inside_a_long_window_are_not_faulted(monkeypatch):
+    """Played Monday, next tips Friday 00:00 UTC, locked and tapped Thursday
+    evening: Tuesday's, Wednesday's and Thursday's digests all ran while the
+    decision was open. The old next-run rule faulted Tuesday and Wednesday."""
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+    monday = date(2026, 10, 26)
+    for i, as_of in enumerate(("2026-10-27", "2026-10-28", "2026-10-29")):
+        run = f"r{i}"
+        conn.execute(
+            "INSERT INTO digest_runs (run_id, generated_at, roster_id, as_of, week, state_source,"
+            " abstained, state_supplied) VALUES (?, ?, 1, ?, ?, 'ledger', 0, 0)",
+            (run, f"{as_of}T13:00:00+00:00", as_of, WEEK),
+        )
+        conn.execute(
+            "INSERT INTO recommendations (generated_at, week, roster_id, sleeper_id, action,"
+            " for_day, run_id, expires_utc) VALUES (?, ?, 1, 'p', 'LOCK', ?, ?, ?)",
+            (f"{as_of}T13:00:00+00:00", WEEK, monday.toordinal(), run, "2026-10-31T00:00:00Z"),
+        )
+    answers = {
+        ("p", monday.toordinal()): ledger.Answer(
+            "p", monday.toordinal(), "LOCK", "2026-10-30T23:00:00+00:00"
+        )
+    }
+    runs = conn.execute("SELECT * FROM digest_runs ORDER BY generated_at").fetchall()
+    monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
+    report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
+    shadow._ledger_state(conn, "2026", report, summary, runs, answers)
+    assert report.misses == [] and summary.state_checked == 3

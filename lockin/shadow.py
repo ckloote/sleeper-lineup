@@ -427,7 +427,7 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
         _calls(conn, report, summary, by_week[week], truth, answers)
         _state(conn, report, summary, by_week[week], truth)
         if answers is not None:
-            _ledger_state(conn, report, summary, by_week[week], answers)
+            _ledger_state(conn, season, report, summary, by_week[week], answers)
         _forecasts(conn, report, by_week[week])
 
     pids = {c.sleeper_id for c in report.calls} | {m.sleeper_id for m in report.misses}
@@ -584,6 +584,7 @@ def _calls(
 
 def _ledger_state(
     conn: sqlite3.Connection,
+    season: str,
     report: ShadowReport,
     summary: WeekSummary,
     runs: list[sqlite3.Row],
@@ -592,21 +593,28 @@ def _ledger_state(
     """Each ledger morning's BANKED list against the week's final answers.
 
     A run should have banked every lock the week ended with on a game played by
-    then. The final answers can say a call was followed while the morning in
-    between ran on the wrong state: locked Monday, tapped Thursday, and
-    Wednesday's digest priced him unlocked (review of PR #4, finding 1).
+    then, at that game's score. The final answers can say a call was followed
+    while a morning in between ran on the wrong state (review of PR #4).
 
-    One exemption, because a lock can be made after a digest runs: an answer
-    recorded after the run and before the roster's next live run (or with none
-    after it this week) may be a lock made in between, so the run is not faulted.
-    A banked player whose final answer is not a lock (undone since) is a miss.
+    **When a lock was made is bounded, not known.** It was made before his next
+    tip, the deadline the digest itself printed for the call, and no later than
+    it was recorded. A run is faulted for missing it only once both bounds had
+    passed: before that, the decision may still have been open, and the run was
+    right to price him unlocked. With no recorded deadline, the recording time
+    is the only bound.
+
+    A banked score that is not the final lock's game score is a miss whenever it
+    was recorded: a corrected record means the morning ran on the wrong one. So
+    is a banked player whose final answer is no longer a lock.
     """
-    live = [r for r in runs if not r["abstained"]]
-    for i, run in enumerate(live):
-        if run["state_source"] != "ledger":
+    pids = {pid for pid, _ in answers}
+    scores = _game_scores(conn, season, summary.week, pids)
+    deadlines = _deadlines(conn, [r["run_id"] for r in runs])
+    for run in runs:
+        if run["abstained"] or run["state_source"] != "ledger":
             continue
         known_through = day_index(run["as_of"]) - 1
-        following = live[i + 1]["generated_at"] if i + 1 < len(live) else None
+        ran_at = clock.utc(run["generated_at"])
         banked = {
             r["sleeper_id"]: r["score"]
             for r in conn.execute(
@@ -621,17 +629,30 @@ def _ledger_state(
         for pid in sorted(set(locked) | set(banked)):
             summary.state_checked += 1
             ans = locked.get(pid)
+            expected = None if ans is None else scores.get((pid, ans.game_day))
             if ans is not None and pid in banked:
-                continue
-            if ans is not None:
-                after = ans.recorded_at > run["generated_at"]
-                if after and (following is None or ans.recorded_at < following):
-                    continue  # may have been locked after this digest ran
+                if expected is None or abs(banked[pid] - expected) < 0.005:
+                    continue
                 detail = (
-                    f"locked {date_of(ans.game_day)}, recorded after this digest"
-                    if after
-                    else f"locked {date_of(ans.game_day)} and recorded, but not banked"
+                    f"banked {banked[pid]:.1f}, but the lock was {expected:.1f}"
+                    f" ({date_of(ans.game_day)})"
                 )
+            elif ans is not None:
+                recorded = clock.utc(ans.recorded_at)
+                tip = deadlines.get((pid, ans.game_day))
+                made_by = min(recorded, tip) if tip is not None else recorded
+                if made_by > ran_at:
+                    continue  # the decision may still have been open
+                if recorded <= ran_at:
+                    detail = (
+                        f"locked {date_of(ans.game_day)},"
+                        " recorded before this digest but not banked"
+                    )
+                else:
+                    detail = (
+                        f"locked {date_of(ans.game_day)} before his next tip,"
+                        " recorded after this digest"
+                    )
             else:
                 detail = f"banked {banked[pid]:.1f}, but the final answer is not a lock"
             summary.state_misses += 1
@@ -642,10 +663,44 @@ def _ledger_state(
                     pid,
                     run["as_of"],
                     banked.get(pid),
-                    None,
+                    expected,
                     detail,
                 )
             )
+
+
+def _game_scores(
+    conn: sqlite3.Connection, season: str, week: int, pids: set[str]
+) -> dict[tuple[str, int], float]:
+    """(player, day) -> that game's score, as `truths` scores it; a DNP is 0."""
+    if not pids:
+        return {}
+    scoring = scoring_settings(conn)
+    seq = game_sequence(conn, season)
+    out: dict[tuple[str, int], float] = {}
+    for pid in pids:
+        for g in seq.get((pid, week), []):
+            out[(pid, day_index(g["game_date"]))] = (
+                score_recorded(json.loads(g["raw_stats"]), scoring) if g["played"] else 0.0
+            )
+    return out
+
+
+def _deadlines(conn: sqlite3.Connection, run_ids: list[str]) -> dict[tuple[str, int], datetime]:
+    """(player, game day) -> the next tip the digest printed as that call's deadline."""
+    if not run_ids:
+        return {}
+    marks = ",".join("?" * len(run_ids))
+    out: dict[tuple[str, int], datetime] = {}
+    for pid, day, expires in conn.execute(
+        f"SELECT sleeper_id, for_day, MIN(expires_utc) FROM recommendations"
+        f" WHERE run_id IN ({marks}) AND action IN ('LOCK', 'PASS')"
+        f" AND expires_utc IS NOT NULL GROUP BY sleeper_id, for_day",
+        run_ids,
+    ):
+        if clock.aware_utc(expires) is not None:
+            out[(pid, day)] = clock.utc(expires)
+    return out
 
 
 def _state(
