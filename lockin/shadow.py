@@ -415,9 +415,12 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
     for week in range(first_week, last + 1):
         summary = WeekSummary(week=week, runs=len(by_week[week]))
         summary.ledger = any(r["state_source"] == "ledger" for r in by_week[week])
-        # The ledger week's truth is the manager's answers, not the final poll,
-        # which Sleeper keeps rewriting; an incomplete final poll is moot then.
-        summary.final_incomplete = week not in whole and not summary.ledger
+        # A ledger run's truth is the manager's answers, not the final poll, which
+        # Sleeper keeps rewriting. A poll-read run still needs a whole final poll,
+        # even in a week that switched to the ledger after it.
+        summary.final_incomplete = week not in whole and any(
+            r["state_source"] == "inferred" for r in by_week[week]
+        )
         report.weeks.append(summary)
         answers = ledger_mod.answers(conn, week, roster_id) if summary.ledger else None
         _mornings(summary, by_week[week], week, opening, roster_id, first_live, truth)

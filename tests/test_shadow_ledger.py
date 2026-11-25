@@ -171,3 +171,38 @@ def test_a_lock_undone_after_mornings_banked_it_is_a_miss(played, tmp_path):
     report = report_for(season, copy)
     undone = [m for m in report.misses if m.sleeper_id == pid]
     assert undone and all("final answer is not a lock" in m.detail for m in undone)
+
+
+def incomplete_final_poll(conn) -> None:
+    stamp = conn.execute(
+        "SELECT MAX(observed_at) FROM weekly_matchup_teams WHERE week = ? AND roster_id = 1",
+        (WEEK,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE weekly_matchup_teams SET poll_complete = 0"
+        " WHERE week = ? AND roster_id = 1 AND observed_at = ?",
+        (WEEK, stamp),
+    )
+
+
+def test_poll_read_runs_still_need_a_whole_final_poll(played, tmp_path):
+    """A week that switched to the ledger midweek: its earlier runs read the poll."""
+    season, copy, _ = copy_of(played, tmp_path)
+    with connect(copy) as conn:
+        incomplete_final_poll(conn)
+        first = conn.execute(
+            "SELECT run_id FROM digest_runs WHERE week = ? AND NOT abstained"
+            " ORDER BY generated_at LIMIT 1",
+            (WEEK,),
+        ).fetchone()[0]
+        conn.execute("UPDATE digest_runs SET state_source = 'inferred' WHERE run_id = ?", (first,))
+    week = next(w for w in report_for(season, copy).weeks if w.week == WEEK)
+    assert week.final_incomplete and not week.clean
+
+
+def test_an_all_ledger_week_does_not_need_the_final_poll(played, tmp_path):
+    season, copy, _ = copy_of(played, tmp_path)
+    with connect(copy) as conn:
+        incomplete_final_poll(conn)
+    week = next(w for w in report_for(season, copy).weeks if w.week == WEEK)
+    assert not week.final_incomplete
