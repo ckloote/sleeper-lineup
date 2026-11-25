@@ -297,3 +297,14 @@ def test_three_mornings_inside_a_long_window_are_not_faulted(monkeypatch):
     report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
     shadow._ledger_state(conn, "2026", report, summary, runs, answers)
     assert report.misses == [] and summary.state_checked == 3
+
+
+def test_a_banked_lock_with_no_final_box_score_is_unverified(played, monkeypatch):
+    """With nothing to check the banked score against, it is not taken on trust."""
+    season, cfg, (pid, day), _ = played
+    monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
+    report = report_for(season, cfg)
+    week = next(w for w in report.weeks if w.week == WEEK)
+    mine = [u for u in report.unverified if u.sleeper_id == pid]
+    assert mine and all(u.detail.startswith("no box score for the locked game") for u in mine)
+    assert week.state_unverified >= len(mine) and not week.clean

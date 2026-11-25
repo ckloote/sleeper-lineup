@@ -627,11 +627,26 @@ def _ledger_state(
                 if pid not in locked or day > locked[pid].game_day:
                     locked[pid] = ans
         for pid in sorted(set(locked) | set(banked)):
-            summary.state_checked += 1
             ans = locked.get(pid)
             expected = None if ans is None else scores.get((pid, ans.game_day))
+            if ans is not None and pid in banked and expected is None:
+                # Nothing to check the banked score against: not verified, and
+                # blocking the week, rather than taken on trust.
+                summary.state_unverified += 1
+                report.unverified.append(
+                    Unverified(
+                        summary.week,
+                        run["roster_id"],
+                        pid,
+                        run["as_of"],
+                        banked[pid],
+                        f"no box score for the locked game ({date_of(ans.game_day)})",
+                    )
+                )
+                continue
+            summary.state_checked += 1
             if ans is not None and pid in banked:
-                if expected is None or abs(banked[pid] - expected) < 0.005:
+                if abs(banked[pid] - expected) < 0.005:
                     continue
                 detail = (
                     f"banked {banked[pid]:.1f}, but the lock was {expected:.1f}"
