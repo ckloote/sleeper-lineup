@@ -249,7 +249,11 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
     known = replayed or get("ledger_read_at") or row["generated_at"]
     if ledger_on and said_lock:
         said_lock = ledger_mod.unanswered(
-            said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=known)
+            said_lock,
+            ledger_mod.answers(conn, row["week"], roster_id, before=known),
+            runs.earlier_lock_cutoffs(
+                conn, roster_id, row["week"], row["as_of"], row["generated_at"]
+            ),
         )
     items = [
         Item(

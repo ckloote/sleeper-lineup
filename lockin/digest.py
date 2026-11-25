@@ -1141,8 +1141,13 @@ def build(
     )
     if digest.state_source == SOURCE_LEDGER:
         # Answered either way, it is no longer a repeat to warn about: a LOCK
-        # is banked above, and a PASS means this is simply tonight's call.
-        said_lock = ledger_mod.unanswered(said_lock, answered)
+        # is banked above, and a PASS means this is simply tonight's call. A
+        # PASS from before the latest earlier LOCK call answered an older one.
+        said_lock = ledger_mod.unanswered(
+            said_lock,
+            answered,
+            runs.earlier_lock_cutoffs(conn, roster_id, week, as_of, before),
+        )
     for sleeper_id, games in mine.items():
         if sleeper_id in locked:
             continue

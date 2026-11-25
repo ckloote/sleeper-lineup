@@ -272,10 +272,30 @@ def state(
 
 
 def unanswered(
-    calls: dict[tuple[str, int], str], ledger: dict[tuple[str, int], Answer]
+    calls: dict[tuple[str, int], str],
+    ledger: dict[tuple[str, int], Answer],
+    called_at: dict[tuple[str, int], str] | None = None,
 ) -> dict[tuple[str, int], str]:
-    """The earlier LOCK calls nobody has answered, from ``runs.earlier_lock_calls``."""
-    return {key: first for key, first in calls.items() if key not in ledger}
+    """The earlier LOCK calls nobody has answered, from ``runs.earlier_lock_calls``.
+
+    ``called_at`` is each game's latest earlier LOCK call's ledger cutoff
+    (`runs.earlier_lock_cutoffs`). A PASS recorded before it answered an older
+    call: Tuesday's PASS does not answer Wednesday's LOCK.
+    """
+    called_at = called_at or {}
+
+    def answers(key: tuple[str, int]) -> bool:
+        found = ledger.get(key)
+        if found is None:
+            return False
+        at = called_at.get(key)
+        return not (
+            found.decision == PASS
+            and at is not None
+            and clock.utc(found.recorded_at) < clock.utc(at)
+        )
+
+    return {key: first for key, first in calls.items() if not answers(key)}
 
 
 def open_call(

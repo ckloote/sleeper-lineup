@@ -79,6 +79,8 @@
     shadow gate counts that LOCK unanswered until something is recorded after it.
   - "Not answered from earlier this week" keeps a renewed LOCK whose only
     answer is a PASS from before it, with that PASS on show.
+  - So does the repeat warning ("Tue said LOCK; not recorded"), in the
+    notification and on the page.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for

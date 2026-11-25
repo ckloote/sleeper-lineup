@@ -540,3 +540,34 @@ def test_a_renewed_lock_stays_unanswered_when_the_next_digest_drops_it(week, pas
         )
         section = page[page.index("Not answered from earlier this week") :]
         assert "earlier: passed" in section and ">Locked</button>" in section
+
+
+def test_a_pass_before_the_earlier_lock_call_does_not_silence_its_repeat(week):
+    """Passed Monday night, Tuesday said LOCK, nothing since: Wednesday's call is a
+    repeat of an unanswered LOCK, in the notification and on the page."""
+    from lockin import advice
+
+    answer(week, week.a, MON, "PASS", at="2026-10-27T03:00:00+00:00")  # before Tuesday's
+    said_on(week)
+    report = ledger_digest(week)
+    calls = {c.sleeper_id: c for c in report.calls}
+    assert calls[week.a].said_lock_on == TUE.isoformat()
+    assert "Tue said LOCK; not recorded" in digest_mod.render(report)
+    persisted(week, report)
+    with connect(week.cfg) as conn:
+        run = advice.latest_run(conn, 1)
+    [item] = [c for c in run.calls if c.sleeper_id == week.a]
+    assert item.said_lock_on == TUE.isoformat() and item.answer == "PASS"
+
+
+def test_only_a_pass_after_the_latest_lock_call_answers_it():
+    calls = {("p", 5): "2026-10-27"}
+    called = {("p", 5): "2026-10-28T13:00:00+00:00"}
+
+    def said(decision, at):
+        return ledger.unanswered(calls, {("p", 5): ledger.Answer("p", 5, decision, at)}, called)
+
+    assert said("PASS", "2026-10-28T12:00:00+00:00") == calls
+    assert said("PASS", "2026-10-28T13:00:00+00:00") == {}
+    assert said("LOCK", "2026-10-28T12:00:00+00:00") == {}
+    assert ledger.unanswered(calls, {("p", 5): ledger.Answer("p", 5, "PASS", "x")}) == {}
