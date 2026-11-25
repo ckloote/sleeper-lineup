@@ -404,3 +404,39 @@ def test_a_ledger_miss_names_the_ledger_as_its_evidence(monkeypatch):
     report.weeks.append(summary)
     text = shadow.render(report)
     assert "LEDGER STATE" in text and "disagreed with the final poll" not in text
+
+
+def test_a_pass_on_an_earlier_call_does_not_answer_the_final_lock():
+    """Thursday passed; Friday called LOCK again and nothing was recorded after."""
+    earlier = {("p", 5): ledger.Answer("p", 5, "PASS", "2026-10-29T20:00:00+00:00")}
+    read = "2026-10-30T13:00:00+00:00"
+    assert shadow.ledger_verdict("LOCK", 5, "p", earlier, read_at=read)[0] == shadow.UNANSWERED
+    assert shadow.ledger_verdict("PASS", 5, "p", earlier, read_at=read)[0] == shadow.FOLLOWED
+    after = {("p", 5): ledger.Answer("p", 5, "PASS", "2026-10-30T13:02:00+00:00")}
+    assert shadow.ledger_verdict("LOCK", 5, "p", after, read_at=read)[0] == shadow.OVERRIDDEN
+
+
+@pytest.mark.parametrize(
+    ("recorded_at", "expected"),
+    [
+        pytest.param("2026-10-29T20:00:00+00:00", shadow.UNANSWERED, id="before the final call"),
+        pytest.param("2026-10-30T13:02:00+00:00", shadow.OVERRIDDEN, id="during its run"),
+    ],
+)
+def test_the_final_calls_ledger_cutoff_decides_whether_a_pass_answers_it(recorded_at, expected):
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+    day, runs = ledger_runs(
+        conn,
+        [("2026-10-29", "2026-10-30T00:00:00+00:00"), ("2026-10-30", "2026-10-31T00:00:00+00:00")],
+    )
+    answers = {("p", day): ledger.Answer("p", day, "PASS", recorded_at)}
+    report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
+    shadow._calls(conn, report, summary, runs, {}, answers)
+    [call] = report.calls
+    assert call.verdict == expected

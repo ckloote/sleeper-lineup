@@ -75,7 +75,8 @@
     digest ran.
   - Only an answer recorded after the digest read the ledger settles its call:
     a PASS from an earlier morning leaves a fresh LOCK to act on.
-    Its row shows the earlier answer and offers Locked and Passed.
+    Its row shows the earlier answer and offers Locked and Passed, and the
+    shadow gate counts that LOCK unanswered until something is recorded after it.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for

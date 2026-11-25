@@ -299,10 +299,28 @@ def verdict(action: str, day: int, truth: Truth | None) -> tuple[str, str]:
 
 
 def ledger_verdict(
-    action: str, day: int, pid: str, answers: dict[tuple[str, int], ledger_mod.Answer]
+    action: str,
+    day: int,
+    pid: str,
+    answers: dict[tuple[str, int], ledger_mod.Answer],
+    *,
+    read_at: str | None = None,
 ) -> tuple[str, str]:
-    """Whether a call was taken, by the manager's own answers."""
+    """Whether a call was taken, by the manager's own answers.
+
+    ``read_at`` is when the run that made the call read the ledger. A PASS
+    recorded before it answered an earlier call: Tuesday's PASS does not answer
+    Wednesday's LOCK, which is unanswered until something is recorded after it.
+    """
     found = answers.get((pid, day))
+    if (
+        found is not None
+        and action == "LOCK"
+        and found.decision == "PASS"
+        and read_at is not None
+        and clock.utc(found.recorded_at) < clock.utc(read_at)
+    ):
+        found = None
     locks = sorted(d for (p, d), a in answers.items() if p == pid and a.decision == "LOCK")
     if found is not None:
         took = found.decision == "LOCK"
@@ -557,7 +575,11 @@ def _calls(
         final = seen[-1]
         run = run_of[final["run_id"]]
         if answers is not None:
-            outcome, detail = ledger_verdict(final["action"], day, pid, answers)
+            keys = run.keys()
+            read_at = (run["ledger_read_at"] if "ledger_read_at" in keys else None) or run[
+                "generated_at"
+            ]
+            outcome, detail = ledger_verdict(final["action"], day, pid, answers, read_at=read_at)
         else:
             outcome, detail = verdict(
                 final["action"], day, truth.get((summary.week, roster_id, pid))
