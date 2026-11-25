@@ -1181,7 +1181,10 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
     httpd = serve_mod.build_server(
         cfg.db_path, roster_id, dashboard_db=dashboard_db, host=host, port=port, quiet=quiet
     )
-    click.echo(f"serving roster {roster_id} from {cfg.db_path} (read-only)")
+    click.echo(
+        f"serving roster {roster_id} from {cfg.db_path}"
+        " (read-only, except POST /ledger: lock answers)"
+    )
     for url in serve_mod.reachable_addresses(port):
         click.echo(f"  {url}")
     click.echo("  /            what to do tonight")
