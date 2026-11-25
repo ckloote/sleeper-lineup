@@ -362,14 +362,24 @@ def _unanswered(
 ) -> tuple[Item, ...]:
     """Earlier live calls this week, not on this run's page and not answered.
 
-    The newest run's version of each (player, game) is the one shown.
+    The newest run's version of each (player, game) is the one shown, and only
+    an answer recorded after that run read the ledger answers it: Tuesday's PASS
+    does not answer Wednesday's LOCK, as in `shadow.ledger_verdict`. Such a call
+    is listed with the earlier answer on show.
     """
     shown = {(i.sleeper_id, i.for_day) for i in items if i.is_call}
+    columns = {c[1] for c in _rows(conn, "PRAGMA table_info(digest_runs)", ())}
+    read_at = (
+        "COALESCE(r.ledger_read_at, r.generated_at)"
+        if "ledger_read_at" in columns
+        else "r.generated_at"
+    )
     latest: dict[tuple[str, int], sqlite3.Row] = {}
     for r in _rows(
         conn,
-        """
-        SELECT c.sleeper_id, c.for_day, c.action, c.run_id, r.as_of, p.full_name
+        f"""
+        SELECT c.sleeper_id, c.for_day, c.action, c.run_id, r.as_of, p.full_name,
+               {read_at} AS read_at
           FROM recommendations c
           JOIN digest_runs r ON r.run_id = c.run_id
           LEFT JOIN players p ON p.sleeper_id = c.sleeper_id
@@ -380,22 +390,37 @@ def _unanswered(
         (roster_id, row["week"], row["generated_at"]),
     ):
         latest[(r["sleeper_id"], r["for_day"])] = r
-    return tuple(
-        Item(
-            sleeper_id=r["sleeper_id"],
-            name=r["full_name"] or r["sleeper_id"],
-            action=r["action"],
-            for_day=r["for_day"],
-            threshold=None,
-            ev_lock=None,
-            ev_pass=None,
-            rationale="",
-            said_lock_on=r["as_of"],
-            run_id=r["run_id"],
+
+    out: list[Item] = []
+    for key, r in sorted(latest.items(), key=lambda kv: kv[0][1]):
+        if key in shown:
+            continue
+        found = answers.get(key)
+        if found is not None:
+            # Answered unless the answer is a PASS that predates this LOCK.
+            predates = (
+                r["action"] == "LOCK"
+                and found.decision == ledger_mod.PASS
+                and clock.utc(found.recorded_at) < clock.utc(r["read_at"])
+            )
+            if not predates:
+                continue
+        out.append(
+            Item(
+                sleeper_id=r["sleeper_id"],
+                name=r["full_name"] or r["sleeper_id"],
+                action=r["action"],
+                for_day=r["for_day"],
+                threshold=None,
+                ev_lock=None,
+                ev_pass=None,
+                rationale="",
+                said_lock_on=r["as_of"],
+                run_id=r["run_id"],
+                **_answered(answers, *key),
+            )
         )
-        for key, r in sorted(latest.items(), key=lambda kv: kv[0][1])
-        if key not in shown and key not in answers
-    )
+    return tuple(out)
 
 
 def _recorded(conn: sqlite3.Connection, answers: dict) -> tuple[Item, ...]:
@@ -798,7 +823,7 @@ def render(
             f"<td class=who>{html.escape(i.name)}"
             f"<div class=game>{date_of(i.for_day)} game &middot; called"
             f" {datetime.fromisoformat(i.said_lock_on).strftime('%A')}</div>"
-            f"{_controls(i, interactive)}</td>"
+            f"{_controls(i, interactive, still_open=True)}</td>"
             "</tr>"
             for i in run.unanswered
         )

@@ -485,3 +485,58 @@ def test_an_earlier_pass_does_not_settle_tonights_lock(week):
     assert "earlier: passed" in row
     assert ">Locked</button>" in row and ">Passed</button>" in row
     assert ">Undo</button>" not in row
+
+
+def thursday_without_the_call(week, run_id):
+    """Wednesday's run copied as Thursday's, which calls nothing."""
+    with connect(week.cfg) as conn:
+        row = dict(conn.execute("SELECT * FROM digest_runs WHERE run_id = ?", (run_id,)).fetchone())
+        row.update(
+            run_id="thursday",
+            as_of="2026-10-29",
+            generated_at="2026-10-29T13:05:00+00:00",
+            ledger_read_at="2026-10-29T13:00:00+00:00",
+        )
+        conn.execute(
+            f"INSERT INTO digest_runs ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+            list(row.values()),
+        )
+
+
+@pytest.mark.parametrize(
+    ("passed_at", "listed"),
+    [
+        pytest.param(BEFORE_RUN, True, id="passed before Wednesday's LOCK"),
+        pytest.param("2026-10-28T13:30:00+00:00", False, id="passed after it"),
+    ],
+)
+def test_a_renewed_lock_stays_unanswered_when_the_next_digest_drops_it(week, passed_at, listed):
+    """Tuesday's PASS, Wednesday's LOCK left unanswered, Thursday drops the game."""
+    from datetime import UTC
+
+    from lockin import advice
+
+    run_id = persisted(week, ledger_digest(week))
+    with connect(week.cfg) as conn:
+        conn.execute(
+            "UPDATE recommendations SET action = 'LOCK' WHERE run_id = ? AND sleeper_id = ?"
+            " AND for_day = ?",
+            (run_id, week.a, MON.toordinal()),
+        )
+    answer(week, week.a, MON, "PASS", at=passed_at)
+    thursday_without_the_call(week, run_id)
+    with connect(week.cfg) as conn:
+        run = advice.latest_run(conn, 1)
+    mine = [i for i in run.unanswered if i.sleeper_id == week.a]
+    assert bool(mine) is listed
+    if listed:
+        [item] = mine
+        assert item.action == "LOCK" and item.answer == "PASS"
+        page = advice.render(
+            run,
+            today="2026-10-29",
+            now=datetime(2026, 10, 29, 14, tzinfo=UTC),
+            interactive=True,
+        )
+        section = page[page.index("Not answered from earlier this week") :]
+        assert "earlier: passed" in section and ">Locked</button>" in section
