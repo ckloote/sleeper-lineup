@@ -453,3 +453,24 @@ def test_the_page_explains_a_repeat_tapped_while_the_digest_computed(week):
     )
     assert "Nothing left to lock &mdash; your answers are recorded" in page
     assert "If you took it, tap Locked" not in page and "unless you already did" not in page
+
+
+def test_an_earlier_pass_does_not_settle_tonights_lock(week):
+    """Passed before this run read the ledger; tonight's LOCK is still to act on."""
+    from datetime import UTC
+
+    from lockin import advice
+
+    answer(week, week.a, MON, "PASS")  # before the run
+    persisted(week, ledger_digest(week))
+    with connect(week.cfg) as conn:
+        run = advice.latest_run(conn, 1)
+    [item] = [c for c in run.calls if c.sleeper_id == week.a]
+    assert item.answer == "PASS" and not run.answered_since(item)
+    fresh = replace(item, action="LOCK", expires_utc="2026-10-28T23:00:00+00:00")
+    alone = replace(run, items=tuple(i for i in run.items if not i.is_call) + (fresh,))
+    page = advice.render(
+        alone, today=WED.isoformat(), now=datetime(2026, 10, 28, 14, tzinfo=UTC), interactive=True
+    )
+    assert "Lock now &mdash; before each player's next tip" in page
+    assert "Nothing left to lock" not in page

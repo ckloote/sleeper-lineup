@@ -133,6 +133,18 @@ class Run:
     """The week's answers belong on this page: the run read the ledger, or it
     abstained before reading any state while the ledger is in use. An abstention
     is exactly the morning a lock still needs recording."""
+    ledger_read_at: str | None = None
+    """The moment this run's advice reflects the ledger as of."""
+
+    def answered_since(self, item: Item) -> bool:
+        """Whether ``item`` was answered after this run read the ledger.
+
+        Only such an answer settles tonight's call. One from before it is what the
+        run already knew: a PASS on Tuesday does not answer Wednesday's LOCK.
+        """
+        if not (self.ledger and item.answered_at and self.ledger_read_at):
+            return False
+        return clock.utc(item.answered_at) >= clock.utc(self.ledger_read_at)
 
     @property
     def calls(self) -> list[Item]:
@@ -232,10 +244,10 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         and ledger_mod.began(conn, roster_id) is not None
     )
     answers = ledger_mod.answers(conn, row["week"], roster_id, before=replayed) if ledger_on else {}
+    # As of when the run read the ledger, not when it was saved: a tap made while
+    # it computed is the reason it repeated the call.
+    known = replayed or get("ledger_read_at") or row["generated_at"]
     if ledger_on and said_lock:
-        # As of when the run read the ledger, not when it was saved: a tap made
-        # while it computed is the reason it repeated the call.
-        known = replayed or get("ledger_read_at") or row["generated_at"]
         said_lock = ledger_mod.unanswered(
             said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=known)
         )
@@ -322,6 +334,7 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         stats_fetch_finished_at=get("stats_fetch_finished_at"),
         banked=banked,
         warnings=warnings,
+        ledger_read_at=known if ledger_on else None,
         unanswered=(
             _unanswered(conn, row, roster_id, items, answers)
             if ledger_on and not get("retrospective")
@@ -573,12 +586,12 @@ def _inputs(run: Run) -> str:
     )
 
 
-def _said_lock(item: Item, ledger: bool = False) -> str:
+def _said_lock(item: Item, ledger: bool = False, since: bool = False) -> str:
     """The same call made on an earlier morning, which the poll cannot yet confirm."""
     if not item.said_lock_on:
         return ""
     day = datetime.fromisoformat(item.said_lock_on).strftime("%A")
-    if ledger and item.answer:
+    if ledger and since:
         # Recorded since this run read the ledger: the answer stands on the
         # buttons, and this is why the run priced him unlocked.
         return (
@@ -691,7 +704,7 @@ def render(
             f"{i.action}</span></td>"
             f"<td class=who>{html.escape(i.name)}"
             f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}"
-            f"{_said_lock(i, run.ledger)}"
+            f"{_said_lock(i, run.ledger, run.answered_since(i))}"
             f"{_controls(i, interactive) if run.ledger and not run.retrospective else ''}</td>"
             "<td class=num>"
             f"{'ride' if i.threshold is None else f'score {i.threshold:g} or more'}</td>"
@@ -707,7 +720,7 @@ def render(
         locks = [i for i in calls if i.action == "LOCK" and i.deadline_status(now) == "open"]
         # One answered since the run read the ledger is not one to ask about:
         # its row shows the answer and offers Undo.
-        pending = [i for i in locks if not (run.ledger and i.answer)]
+        pending = [i for i in locks if not run.answered_since(i)]
         if run.retrospective:
             heading = "Historical replay &mdash; unavailable as live advice"
             hint = (
@@ -832,8 +845,9 @@ def render(
         # Beside the banked total, because it is the total they are missing from.
         unseen = ""
         if run.ledger:
-            open_ = [html.escape(i.name) for i in run.calls if i.said_lock_on and not i.answer]
-            since = [html.escape(i.name) for i in run.calls if i.said_lock_on and i.answer]
+            repeats = [i for i in run.calls if i.said_lock_on]
+            open_ = [html.escape(i.name) for i in repeats if not run.answered_since(i)]
+            since = [html.escape(i.name) for i in repeats if run.answered_since(i)]
             if open_:
                 unseen += f"<div>counted as unlocked until recorded: {', '.join(open_)}</div>"
             if since:
