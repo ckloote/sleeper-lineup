@@ -174,6 +174,35 @@ def began(conn: sqlite3.Connection, roster_id: int) -> str | None:
     return row[0] if row else None
 
 
+def live_source(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str | None:
+    """The state source this morning's live digest saved, if one reached that step."""
+    try:
+        row = conn.execute(
+            "SELECT state_source FROM digest_runs WHERE roster_id = ? AND as_of = ?"
+            " AND COALESCE(retrospective, 0) = 0 AND NOT COALESCE(abstained, 0)"
+            " AND state_source IS NOT NULL ORDER BY generated_at DESC LIMIT 1",
+            (roster_id, as_of),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
+def replays_ledger(conn: sqlite3.Connection, roster_id: int, as_of: str, *, before: str) -> bool:
+    """Whether a replay of ``as_of`` reads the ledger, as that morning did.
+
+    The live run's saved state source decides it: a morning that ran on the poll
+    (``LOCKIN_LEDGER=0``) replays on the poll, though the ledger was on before
+    and after it. With no saved morning, the ledger applies from the first
+    morning a live run read it, or once something had been recorded.
+    """
+    saved = live_source(conn, roster_id, as_of)
+    if saved is not None:
+        return saved == "ledger"
+    first = began(conn, roster_id)
+    return (first is not None and first <= as_of) or in_use(conn, roster_id, before=before)
+
+
 def state(
     conn: sqlite3.Connection,
     week: int,

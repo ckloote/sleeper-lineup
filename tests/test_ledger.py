@@ -320,3 +320,24 @@ def test_a_call_cannot_be_answered_once_its_week_is_over_by_the_calendar(week):
             ledger.open_call(conn, *args, season="2026", today="2026-11-02")
         with pytest.raises(ledger.NotACall, match="calendar is unknown"):
             ledger.open_call(conn, *args, season=None, today="2026-10-28")
+
+
+def test_a_replay_follows_the_source_its_own_morning_saved(week):
+    """Tuesday read the ledger; Wednesday ran on the poll (LOCKIN_LEDGER=0)."""
+    report = ledger_digest(week)
+    persisted(week, replace(report, as_of=TUE.isoformat()), at="2026-10-27T13:00:00+00:00")
+    wednesday = persisted(week, report)
+    with connect(week.cfg) as conn:
+        conn.execute(
+            "UPDATE digest_runs SET state_source = 'inferred' WHERE run_id = ?", (wednesday,)
+        )
+        assert ledger.replays_ledger(conn, 1, TUE.isoformat(), before=RUN)
+        assert not ledger.replays_ledger(conn, 1, WED.isoformat(), before=RUN)
+        # A morning with no saved live run falls back to the first ledger morning.
+        assert ledger.replays_ledger(conn, 1, "2026-10-29", before=RUN)
+    conn = connect(week.cfg)
+    ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
+    replay = digest_mod.build(
+        ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert replay.state_source == "inferred"
