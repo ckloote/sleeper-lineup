@@ -337,3 +337,48 @@ def test_a_replay_shows_its_mornings_answers_and_takes_none(tmp_path, morning):
     assert [(i.sleeper_id, i.answer) for i in run.recorded] == [(call.sleeper_id, "LOCK")]
     text = advice.render(run, interactive=True)
     assert 'action="/ledger"' not in text and "Undo</button>" not in text
+
+
+def test_an_abstained_morning_still_shows_the_weeks_answers(tmp_path, morning):
+    """Wednesday's stats are late, so its digest abstains: Tuesday's lock must
+    still be recordable, and the answers already given still undoable."""
+    from lockin import ledger
+
+    report, now = morning
+    db = tmp_path / "abstained.db"
+    answered, open_ = report.calls[0], report.calls[1:]
+    with session(db) as conn:
+        opening(conn)
+        digest_mod.persist(conn, report, now=now)
+        live_id = conn.execute("SELECT run_id FROM digest_runs").fetchone()[0]
+        ledger.record(
+            conn,
+            week=report.week,
+            roster_id=report.roster_id,
+            sleeper_id=answered.sleeper_id,
+            game_day=answered.day,
+            decision="LOCK",
+            source="page",
+            run_id=live_id,
+        )
+        late = digest_mod.Digest(
+            as_of=report.as_of,
+            week=report.week,
+            roster_id=report.roster_id,
+            opponent_roster_id=None,
+            known_through=report.known_through,
+            note="last night is not final yet",
+            abstained=True,
+        )
+        digest_mod.persist(conn, late, now=now + timedelta(hours=1))
+    conn = connect_readonly(db)
+    try:
+        run = advice.latest_run(conn, report.roster_id)
+    finally:
+        conn.close()
+    assert run.abstained and run.ledger
+    assert {i.sleeper_id for i in run.unanswered} == {c.sleeper_id for c in open_}
+    assert [i.sleeper_id for i in run.recorded] == [answered.sleeper_id]
+    text = advice.render(run, interactive=True)
+    assert "Not answered from earlier this week" in text or not open_
+    assert "Undo</button>" in text and f'value="{live_id}"' in text

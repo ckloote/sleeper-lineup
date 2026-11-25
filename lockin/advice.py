@@ -129,10 +129,10 @@ class Run:
     total for the rest of the week, so they stay answerable."""
     recorded: tuple[Item, ...] = ()
     """Every standing answer this week, newest first, for undoing."""
-
-    @property
-    def ledger(self) -> bool:
-        return self.state_source == "ledger"
+    ledger: bool = False
+    """The week's answers belong on this page: the run read the ledger, or it
+    abstained before reading any state while the ledger is in use. An abstention
+    is exactly the morning a lock still needs recording."""
 
     @property
     def calls(self) -> list[Item]:
@@ -222,12 +222,15 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
     # A replay is made afterwards, so it reads the ledger as of the morning it
     # replays: answers recorded since are not what that morning knew.
     replayed = clock.run_moment(row["as_of"], None) if get("retrospective") else None
-    answers = (
-        ledger_mod.answers(conn, row["week"], roster_id, before=replayed)
-        if get("state_source") == "ledger"
-        else {}
+    # An abstention returns before the state step, so it has no state source; the
+    # ledger still applies once any live run has read it.
+    ledger_on = get("state_source") == "ledger" or (
+        bool(get("abstained"))
+        and not get("retrospective")
+        and ledger_mod.began(conn, roster_id) is not None
     )
-    if get("state_source") == "ledger" and said_lock:
+    answers = ledger_mod.answers(conn, row["week"], roster_id, before=replayed) if ledger_on else {}
+    if ledger_on and said_lock:
         known = replayed or row["generated_at"]
         said_lock = ledger_mod.unanswered(
             said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=known)
@@ -317,10 +320,11 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         warnings=warnings,
         unanswered=(
             _unanswered(conn, row, roster_id, items, answers)
-            if get("state_source") == "ledger" and not get("retrospective")
+            if ledger_on and not get("retrospective")
             else ()
         ),
         recorded=_recorded(conn, answers),
+        ledger=ledger_on,
         **availability_coverage(conn, row["as_of"]),
     )
 
