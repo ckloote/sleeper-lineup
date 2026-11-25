@@ -474,3 +474,14 @@ def test_an_earlier_pass_does_not_settle_tonights_lock(week):
     )
     assert "Lock now &mdash; before each player's next tip" in page
     assert "Nothing left to lock" not in page
+    # And its row takes an answer, keeping Tuesday's on show, not only an Undo.
+    import re
+
+    [row] = [
+        r
+        for r in re.findall(r"<tr[^>]*>.*?</tr>", page, re.S)
+        if fresh.name in r and "class=deadline" in r
+    ]
+    assert "earlier: passed" in row
+    assert ">Locked</button>" in row and ">Passed</button>" in row
+    assert ">Undo</button>" not in row

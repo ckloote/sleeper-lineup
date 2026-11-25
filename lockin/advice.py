@@ -628,11 +628,26 @@ def _button(item: Item, decision: str, label: str) -> str:
     )
 
 
-def _controls(item: Item, interactive: bool) -> str:
-    """What was recorded for a call, and the buttons to answer or undo it."""
+def _controls(item: Item, interactive: bool, *, still_open: bool = False) -> str:
+    """What was recorded for a call, and the buttons to answer or undo it.
+
+    ``still_open`` is tonight's call answered only before this run read the
+    ledger: Tuesday's PASS does not answer Wednesday's LOCK. The earlier answer is
+    shown, and stays in the week's record, but the row offers Locked and Passed,
+    not just an Undo of an answer that was right when given.
+    """
     if item.answer is not None:
         verb = "locked" if item.answer == "LOCK" else "passed"
-        done = f"<span class=recorded>&#10003; {verb} &middot; {_local(item.answered_at)}</span>"
+        when = _local(item.answered_at)
+        if still_open:
+            earlier = f"<span class=recorded>earlier: {verb} &middot; {when}</span>"
+            if not interactive or not item.run_id:
+                return f"<div class=answer>{earlier}</div>"
+            return (
+                f"<div class=answer>{earlier}"
+                f"{_button(item, 'LOCK', 'Locked')}{_button(item, 'PASS', 'Passed')}</div>"
+            )
+        done = f"<span class=recorded>&#10003; {verb} &middot; {when}</span>"
         undo = _button(item, "UNDO", "Undo") if interactive and item.run_id else ""
         return f"<div class=answer>{done}{undo}</div>"
     if not interactive or not item.run_id:
@@ -705,7 +720,12 @@ def render(
             f"<td class=who>{html.escape(i.name)}"
             f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}"
             f"{_said_lock(i, run.ledger, run.answered_since(i))}"
-            f"{_controls(i, interactive) if run.ledger and not run.retrospective else ''}</td>"
+            + (
+                _controls(i, interactive, still_open=not run.answered_since(i))
+                if run.ledger and not run.retrospective
+                else ""
+            )
+            + "</td>"
             "<td class=num>"
             f"{'ride' if i.threshold is None else f'score {i.threshold:g} or more'}</td>"
             f"<td class=num>{'' if i.edge is None else f'{i.edge:.1%}'}</td>"
