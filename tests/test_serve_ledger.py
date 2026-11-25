@@ -15,7 +15,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from live_fixture import advising_morning
+from live_fixture import OPENING, advising_morning
 
 from lockin import advice, serve
 from lockin import digest as digest_mod
@@ -29,11 +29,21 @@ def morning(tmp_path_factory):
     return report, now
 
 
+def opening(conn) -> None:
+    """The season's first game, which is all the write route's calendar needs."""
+    conn.execute(
+        "INSERT INTO nba_schedule (nba_game_id, season, game_date, home_team, away_team)"
+        " VALUES ('0022600001', '2026', ?, 'ATL', 'BOS')",
+        (OPENING.isoformat(),),
+    )
+
+
 @pytest.fixture
 def served(tmp_path, morning) -> Iterator[tuple[str, object, object]]:
     report, now = morning
     db = tmp_path / "serve.db"
     with session(db) as conn:
+        opening(conn)
         digest_mod.persist(conn, report, now=now)
         conn.executemany(
             "INSERT OR REPLACE INTO players"
@@ -41,7 +51,15 @@ def served(tmp_path, morning) -> Iterator[tuple[str, object, object]]:
             list(report.names.items()),
         )
         run_id = conn.execute("SELECT run_id FROM digest_runs").fetchone()[0]
-    httpd = serve.build_server(db, report.roster_id, host="127.0.0.1", port=0, quiet=True)
+    httpd = serve.build_server(
+        db,
+        report.roster_id,
+        host="127.0.0.1",
+        port=0,
+        quiet=True,
+        season="2026",
+        today=lambda: report.as_of,
+    )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -210,9 +228,18 @@ def test_a_replays_calls_cannot_be_answered(tmp_path, morning):
     report, now = morning
     db = tmp_path / "replay.db"
     with session(db) as conn:
+        opening(conn)
         digest_mod.persist(conn, replace(report, retrospective=True), now=now)
         run_id = conn.execute("SELECT run_id FROM digest_runs").fetchone()[0]
-    httpd = serve.build_server(db, report.roster_id, host="127.0.0.1", port=0, quiet=True)
+    httpd = serve.build_server(
+        db,
+        report.roster_id,
+        host="127.0.0.1",
+        port=0,
+        quiet=True,
+        season="2026",
+        today=lambda: report.as_of,
+    )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -254,3 +281,23 @@ def test_the_written_file_has_no_buttons(served, morning):
     finally:
         conn.close()
     assert 'action="/ledger"' not in text and "not answered" in text
+
+
+def test_a_server_that_does_not_know_its_season_takes_no_answers(tmp_path, morning):
+    report, now = morning
+    db = tmp_path / "noseason.db"
+    with session(db) as conn:
+        opening(conn)
+        digest_mod.persist(conn, report, now=now)
+        run_id = conn.execute("SELECT run_id FROM digest_runs").fetchone()[0]
+    httpd = serve.build_server(db, report.roster_id, host="127.0.0.1", port=0, quiet=True)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        assert post(base, answer_for(morning, run_id))[0] == 400
+        assert rows(db) == []
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)

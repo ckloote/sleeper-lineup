@@ -1179,7 +1179,13 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
         raise click.ClickException(f"no roster for user {cfg.user_id}; pass --roster")
 
     httpd = serve_mod.build_server(
-        cfg.db_path, roster_id, dashboard_db=dashboard_db, host=host, port=port, quiet=quiet
+        cfg.db_path,
+        roster_id,
+        dashboard_db=dashboard_db,
+        host=host,
+        port=port,
+        quiet=quiet,
+        season=cfg.season,
     )
     click.echo(
         f"serving roster {roster_id} from {cfg.db_path}"

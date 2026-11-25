@@ -54,6 +54,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from lockin import advice as advice_mod
+from lockin import clock
 from lockin import dashboard as dashboard_mod
 from lockin import ledger as ledger_mod
 from lockin.store.db import connect, connect_readonly
@@ -89,6 +90,10 @@ class Sources:
     advice_db: Path
     dashboard_db: Path
     roster_id: int
+    season: str | None = None
+    """Whose calendar says when a week is over. Without it no answer is taken."""
+    today: Callable[[], str] = clock.today_iso
+    """Today's date in the schedule's timezone; a test pins it."""
 
 
 def _advice_page(src: Sources) -> str:
@@ -156,7 +161,13 @@ def record_answer(src: Sources, answer: dict[str, str]) -> None:
             raise Refused(503, "no lock_ledger table yet; run `lockin digest` once")
         try:
             week = ledger_mod.open_call(
-                conn, src.roster_id, answer["run_id"], answer["sleeper_id"], int(answer["game_day"])
+                conn,
+                src.roster_id,
+                answer["run_id"],
+                answer["sleeper_id"],
+                int(answer["game_day"]),
+                season=src.season,
+                today=src.today(),
             )
         except ledger_mod.NotACall as exc:
             raise Refused(400, str(exc)) from None
@@ -277,6 +288,8 @@ def build_server(
     host: str = "0.0.0.0",
     port: int = PORT,
     quiet: bool = False,
+    season: str | None = None,
+    today: Callable[[], str] | None = None,
 ) -> ThreadingHTTPServer:
     """A server bound and ready, not yet running.
 
@@ -290,6 +303,8 @@ def build_server(
         advice_db=db_path,
         dashboard_db=dashboard_db or db_path,
         roster_id=roster_id,
+        season=season,
+        today=today or clock.today_iso,
     )
     bound = type("BoundHandler", (Handler,), {"sources": sources, "quiet": quiet})
     return ThreadingHTTPServer((host, port), bound)

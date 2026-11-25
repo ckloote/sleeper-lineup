@@ -26,6 +26,7 @@ from lockin.core.projections import ProjectionParams
 from lockin.store.db import apply_schema
 
 RUN = "2026-10-28T13:00:00+00:00"
+OPEN = {"season": "2026", "today": "2026-10-28"}
 BEFORE_RUN = "2026-10-28T02:00:00+00:00"
 AFTER_RUN = "2026-10-28T14:00:00+00:00"
 
@@ -239,14 +240,14 @@ def test_only_a_call_of_this_weeks_live_digest_can_be_answered(week):
     run_id = persisted(week, report)
     call = report.calls[0]
     with connect(week.cfg) as conn:
-        assert ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day) == 2
+        assert ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day, **OPEN) == 2
         with pytest.raises(ledger.NotACall):
-            ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day + 1)
+            ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day + 1, **OPEN)
         with pytest.raises(ledger.NotACall):
-            ledger.open_call(conn, 2, run_id, call.sleeper_id, call.day)
+            ledger.open_call(conn, 2, run_id, call.sleeper_id, call.day, **OPEN)
         rule = report.rules[0]
         with pytest.raises(ledger.NotACall):
-            ledger.open_call(conn, 1, run_id, rule.sleeper_id, rule.night)
+            ledger.open_call(conn, 1, run_id, rule.sleeper_id, rule.night, **OPEN)
 
 
 def test_a_replay_or_a_finished_week_cannot_be_answered(week):
@@ -254,12 +255,12 @@ def test_a_replay_or_a_finished_week_cannot_be_answered(week):
     run_id = persisted(week, replace(report, retrospective=True))
     call = report.calls[0]
     with connect(week.cfg) as conn, pytest.raises(ledger.NotACall):
-        ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day)
+        ledger.open_call(conn, 1, run_id, call.sleeper_id, call.day, **OPEN)
 
     live_id = persisted(week, report, at=AFTER_RUN)
     persisted(week, replace(report, week=3, calls=[], rules=[]), at="2026-11-02T13:00:00+00:00")
     with connect(week.cfg) as conn, pytest.raises(ledger.NotACall):
-        ledger.open_call(conn, 1, live_id, call.sleeper_id, call.day)
+        ledger.open_call(conn, 1, live_id, call.sleeper_id, call.day, **OPEN)
 
 
 def test_the_page_says_an_unanswered_repeat_is_unrecorded_not_unseen(week):
@@ -305,3 +306,17 @@ def test_a_replay_reads_the_ledger_from_the_first_morning_a_live_run_did(week):
         ctx, 1, TUE.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
     )
     assert earlier.state_source != "ledger"
+
+
+def test_a_call_cannot_be_answered_once_its_week_is_over_by_the_calendar(week):
+    """Sunday's run stays the latest after the rollover until a digest succeeds."""
+    report = ledger_digest(week)
+    run_id = persisted(week, report)
+    call = report.calls[0]
+    args = (1, run_id, call.sleeper_id, call.day)
+    with connect(week.cfg) as conn:
+        assert ledger.open_call(conn, *args, season="2026", today="2026-11-01") == 2  # Sunday
+        with pytest.raises(ledger.NotACall, match="week is over"):
+            ledger.open_call(conn, *args, season="2026", today="2026-11-02")
+        with pytest.raises(ledger.NotACall, match="calendar is unknown"):
+            ledger.open_call(conn, *args, season=None, today="2026-10-28")

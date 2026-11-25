@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import date
 
+from lockin import calendar
 from lockin.core.policy import Game
 from lockin.projections import date_of
 from lockin.store.db import now_iso
@@ -226,14 +228,27 @@ def unanswered(
 
 
 def open_call(
-    conn: sqlite3.Connection, roster_id: int, run_id: str, sleeper_id: str, game_day: int
+    conn: sqlite3.Connection,
+    roster_id: int,
+    run_id: str,
+    sleeper_id: str,
+    game_day: int,
+    *,
+    season: str | None,
+    today: str,
 ) -> int:
     """The week of a call that may be answered, or raise `NotACall`.
 
     It must be a LOCK or PASS call of a **live** run for this roster, in the week
-    of the roster's latest live run. A replay was never advice, and a week that
-    is over has nothing left to decide. This is the only thing the page's write
-    route trusts, so it is checked against the database, never the form.
+    of the roster's latest live run, and ``today`` must not be past that week's
+    Sunday. A replay was never advice, and a week that is over has nothing left
+    to decide. The calendar is checked as well as the runs: after the weekly
+    rollover, Sunday's run stays the latest until a digest succeeds, and its page
+    would otherwise keep taking edits to a finished week. A season whose calendar
+    cannot be read takes no answers at all.
+
+    This is the only thing the page's write route trusts, so it is checked
+    against the database, never the form.
     """
     row = conn.execute(
         """
@@ -254,5 +269,11 @@ def open_call(
         (roster_id,),
     ).fetchone()
     if latest is None or latest[0] != row[0]:
+        raise NotACall("that call's week is over")
+    opening = calendar.opening_night(conn, season) if season else None
+    if opening is None:
+        raise NotACall("the season's calendar is unknown, so its weeks cannot be checked")
+    _, sunday = calendar.week_bounds(int(row[0]), opening)
+    if date.fromisoformat(today) > sunday:
         raise NotACall("that call's week is over")
     return int(row[0])
