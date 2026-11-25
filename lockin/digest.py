@@ -40,6 +40,7 @@ a risk to check rather than an instruction to follow.
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import textwrap
 import uuid
@@ -49,7 +50,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 
-from lockin import __version__, calendar, clock
+from lockin import __version__, calendar, clock, rotation
 from lockin.backtest import (
     DEFAULT_PATHS,
     greedy_thresholds,
@@ -67,11 +68,15 @@ from lockin.core.projections import (
 from lockin.core.winprob import win_probability
 from lockin.projections import NoGamesYet, date_of, day_index, load_panel, observed_scores
 from lockin.rollout import (
+    Bench,
+    Branches,
     SimulationCache,
+    bench_rows,
     decision_for,
     opponent_totals,
     standing_thresholds,
     walk_locks,
+    with_bench,
 )
 from lockin.slate import WeekSlate, week_slate
 from lockin.state import (
@@ -128,6 +133,24 @@ class LockCall:
     did. The poll cannot show that lock until he plays again, so this call and
     every number around it treat him as unlocked; the digest says so rather than
     assuming the earlier call was taken."""
+    via: tuple[str, ...] = ()
+    """Bench players the modeled pass lineup starts and the modeled lock lineup
+    leaves on the bench (`lockin.rollout.Branches.brought_in`). The lock lineup
+    is the solver's choice, not the only legal one, so this is never a claim
+    that locking rules them out: with two equal guards it can be a tie. Empty
+    when the call did not turn on the bench, or the bench was not considered."""
+    bench_in: tuple[str, ...] = ()
+    """Every bench player the pass lineup starts: ``via`` plus any the lock
+    lineup would start too. Recorded whenever the bench was in play, even with
+    ``via`` empty, because ``p_win_pass`` assumes that lineup. Instructions for
+    fielding it name all of them, or following them would leave a slot empty;
+    what *passing* makes possible is ``via`` alone."""
+    bench_out: tuple[str, ...] = ()
+    """Starters the pass lineup sends to the bench, recorded as ``bench_in`` is.
+    Read from the lineup the model fielded, not assumed to be him: re-solving
+    the slots can keep him and bench someone else."""
+    moves: tuple[tuple[str, str], ...] = ()
+    """``(player, slot)`` for every slot change the pass lineup needs."""
 
     @property
     def edge(self) -> float:
@@ -207,6 +230,13 @@ class Digest:
     """Which engine produced it: lockin's version and a hash of the projection
     parameters. Recomputing later gives a different answer (§20), so the record
     must say what it was computed with."""
+    shadow: Digest | None = None
+    """The same morning priced bench-aware, recorded but never sent
+    (`Config.bench_shadow`). None when it was not run or failed."""
+    shadow_error: str | None = None
+    """Why the shadow failed. A failed shadow never stops the digest."""
+    candidates: tuple[str, ...] = ()
+    """The bench regulars a bench-aware run could field. Empty otherwise."""
 
     @property
     def as_of_day(self) -> int:
@@ -291,6 +321,12 @@ class DigestContext:
     """Whether the poll each lineup was read from accounts for every starting
     slot, as ingest recorded it (`poll_complete`). See `partial_lineup`."""
 
+    slot_names: dict[tuple[int, int], list[str | None]] = field(default_factory=dict)
+    """Each lineup's slots, in the same order as `lineups`."""
+    benches: dict[tuple[int, int], list[str]] = field(default_factory=dict)
+    """The same poll's non-starters: bench and reserve alike — the poll does not
+    tell them apart, so `bench_for` drops anyone designated out."""
+
     def lineup_ids(self, week: int, roster_id: int) -> list[str]:
         return self.lineups.get((week, roster_id), [])
 
@@ -308,10 +344,11 @@ def load_context(
     scores = observed_scores(panel, scoring)
 
     lineups: dict[tuple[int, int], list[str]] = defaultdict(list)
+    slot_names: dict[tuple[int, int], list[str | None]] = defaultdict(list)
     matchups: dict[tuple[int, int], int | None] = {}
     for row in conn.execute(
         """
-        SELECT week, roster_id, matchup_id, sleeper_id
+        SELECT week, roster_id, matchup_id, sleeper_id, slot
           FROM weekly_matchups_latest
          WHERE is_starter = 1
          ORDER BY week, roster_id, slot_index
@@ -319,7 +356,14 @@ def load_context(
     ):
         key = (row["week"], row["roster_id"])
         lineups[key].append(row["sleeper_id"])
+        slot_names[key].append(row["slot"])
         matchups[key] = row["matchup_id"]
+    benches: dict[tuple[int, int], list[str]] = defaultdict(list)
+    for row in conn.execute(
+        "SELECT week, roster_id, sleeper_id FROM weekly_matchups_latest"
+        " WHERE is_starter = 0 ORDER BY week, roster_id, sleeper_id"
+    ):
+        benches[(row["week"], row["roster_id"])].append(row["sleeper_id"])
     # The same poll per roster-week as the lineup: both views take the latest
     # `observed_at` in weekly_matchup_teams. NULL — a poll written before the
     # column existed — does not vouch for itself.
@@ -364,6 +408,8 @@ def load_context(
         opponents=opponents,
         dnp_scale=dnp_scale,
         whole=whole,
+        slot_names=dict(slot_names),
+        benches=dict(benches),
     )
 
 
@@ -506,9 +552,120 @@ def slate_in_progress(as_of: str, now: datetime | None) -> str | None:
     return None
 
 
-def model_id(ctx: DigestContext) -> str:
+def model_id(ctx: DigestContext, *, bench_aware: bool = False) -> str:
     params = hashlib.sha1(repr(ctx.source.params).encode()).hexdigest()[:10]
-    return f"lockin {__version__}; projection params {params}"
+    suffix = "; bench-aware" if bench_aware else ""
+    return f"lockin {__version__}; projection params {params}{suffix}"
+
+
+UNAVAILABLE = frozenset({"out", "ir", "suspended", "sus"})
+"""Designations that keep a bench player out of consideration. Reserve is not
+in the poll, and IR needs an Out-type designation, so this also drops IR."""
+
+
+def bench_for(
+    ctx: DigestContext,
+    week: int,
+    roster_id: int,
+    known_through: int,
+    *,
+    before: str,
+    live: bool,
+) -> Bench | None:
+    """This roster's bench as `lockin.rollout.Bench`, or None if it can't be built.
+
+    Only rotation regulars are candidates (`lockin.rotation`): players this
+    manager starts on most of their game nights, who played their last game.
+    The rest of the bench was the source of the failed 2025-26 backtest, and is
+    left out rather than corrected.
+
+    None is never a reason to abstain: the digest then prices calls exactly as
+    it did before bench players were considered.
+    """
+    conn = ctx.conn
+    key = (week, roster_id)
+    slots, starters = ctx.slot_names.get(key, []), ctx.lineup_ids(week, roster_id)
+    if not starters or any(s is None for s in slots):
+        return None
+    designation = {
+        row[0]: (row[1] or "").strip().lower()
+        for row in conn.execute(
+            """
+            SELECT sleeper_id, designation FROM (
+                SELECT sleeper_id, designation,
+                       ROW_NUMBER() OVER (PARTITION BY sleeper_id ORDER BY observed_at DESC) AS n
+                  FROM player_status_events WHERE observed_at < ?
+            ) WHERE n = 1
+            """,
+            (before,),
+        )
+    }
+    ids = [
+        pid
+        for pid in ctx.benches.get(key, [])
+        if pid not in starters and designation.get(pid, "") not in UNAVAILABLE
+    ]
+    ids = rotation.regulars(conn, ctx.panel, roster_id, ids, through_day=known_through)
+    if not ids:
+        return None
+    slate = week_slate(conn, ctx.panel, ctx.scores, ctx.season, week, ids, known_through, live=live)
+    # A bench player whose last fixture is unsettled has an outcome the panel
+    # does not hold. He is dropped rather than letting him stop the digest.
+    unsettled = {pid for pid, _ in slate.unsettled}
+    games = {pid: g for pid, g in slate.games.items() if pid not in unsettled}
+    positions: dict[str, list[str]] = {}
+    for pid in [*starters, *games]:
+        row = conn.execute("SELECT positions FROM players WHERE sleeper_id = ?", (pid,)).fetchone()
+        positions[pid] = json.loads(row[0]) if row and row[0] else []
+    return Bench.from_lineup(
+        [str(s) for s in slots],
+        starters,
+        games,
+        positions,
+        regulars=ids,
+        promotable_from=tipped(slate, games, known_through, before=before, live=live),
+    )
+
+
+def starts_from(bench: Bench, sleeper_id: str, known_through: int) -> str:
+    """When the projection first counts a fielded bench player: "tonight",
+    unless tonight's game has already tipped (`tipped`), then that date."""
+    first = bench.promotable_from.get(sleeper_id, known_through + 1)
+    return "tonight" if first <= known_through + 1 else date_of(first)
+
+
+def tipped(
+    slate: WeekSlate,
+    games: dict[str, list[Game]],
+    known_through: int,
+    *,
+    before: str,
+    live: bool,
+) -> dict[str, int]:
+    """Bench players whose next game has tipped by ``before``: the day after it.
+
+    A live rerun after a bench player's tip still has ``known_through`` at
+    yesterday, so today's game is ahead of the cutoff. But a player has to be
+    in a slot at tipoff for a game to count, so moving him in now cannot count
+    it. The game stays in his week, to be simulated for his availability, and
+    he is promotable only from the day after. Live, a tipoff that is missing or
+    cannot be placed in time counts as passed, as it does for a call
+    ("tipoff unknown; no call"), but only for a game dated today: a later one
+    cannot have tipped yet. A replay's run moment is before any tip.
+    """
+    moment = clock.aware_utc(before)
+    out: dict[str, int] = {}
+    for pid, week in games.items():
+        nxt = next((g for g in week if g.day > known_through), None)
+        if nxt is None:
+            continue
+        tip = clock.aware_utc(slate.tipoff.get((pid, nxt.day)))
+        # An unknown tip time can only have passed once the game's date has
+        # arrived; a game later in the week is promotable whatever its hour.
+        unknown_today = tip is None and live and nxt.day <= known_through + 1
+        if unknown_today or (tip is not None and moment is not None and tip <= moment):
+            out[pid] = nxt.day + 1
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,12 +804,18 @@ def morning(
     live: bool = False,
     now: datetime | None = None,
     params: ProjectionParams | None = None,
+    bench_aware: bool = False,
+    shadow: bool = False,
 ) -> Digest:
     """The digest the cron runs: load, then build — or abstain before any game.
 
     One function for `lockin digest` and for the lifecycle rehearsal
     (`tests/test_lifecycle.py`), so the rehearsal exercises the sequence the
     cron runs rather than a copy of it.
+
+    ``shadow`` also builds the bench-aware digest for the same morning, from the
+    same context and seed, and attaches it as ``shadow``. It is skipped when
+    ``bench_aware`` is already on or the digest made no calls and no rules.
     """
     if live and (problem := calendar.disagreement(conn, season, as_of)):
         return abstain(conn, season, roster_id, as_of, problem)
@@ -660,16 +823,19 @@ def morning(
         ctx = load_context(conn, season, params=params)
     except NoGamesYet as exc:
         return abstain(conn, season, roster_id, as_of, f"insufficient history: {exc}")
-    return build(
-        ctx,
-        roster_id,
-        as_of,
-        n_sims=n_sims,
-        n_paths=n_sims,
-        locked=locked,
-        live=live,
-        now=now,
-    )
+    if live and now is None:
+        # Read once, here, so the digest and its shadow are taken at the same
+        # instant. Each `build` reading the clock itself could put a tipoff
+        # between them and record the gap as a policy difference.
+        now = datetime.now(UTC)
+    args = dict(n_sims=n_sims, n_paths=n_sims, locked=locked, live=live, now=now)
+    digest = build(ctx, roster_id, as_of, bench_aware=bench_aware, **args)
+    if shadow and not bench_aware and (digest.calls or digest.rules):
+        try:
+            digest.shadow = build(ctx, roster_id, as_of, bench_aware=True, **args)
+        except Exception as exc:  # noqa: BLE001 - the shadow must never cost the digest
+            digest.shadow_error = f"{type(exc).__name__}: {exc}"
+    return digest
 
 
 def build(
@@ -684,6 +850,7 @@ def build(
     locked: dict[str, float] | None = None,
     live: bool = False,
     now: datetime | None = None,
+    bench_aware: bool = False,
 ) -> Digest:
     """Assemble the digest for the morning of ``as_of``.
 
@@ -701,8 +868,18 @@ def build(
     ``live`` is a run for today: the player-to-team join reads today's rosters,
     and the run refuses to read a slate that has not finished. ``now`` is the
     moment of the run, which closes any call whose next tipoff has passed.
+
+    ``bench_aware`` prices every call with the roster's bench in play: each
+    branch fields the best lineup it can from the starters and the bench, and
+    locking pins the player to his slot (`lockin.rollout.Bench`). Off, the
+    calls are exactly as before.
     """
     conn = ctx.conn
+    if live and now is None:
+        # One clock for every deadline in the run. Left None, the calls would
+        # read the real clock while the run moment, and with it the bench's
+        # tipoff checks, fell back to a replay's morning (review of PR #3).
+        now = datetime.now(UTC)
     if live and (problem := calendar.disagreement(conn, ctx.season, as_of)):
         return abstain(conn, ctx.season, roster_id, as_of, problem)
     day = day_index(as_of)
@@ -764,7 +941,7 @@ def build(
         names=names,
         n_sims=n_sims,
         seed=seed,
-        model=model_id(ctx),
+        model=model_id(ctx, bench_aware=bench_aware),
         retrospective=not live,
     )
     if evidence is not None:
@@ -908,6 +1085,15 @@ def build(
             digest.state_source = SOURCE_ASSUMED
     digest.banked = dict(locked)
 
+    bench = (
+        bench_for(ctx, week, roster_id, known_through, before=before, live=live)
+        if bench_aware
+        else None
+    )
+    if bench is not None:
+        names.update(player_names(conn, list(bench.games)))
+        digest.candidates = tuple(bench.games)
+
     # -- 1. calls on games whose lock window is still open ----------------
     # One per player, not one night per team (review finding 6): a player who
     # played Monday and next plays Thursday can still bank Monday on Wednesday,
@@ -952,6 +1138,8 @@ def build(
             and deadline <= (now or datetime.now(UTC))
         ):
             continue  # he has tipped again: the window is shut
+        via: list[str] = []
+        plans: list[Branches] = []
         call, break_even = decision_for(
             mine,
             theirs,
@@ -964,6 +1152,9 @@ def build(
             cache,
             rng,
             opponent_known=opponent_known,
+            bench=bench,
+            brought_in=via,
+            plans=plans,
         )
         digest.calls.append(
             LockCall(
@@ -977,6 +1168,8 @@ def build(
                 break_even=break_even,
                 expires_utc=expires,
                 said_lock_on=said_lock.get((sleeper_id, game.day)),
+                via=tuple(via),
+                **pass_lineup(plans, bench),
             )
         )
     digest.calls.sort(key=lambda c: -c.score)
@@ -997,6 +1190,7 @@ def build(
             rng,
             known_through=known_through,
             opponent_known=opponent_known,
+            bench=bench,
         )
         for sleeper_id, threshold in rules.items():
             if not np.isfinite(threshold):
@@ -1028,16 +1222,40 @@ def build(
     )
     banked_total = sum(locked.values())
     unlocked = [pid for pid in mine if pid not in locked]
+    plan = None
     if unlocked:
-        contributions = np.vstack(
-            [
-                cache.contribution(pid, mine[pid], week, rng, known_through=known_through)
-                for pid in unlocked
-            ]
-        )
-        my_total = banked_total + contributions.sum(axis=0)
+        rows = {
+            pid: cache.contribution(pid, mine[pid], week, rng, known_through=known_through)
+            for pid in unlocked
+        }
+        if bench is not None:
+            extra = bench_rows(
+                cache, bench, mine, week, rng, known_through=known_through, start=known_through + 1
+            )
+            plan = with_bench(bench, rows, extra, list(locked), None, n_sims)
+        if plan is not None:
+            my_total = banked_total + plan.passing
+        else:
+            my_total = banked_total + np.vstack([rows[pid] for pid in unlocked]).sum(axis=0)
     else:
         my_total = np.full(n_sims, banked_total)
+    if plan is not None and bench is not None:
+        # The totals above field the best lineup the bench allows. When that is
+        # not the one on file, say so: the numbers assume a change only the
+        # manager can make.
+        out = [names.get(p, p) for p in plan.sent_out]
+        for pid in plan.arriving:
+            when = starts_from(bench, pid, known_through)
+            digest.warnings.append(
+                Warning(
+                    sleeper_id=pid,
+                    name=names.get(pid, pid),
+                    kind="bench assumption",
+                    detail=f"the projection and P(win) assume he starts from {when}"
+                    + (f", in place of {', '.join(out)}" if out else ""),
+                    short="assumed to start",
+                )
+            )
     digest.p_win = win_probability(my_total, opponent)
     digest.my_total = float(my_total.mean())
     digest.opponent_total = float(opponent.mean())
@@ -1079,6 +1297,10 @@ def deadline_label(tipoff_utc: str) -> str:
     """ "THU 7:30PM" — in the schedule's timezone, which is the one on the TV."""
     local = datetime.fromisoformat(tipoff_utc.replace("Z", "+00:00")).astimezone(clock.zone())
     return f"{local.strftime('%a').upper()} {local.strftime('%I:%M%p').lstrip('0')}"
+
+
+def names_of(digest: Digest, sleeper_id: str) -> str:
+    return digest.names.get(sleeper_id, sleeper_id)
 
 
 def render(digest: Digest, *, compact: bool = False) -> str:
@@ -1125,6 +1347,15 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             )
             out.append(f"  {verb}  {_short(call.name, 18):<18}{call.score:>6.1f}")
             out.append(f"        {need}")
+            if call.via:
+                # The two modeled lineups, as they are: the pass lineup to field,
+                # and who of it the lock lineup leaves out. Never "locking rules
+                # him out": the lock lineup is the solver's pick, not the only one.
+                short = lambda ps: ", ".join(_short(names_of(digest, p), 16) for p in ps)  # noqa: E731
+                out.append(f"        pass: start {short(call.bench_in or call.via)}")
+                if call.bench_out:
+                    out.append(f"        and bench {short(call.bench_out)}")
+                out.append(f"        lock lineup sits {short(call.via)}")
             if call.said_lock_on:
                 said = datetime.fromisoformat(call.said_lock_on).strftime("%a")
                 out.append(f"        {said} said LOCK; ignore if you locked")
@@ -1279,7 +1510,8 @@ def persist(
                 f" break-even: score {call.break_even:g} or more"
                 if np.isfinite(call.break_even)
                 else " no score is worth banking"
-            ),
+            )
+            + swap_text(digest, call),
             run_id,
             call.expires_utc,
             None,
@@ -1332,4 +1564,129 @@ def persist(
         " VALUES (?, ?, ?, ?, ?)",
         [(run_id, w.sleeper_id, w.kind, w.detail, w.short) for w in warnings.values()],
     )
+    persist_shadow(conn, run_id, digest)
     return len(rows)
+
+
+def persist_shadow(conn: sqlite3.Connection, run_id: str, digest: Digest) -> None:
+    """Record the bench-aware shadow of run ``run_id``, if one was attempted."""
+    shadow = digest.shadow
+    if shadow is None and digest.shadow_error is None:
+        return
+    if shadow is None:
+        conn.execute(
+            "INSERT INTO bench_shadow_runs (run_id, error) VALUES (?, ?)",
+            (run_id, digest.shadow_error),
+        )
+        return
+    conn.execute(
+        "INSERT INTO bench_shadow_runs (run_id, model, p_win, projected, candidates)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (run_id, shadow.model, shadow.p_win, shadow.my_total, json.dumps(shadow.candidates)),
+    )
+
+    def finite(x: float) -> float | None:
+        return x if np.isfinite(x) else None
+
+    conn.executemany(
+        "INSERT INTO bench_shadow (run_id, sleeper_id, action, for_day, score, threshold,"
+        " p_win_lock, p_win_pass, via, bench_in, bench_out)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                run_id,
+                c.sleeper_id,
+                "LOCK" if c.lock else "PASS",
+                c.day,
+                c.score,
+                finite(c.break_even),
+                c.p_win_lock,
+                c.p_win_pass,
+                json.dumps(c.via),
+                json.dumps(c.bench_in),
+                json.dumps(c.bench_out),
+            )
+            for c in shadow.calls
+        ]
+        + [
+            (
+                run_id,
+                r.sleeper_id,
+                "THRESHOLD",
+                r.night,
+                None,
+                r.threshold,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            for r in shadow.rules
+        ],
+    )
+
+
+def pass_lineup(plans: list[Branches], bench: Bench | None) -> dict[str, tuple]:
+    """A call's ``bench_in``, ``bench_out`` and ``moves``: the pass lineup's
+    changes against the current slots.
+
+    Kept whether or not passing is what makes them possible, so with ``via``
+    empty too: ``p_win_pass`` assumes that lineup either way, and the shadow
+    row is how it can be reconstructed later.
+    """
+    if not plans or bench is None:
+        return {}
+    plan = plans[0]
+    return {
+        "bench_in": plan.arriving,
+        "bench_out": plan.sent_out,
+        "moves": plan.moves(bench.slot_of),
+    }
+
+
+def swap_text(digest: Digest, call: LockCall) -> str:
+    """The two modeled lineups behind a call that turned on the bench; "" otherwise.
+
+    "; the pass lineup starts X, Z in place of Y, W; the lock lineup leaves X
+    on the bench". It describes what the solver chose for each branch and
+    claims nothing more. Saying passing "lets you" start X, or that locking
+    "rules him out", would overstate it: the lock lineup is one legal choice,
+    and with two equal guards X could start there too. Who goes out is read
+    from the lineup the model fielded (``bench_out``), never assumed to be the
+    player deciding.
+    """
+    if not call.via:
+        return ""
+    names = lambda ps: ", ".join(names_of(digest, p) for p in ps)  # noqa: E731
+    text = "; the pass lineup starts " + names(call.bench_in or call.via)
+    if call.bench_out:
+        text += " in place of " + names(call.bench_out)
+    return text + "; the lock lineup leaves " + names(call.via) + " on the bench"
+
+
+def render_shadow(digest: Digest) -> str | None:
+    """One line per call the bench-aware shadow would make differently.
+
+    For the log, not the notification: the shadow is evidence being collected,
+    not advice.
+    """
+    if digest.shadow_error:
+        return f"bench shadow failed: {digest.shadow_error}"
+    shadow = digest.shadow
+    if shadow is None:
+        return None
+    live = {(c.sleeper_id, c.day): c for c in digest.calls}
+    lines = []
+    for c in shadow.calls:
+        was = live.get((c.sleeper_id, c.day))
+        if was is None or was.lock == c.lock:
+            continue
+        line = f"  {c.name}: {'LOCK' if was.lock else 'PASS'} -> {'LOCK' if c.lock else 'PASS'}"
+        if c.via:
+            line += " (" + swap_text(shadow, c).removeprefix("; ") + ")"
+        lines.append(line)
+    pool = ", ".join(names_of(shadow, p) for p in shadow.candidates) or "none"
+    odds = "" if shadow.p_win is None else f"P(win) {shadow.p_win:.0%}, "
+    head = f"bench shadow: {odds}regulars on the bench: {pool}"
+    return "\n".join([head, *(lines or ["  every call agrees"])])

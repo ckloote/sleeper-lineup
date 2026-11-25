@@ -428,3 +428,22 @@ def test_a_replay_is_the_same_in_a_worker_process(synthetic):
     there = backtest.run_seeds(cfg.db_path, season.season, [1, 2], n_paths=50, workers=2)
     assert [r.seed for r in there] == [1, 2] and [r.n_paths for r in there] == [50, 50]
     assert [points(r) for r in here] == [points(r) for r in there]
+
+
+def test_bench_aware_reports_every_week_rollout_played(synthetic):
+    """A week with no bench regulars is rollout+bench = rollout, not a gap.
+
+    Skipping the replay used to drop the week from rollout+bench as well, so the
+    comparison covered only the weeks where the bench could matter and the
+    2025-26 report read "no roster-weeks" (review of PR #3).
+    """
+    season, cfg = synthetic
+    with connect(cfg) as conn:
+        plain = backtest.run_backtest(conn, season.season, n_paths=50, seed=1)
+        bench = backtest.run_backtest(conn, season.season, n_paths=50, seed=1, bench_aware=True)
+    played = [r for r in bench.rows if backtest.ROLLOUT in r.points]
+    assert played
+    assert all(backtest.ROLLOUT_BENCH in r.points for r in played)
+    assert [r.points.get(backtest.ROLLOUT) for r in plain.rows] == [
+        r.points.get(backtest.ROLLOUT) for r in bench.rows
+    ]

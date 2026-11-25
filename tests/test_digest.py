@@ -514,3 +514,164 @@ def test_the_reconstruction_no_longer_consumes_the_calls_it_should_deliver(ctx, 
     sat = digest_mod.build(ctx, roster_id, "2026-01-10")
     calls = {c.sleeper_id: c for c in sat.calls}
     assert calls["1648"].score == 48.5 and calls["1648"].lock
+
+
+# ------------------------------------------------------------- bench-aware
+
+
+def test_bench_aware_digest_names_its_swaps_and_keeps_the_old_one_intact(ctx, roster_id, report):
+    """Off is the old digest; on, every named swap is a real bench player."""
+    off = digest_mod.build(ctx, roster_id, AS_OF, n_sims=200, n_paths=200, bench_aware=False)
+    assert [(c.sleeper_id, c.lock, c.break_even) for c in off.calls] == [
+        (c.sleeper_id, c.lock, c.break_even) for c in report.calls
+    ]
+    assert off.p_win == report.p_win
+    assert all(c.via == () for c in off.calls)
+    assert not off.model.endswith("bench-aware")
+
+    on = digest_mod.build(ctx, roster_id, AS_OF, n_sims=200, n_paths=200, bench_aware=True)
+    assert on.model.endswith("; bench-aware")
+    assert not on.abstained
+    week = on.week
+    bench = set(ctx.benches[(week, roster_id)]) - set(ctx.lineup_ids(week, roster_id))
+    for call in on.calls:
+        assert set(call.via) <= bench
+    for warn in on.warnings:
+        if warn.kind == "bench assumption":
+            assert warn.sleeper_id in bench
+    # With more options the team can only be projected higher.
+    assert on.my_total >= off.my_total - 1.0
+
+
+def test_bench_aware_replay_fields_a_full_lineup(ctx, roster_id):
+    """The replay makes its swaps and still counts one player per slot."""
+    import json
+
+    from lockin.backtest import greedy_thresholds
+    from lockin.rollout import Bench, replay_week
+
+    week = 12
+    starters = ctx.lineup_ids(week, roster_id)
+    games = lambda pid: player_games(ctx.panel, ctx.scores, pid, week)  # noqa: E731
+    mine = {pid: games(pid) for pid in starters if games(pid)}
+    opponent_id = ctx.opponents[(week, roster_id)]
+    theirs = {pid: games(pid) for pid in ctx.lineup_ids(week, opponent_id) if games(pid)}
+    positions = {
+        row[0]: json.loads(row[1])
+        for row in ctx.conn.execute("SELECT sleeper_id, positions FROM players")
+    }
+    bench = Bench.from_lineup(
+        ctx.slot_names[(week, roster_id)],
+        starters,
+        {pid: games(pid) for pid in ctx.benches[(week, roster_id)] if games(pid)},
+        positions,
+    )
+    rng = np.random.default_rng(1)
+    cache = SimulationCache(source=ctx.source, n_sims=200, dnp_scale=ctx.dnp_scale)
+    thresholds = {
+        pid: greedy_thresholds(ctx.source, pid, theirs[pid], week, rng, 200) for pid in theirs
+    }
+    result = replay_week(mine, theirs, thresholds, week, cache, rng, bench=bench)
+    assert len(result.counted) <= len(starters)
+    assert set(result.counted) <= set(starters) | set(bench.games)
+    assert set(result.locked) <= set(result.counted)
+    # The caller's bench is not consumed by the replay.
+    assert set(bench.games) == {pid for pid in ctx.benches[(week, roster_id)] if games(pid)}
+
+
+@pytest.mark.parametrize(
+    ("env", "args", "expected"),
+    [
+        (None, [], False),
+        ("1", [], True),
+        (None, ["--bench-aware"], True),
+        ("1", ["--no-bench-aware"], False),
+    ],
+)
+def test_explain_builds_with_the_digests_bench_mode(season_db, monkeypatch, env, args, expected):
+    """`explain` used to rebuild every call without the bench, so with bench-aware
+    calls on it could say LOCK about a call the digest made as PASS."""
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    seen = []
+    real = digest_mod.build
+
+    def build(*a, **kw):
+        seen.append(kw.get("bench_aware"))
+        return real(*a, **kw)
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    if env is None:
+        monkeypatch.delenv("LOCKIN_BENCH_AWARE", raising=False)
+    else:
+        monkeypatch.setenv("LOCKIN_BENCH_AWARE", env)
+    monkeypatch.setattr(digest_mod, "build", build)
+    out = CliRunner().invoke(cli.main, ["explain", "Towns", "--date", AS_OF, "--sims", "50", *args])
+    assert out.exit_code == 0, out.output
+    assert seen == [expected]
+
+
+def test_explain_explains_the_call_the_digest_made(season_db, monkeypatch):
+    """Same verdict and break-even, player by player, with bench-aware calls on."""
+    flag = "--bench-aware"
+    import json
+
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    monkeypatch.delenv("LOCKIN_BENCH_AWARE", raising=False)
+    common = ["--date", AS_OF, "--sims", "200", flag]
+    out = CliRunner().invoke(cli.main, ["digest", *common, "--json", "--no-write"])
+    assert out.exit_code == 0, out.output
+    calls = json.loads(out.output)["calls"]
+    assert calls, "week 12 midweek should have lock calls"
+    for c in calls:
+        why = CliRunner().invoke(cli.main, ["explain", c["sleeper_id"], *common])
+        assert why.exit_code == 0, why.output
+        assert f"    {c['action']} — P(win)" in why.output, why.output
+        if c["break_even"] is not None:
+            assert f"break-even: score {c['break_even']:g} or more" in why.output
+
+
+def test_explain_describes_the_modeled_lineups_without_overclaiming(season_db, monkeypatch):
+    """Review of PR #3: explain said passing let you start a player "which
+    locking rules out", when the lock lineup was only the solver's pick."""
+    import dataclasses
+
+    from click.testing import CliRunner
+
+    from lockin import cli
+
+    real = digest_mod.build
+
+    def build(*a, **kw):
+        report = real(*a, **kw)
+        towns = next(c for c in report.calls if "Towns" in c.name)
+        report.names.update({"b1": "Bench One", "b2": "Bench Two", "s9": "Starter Nine"})
+        swapped = dataclasses.replace(
+            towns,
+            via=("b1",),
+            bench_in=("b1", "b2"),
+            bench_out=("s9",),
+            moves=(("b1", "UTIL#1"), ("b2", "G")),
+        )
+        report.calls = [swapped if c is towns else c for c in report.calls]
+        return report
+
+    monkeypatch.setenv("LOCKIN_DB", str(season_db))
+    monkeypatch.setattr(digest_mod, "build", build)
+    out = CliRunner().invoke(
+        cli.main, ["explain", "Towns", "--date", AS_OF, "--sims", "50", "--bench-aware"]
+    )
+    assert out.exit_code == 0, out.output
+    assert (
+        "The modeled PASS lineup starts Bench One, Bench Two in place of Starter Nine."
+        in out.output
+    )
+    assert "The modeled LOCK lineup leaves Bench One on the bench." in out.output
+    assert "UTIL  Bench One" in out.output and "G     Bench Two" in out.output
+    assert "rules out" not in out.output and "lets you" not in out.output

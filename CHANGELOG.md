@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+- **Bench-aware lock/pass, off by default.** A lock call's "pass" used to be
+  priced as the same player riding out his own remaining games. That misses a
+  real option: pass, then bench him and start someone who plays later. Leaving
+  it out made passing look too weak, so the digest locked mid-level nights that
+  a stronger bench player would have beaten. With `LOCKIN_BENCH_AWARE=1` (or
+  `lockin digest --bench-aware`), each branch of a call fields the best legal
+  lineup from the unlocked starters and the bench, chosen on expected value.
+  Locking pins the player to his slot. Passing keeps that slot open for a bench
+  player. A call that turns on this says "pass: start …" and, when the
+  re-solved lineup sends someone to the bench, "and bench …", then
+  "lock lineup sits …" for whom the modeled lock lineup leaves out. That player is
+  not always the one deciding, so `explain` lists the slot moves. When the
+  projection assumes a bench player starts, WATCH says "assumed to start".
+- Bench players designated Out, IR or Suspended are left out. They get the raw
+  DNP hazard, not the starter correction. A bench player who can't be
+  projected is skipped, and the call falls back to the old pricing rather than
+  abstaining.
+- `lockin backtest --bench-aware` replays a `rollout+bench` policy on the same
+  draws as rollout. It makes the swaps it priced, then reports points, zeroed
+  slots, locks and paired wins. The existing gates are unchanged.
+- **It fails that gate on 2025-26 and stays off.** Over 3 seeds it lost 12–13
+  points a week, zeroed 64–76 slots against 46–49, and flipped about 8 matchups
+  to wins and 30 to losses (z ≈ −3.5). Bench player-weeks are projected about
+  21% above what they score; starters run about 9% below. Even an in-sample 21%
+  haircut still lost. A retry needs a bench value correction fit on strictly
+  earlier weeks.
+- **Only rotation regulars are bench candidates** (`lockin/rotation.py`). That
+  backtest's bench was each week's final poll, which holds mostly players
+  pulled for a reason. Bench regulars there played 55% of their games and
+  scored 0.54× projection. A player who sits only on nights he has no game was
+  barely in it. A regular is someone this roster started on at least 60% of
+  his game nights (at least 3). That is read from the first poll after each
+  slate and before the next day's first tip. He must also have played his last
+  game. Regulars get the starter DNP correction. Everyone else on the bench is
+  left out.
+- **Bench shadow, on by default.** With bench-aware calls off, each digest also
+  builds the bench-aware digest for the same morning and records it in two new
+  tables, `bench_shadow_runs` and `bench_shadow`, keyed to the live run. Calls
+  and the notification are unchanged. `digest.log` gets a `bench shadow:` line
+  naming the regulars and any call that would flip. A failed shadow is
+  recorded and never stops the digest. `LOCKIN_BENCH_SHADOW=0` turns it off.
+- Review fixes (PR #3):
+  - A swap-in's games before the swap night are simulated for his availability,
+    rather than dropped, and are never counted.
+  - The `--bench-aware` backtest replays on an isolated cache, so it can no
+    longer change rollout's numbers or the existing gates.
+  - A bench player whose game has already tipped can be moved in only from
+    the day after. A live rerun used to price a promotion into a game already
+    under way.
+- The two new tables are created by `CREATE TABLE IF NOT EXISTS` on the next
+  run, with no migration. With bench-aware off, the digest's calls and numbers
+  are unchanged; the model id gains "; bench-aware" when it is on.
+
 ## 0.1.4 — 2026-10-29
 
 - A lock shows in the matchup poll only once the player has played again. So a

@@ -99,6 +99,8 @@ def evaluate_lock(
     player: int,
     lock_value: float,
     opponent: np.ndarray,
+    *,
+    others_if_locked: np.ndarray | None = None,
 ) -> RolloutDecision:
     """Should this player's score be banked now?
 
@@ -111,10 +113,18 @@ def evaluate_lock(
     including the random draws, so the comparison is paired and the Monte Carlo
     noise largely cancels — which matters, because the edge being measured is
     often under a percentage point.
+
+    ``others_if_locked`` is what the rest of the team counts **if he is banked**,
+    when that differs from the pass branch's rows. It does once bench players
+    are in play (`lockin.rollout.Bench`): passing keeps his slot open for a
+    bench player, locking closes it and frees that bench player for another
+    slot, so the two branches field different lineups. Omitted, both branches
+    share ``contributions`` exactly as before.
     """
     others = contributions.sum(axis=0) - contributions[player]
     p_pass = win_probability(banked + others + contributions[player], opponent)
-    p_lock = win_probability(banked + others + lock_value, opponent)
+    rest = others if others_if_locked is None else others_if_locked
+    p_lock = win_probability(banked + rest + lock_value, opponent)
     return RolloutDecision(lock=p_lock > p_pass, p_win_lock=p_lock, p_win_pass=p_pass)
 
 
@@ -129,6 +139,8 @@ def lock_threshold(
     contributions: np.ndarray,
     player: int,
     opponent: np.ndarray,
+    *,
+    others_if_locked: np.ndarray | None = None,
 ) -> float:
     """The lowest score worth banking — the standing rule.
 
@@ -151,10 +163,14 @@ def lock_threshold(
     beats passing — the matchup is already won in every simulation — there is
     no rule to give, and the answer is +inf rather than a number that invites a
     pointless lock.
+
+    ``others_if_locked`` is as in :func:`evaluate_lock`, and must be passed the
+    same way for the two to agree.
     """
     others = contributions.sum(axis=0) - contributions[player]
     p_pass = win_probability(banked + others + contributions[player], opponent)
-    deficit = np.sort(opponent - banked - others)
+    rest = others if others_if_locked is None else others_if_locked
+    deficit = np.sort(opponent - banked - rest)
     on_grid = np.ceil(deficit / SCORE_STEP - 1e-9) * SCORE_STEP
     candidates = np.unique(np.concatenate([on_grid, on_grid + SCORE_STEP]))
     below = np.searchsorted(deficit, candidates, side="left")
