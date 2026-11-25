@@ -394,3 +394,28 @@ def test_an_existing_database_gains_the_ledger_cutoff_column():
     conn.execute("CREATE TABLE digest_runs (generated_at TEXT, roster_id INTEGER, as_of TEXT)")
     apply_schema(conn)
     assert "ledger_read_at" in {r["name"] for r in conn.execute("PRAGMA table_info(digest_runs)")}
+
+
+def test_a_later_abstention_does_not_move_a_replays_cutoff(week):
+    """09:00 advised from the ledger; noon abstained. A 10:30 tap was not in the advice."""
+    persisted(week, ledger_digest(week))
+    noon = digest_mod.Digest(
+        as_of=WED.isoformat(),
+        week=2,
+        roster_id=1,
+        opponent_roster_id=None,
+        known_through=WED.toordinal() - 1,
+        note="last night is not final yet",
+        abstained=True,
+    )
+    persisted(week, noon, at="2026-10-28T16:00:00+00:00")
+    answer(week, week.a, MON, "LOCK", at="2026-10-28T14:30:00+00:00")
+    with connect(week.cfg) as conn:
+        assert ledger.replay_moment(conn, 1, WED.isoformat()) == RUN
+        assert ledger.live_source(conn, 1, WED.isoformat()) == "ledger"
+    conn = connect(week.cfg)
+    ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
+    replay = digest_mod.build(
+        ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert replay.state_source == "ledger" and replay.banked == {}

@@ -58,6 +58,12 @@
   - A replay reads the ledger as of its live run's time (or 09:00 local), not
     13:00 UTC, which is 08:00 Eastern in winter.
   - A replay follows the state source its own morning's live run saved.
+  - A digest saves the moment it read the ledger (`digest_runs.ledger_read_at`,
+    added in place). A tap made while it computed is not counted as seen by
+    its replay or by the shadow gate. A replay takes its source and its cutoff
+    from the same live run, so a later abstention cannot move the cutoff.
+  - A ledger morning whose locked game has no box score is unverified, not
+    checked. A postponed tip judges each morning by the deadline it knew.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for

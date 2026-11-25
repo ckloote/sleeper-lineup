@@ -174,36 +174,40 @@ def began(conn: sqlite3.Connection, roster_id: int) -> str | None:
     return row[0] if row else None
 
 
-def replay_moment(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str:
-    """The moment a replay of ``as_of`` reads the ledger as of: the live run's.
+def live_morning(conn: sqlite3.Connection, roster_id: int, as_of: str) -> sqlite3.Row | None:
+    """The live run a replay of ``as_of`` reproduces: the latest that reached its
+    state step that morning.
 
-    The latest live run of that morning, when one was saved, so the replay sees
-    exactly the answers it saw; otherwise when that morning's digest was due.
+    One run answers both of a replay's questions, which source it read and as of
+    when. Taking the cutoff from any later run, an abstention included, let a
+    replay of the 09:00 advice count a tap from after it.
     """
     try:
-        row = conn.execute(
-            "SELECT COALESCE(ledger_read_at, generated_at) FROM digest_runs"
-            " WHERE roster_id = ? AND as_of = ? AND COALESCE(retrospective, 0) = 0"
-            " ORDER BY generated_at DESC LIMIT 1",
+        return conn.execute(
+            "SELECT state_source, COALESCE(ledger_read_at, generated_at) AS read_at"
+            "  FROM digest_runs WHERE roster_id = ? AND as_of = ?"
+            "   AND COALESCE(retrospective, 0) = 0 AND NOT COALESCE(abstained, 0)"
+            "   AND state_source IS NOT NULL ORDER BY generated_at DESC LIMIT 1",
             (roster_id, as_of),
         ).fetchone()
     except sqlite3.OperationalError:
-        row = None
-    return row[0] if row and row[0] else clock.scheduled_run(as_of)
+        return None  # a database from before these columns
+
+
+def replay_moment(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str:
+    """The moment a replay of ``as_of`` reads the ledger as of: its live run's.
+
+    That run's ledger cutoff, so the replay sees exactly the answers it saw;
+    with no such run, when that morning's digest was due.
+    """
+    row = live_morning(conn, roster_id, as_of)
+    return row["read_at"] if row is not None and row["read_at"] else clock.scheduled_run(as_of)
 
 
 def live_source(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str | None:
     """The state source this morning's live digest saved, if one reached that step."""
-    try:
-        row = conn.execute(
-            "SELECT state_source FROM digest_runs WHERE roster_id = ? AND as_of = ?"
-            " AND COALESCE(retrospective, 0) = 0 AND NOT COALESCE(abstained, 0)"
-            " AND state_source IS NOT NULL ORDER BY generated_at DESC LIMIT 1",
-            (roster_id, as_of),
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    return row[0] if row else None
+    row = live_morning(conn, roster_id, as_of)
+    return row["state_source"] if row is not None else None
 
 
 def replays_ledger(conn: sqlite3.Connection, roster_id: int, as_of: str, *, before: str) -> bool:
