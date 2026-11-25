@@ -441,3 +441,15 @@ def test_the_page_explains_a_repeat_tapped_while_the_digest_computed(week):
     )
     assert "not recorded when this digest ran, so it counted him unlocked" in page
     assert "tap Locked if you took it" not in page
+    # Nor does the banked line ask for what is already recorded.
+    assert "counted as unlocked until recorded" not in page
+    assert "recorded since this digest ran, so counted as unlocked in it" in page
+    # Were that repeat tonight's only open LOCK, the heading would not ask for it
+    # either.
+    still_lock = replace(item, action="LOCK", expires_utc="2026-10-28T23:00:00+00:00")
+    alone = replace(run, items=tuple(i for i in run.items if not i.is_call) + (still_lock,))
+    page = advice.render(
+        alone, today=WED.isoformat(), now=datetime(2026, 10, 28, 14, tzinfo=UTC), interactive=True
+    )
+    assert "Nothing left to lock &mdash; your answers are recorded" in page
+    assert "If you took it, tap Locked" not in page and "unless you already did" not in page

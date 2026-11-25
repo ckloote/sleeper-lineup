@@ -705,13 +705,16 @@ def render(
         # inaction, and only a LOCK has a deadline. A LOCK whose deadline has
         # passed is no longer one to act on, so it does not count either.
         locks = [i for i in calls if i.action == "LOCK" and i.deadline_status(now) == "open"]
+        # One answered since the run read the ledger is not one to ask about:
+        # its row shows the answer and offers Undo.
+        pending = [i for i in locks if not (run.ledger and i.answer)]
         if run.retrospective:
             heading = "Historical replay &mdash; unavailable as live advice"
             hint = (
                 "These calls reconstruct a past morning;"
                 " their deadlines do not verify a live window."
             )
-        elif locks and all(i.said_lock_on for i in locks):
+        elif pending and all(i.said_lock_on for i in pending):
             heading = "Lock now &mdash; unless you already did"
             hint = (
                 (
@@ -724,11 +727,17 @@ def render(
                 " in the poll only once he has played again. If you took it, skip it."
                 " The rest are worth riding."
             )
-        elif locks:
+        elif pending:
             heading = "Lock now &mdash; before each player's next tip"
             hint = (
                 "Marked LOCK: bank before his next game tips, or the score is gone."
                 " The rest are worth riding."
+            )
+        elif locks:
+            heading = "Nothing left to lock &mdash; your answers are recorded"
+            hint = (
+                "Each open LOCK below has an answer recorded since this digest ran;"
+                " tap Undo if one is wrong. The rest are worth riding."
             )
         elif any(i.deadline_status(now) == "unknown deadline" for i in calls):
             heading = "Nothing to lock now &mdash; advice unavailable"
@@ -822,12 +831,19 @@ def render(
             )
         # Beside the banked total, because it is the total they are missing from.
         unseen = ""
-        if repeats := [html.escape(i.name) for i in run.calls if i.said_lock_on]:
-            if run.ledger:
-                unseen = f"<div>counted as unlocked until recorded: {', '.join(repeats)}</div>"
-            else:
-                until = "he plays" if len(repeats) == 1 else "each plays"
-                unseen = f"<div>counted as unlocked until {until} again: {', '.join(repeats)}</div>"
+        if run.ledger:
+            open_ = [html.escape(i.name) for i in run.calls if i.said_lock_on and not i.answer]
+            since = [html.escape(i.name) for i in run.calls if i.said_lock_on and i.answer]
+            if open_:
+                unseen += f"<div>counted as unlocked until recorded: {', '.join(open_)}</div>"
+            if since:
+                unseen += (
+                    "<div>recorded since this digest ran, so counted as unlocked in it:"
+                    f" {', '.join(since)}</div>"
+                )
+        elif repeats := [html.escape(i.name) for i in run.calls if i.said_lock_on]:
+            until = "he plays" if len(repeats) == 1 else "each plays"
+            unseen = f"<div>counted as unlocked until {until} again: {', '.join(repeats)}</div>"
         # Each line guarded on its own field rather than on `p_win` standing in
         # for all of them. A row carrying a win probability and nothing else is
         # not a shape `persist` produces, but this is rendered into an HTTP

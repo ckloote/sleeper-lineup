@@ -71,6 +71,8 @@
     recorded answers and box scores, apart from final-poll misses.
   - Two runs of one morning count as the same inputs only if they also banked
     the same: a lock recorded between them can rightly move another call.
+  - The heading and the banked line stop asking for a lock recorded since the
+    digest ran.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for
