@@ -363,3 +363,25 @@ def test_the_deadline_in_effect_is_the_latest_published_by_then():
     assert shadow.deadline_in_effect(published, dt(2026, 10, 30, 13, tzinfo=UTC)) == fri
     assert shadow.deadline_in_effect(published, dt(2026, 10, 28, tzinfo=UTC)) == thu
     assert shadow.deadline_in_effect([], dt(2026, 10, 28, tzinfo=UTC)) is None
+
+
+def test_a_tap_made_while_the_digest_computed_does_not_fault_it(monkeypatch):
+    """Read the ledger at 13:00, saved at 13:05, tap at 13:02 with the tip hours off."""
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+    day, _ = ledger_runs(conn, [("2026-10-29", "2026-10-30T00:00:00+00:00")])
+    conn.execute(
+        "UPDATE digest_runs SET generated_at = '2026-10-29T13:05:00+00:00',"
+        " ledger_read_at = '2026-10-29T13:00:00+00:00'"
+    )
+    runs = conn.execute("SELECT * FROM digest_runs").fetchall()
+    answers = {("p", day): ledger.Answer("p", day, "LOCK", "2026-10-29T13:02:00+00:00")}
+    monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
+    report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
+    shadow._ledger_state(conn, "2026", report, summary, runs, answers)
+    assert report.misses == []

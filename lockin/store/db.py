@@ -151,6 +151,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "stats_fetch_finished_at": "TEXT",
         "verified_no_matchup": "INTEGER",
         "retrospective": "INTEGER",
+        "ledger_read_at": "TEXT",
     },
     "ingest_runs": {"skipped": "TEXT"},
     "weekly_matchup_teams": {"poll_complete": "INTEGER"},

@@ -217,6 +217,9 @@ class Digest:
     """True when the digest declined to advise, as opposed to having nothing to
     decide. `note` says why."""
     state_source: str | None = None
+    ledger_read_at: str | None = None
+    """The cutoff the ledger was read at, when it was: a live run's start, not
+    when it was saved, so a tap made while it computed is not counted as seen."""
     """Where `banked` came from: supplied, inferred from a poll, or assumed."""
     opponent_state: str | None = None
     """Where the opponent's banked scores came from: inferred, or the stand-in."""
@@ -1052,6 +1055,7 @@ def build(
         # A replay reads the answers the live morning saw, cut at its real time.
         asked = before if live else ledger_mod.replay_moment(conn, roster_id, as_of)
         recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=asked)
+        digest.ledger_read_at = asked
         locked, digest.state_source = dict(recorded.banked), SOURCE_LEDGER
         answered = recorded.answers
         for pid, why, counted in recorded.problems:
@@ -1491,9 +1495,10 @@ def persist(
              banked_total, banked_slots, state_supplied, last_ingest_at, note,
              run_id, state_source, opponent_state, poll_observed_at, ingest_run_id,
              n_sims, seed, model, abstained, schedule_at, status_at,
-             stats_fetch_started_at, stats_fetch_finished_at, verified_no_matchup, retrospective)
+             stats_fetch_started_at, stats_fetch_finished_at, verified_no_matchup, retrospective,
+             ledger_read_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -1527,6 +1532,7 @@ def persist(
             digest.stats_fetch_finished_at,
             digest.verified_no_matchup,
             int(digest.retrospective),
+            digest.ledger_read_at,
         ),
     )
 

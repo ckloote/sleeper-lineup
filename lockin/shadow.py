@@ -614,7 +614,10 @@ def _ledger_state(
         if run["abstained"] or run["state_source"] != "ledger":
             continue
         known_through = day_index(run["as_of"]) - 1
-        ran_at = clock.utc(run["generated_at"])
+        # The moment it read the ledger, not when it was saved: a tap made while
+        # it computed was not in its advice.
+        read_at = run["ledger_read_at"] if "ledger_read_at" in run.keys() else None
+        ran_at = clock.utc(read_at or run["generated_at"])
         banked = {
             r["sleeper_id"]: r["score"]
             for r in conn.execute(

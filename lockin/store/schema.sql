@@ -545,6 +545,7 @@ CREATE TABLE IF NOT EXISTS digest_runs (
     state_source        TEXT,            -- supplied / inferred / assumed
     opponent_state      TEXT,            -- inferred / stand-in
     poll_observed_at    TEXT,            -- the poll the state was read from
+    ledger_read_at      TEXT,            -- the cutoff its lock-ledger read used (UTC)
     ingest_run_id       INTEGER,         -- the completed ingest_runs row it read
     n_sims              INTEGER,
     seed                INTEGER,

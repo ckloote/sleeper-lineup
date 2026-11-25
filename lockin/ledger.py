@@ -182,8 +182,9 @@ def replay_moment(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str:
     """
     try:
         row = conn.execute(
-            "SELECT MAX(generated_at) FROM digest_runs WHERE roster_id = ? AND as_of = ?"
-            " AND COALESCE(retrospective, 0) = 0",
+            "SELECT COALESCE(ledger_read_at, generated_at) FROM digest_runs"
+            " WHERE roster_id = ? AND as_of = ? AND COALESCE(retrospective, 0) = 0"
+            " ORDER BY generated_at DESC LIMIT 1",
             (roster_id, as_of),
         ).fetchone()
     except sqlite3.OperationalError:

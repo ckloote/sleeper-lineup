@@ -392,7 +392,7 @@ def test_a_winter_replay_keeps_a_tap_its_nine_am_live_run_saw(tmp_path, morning,
 
     monkeypatch.setenv("LOCKIN_TZ", "America/New_York")
     report, _ = morning
-    winter = replace(report, as_of="2026-11-24")
+    winter = replace(report, as_of="2026-11-24", ledger_read_at="2026-11-24T14:00:00+00:00")
     db = tmp_path / "winter.db"
     call = report.calls[0]
     with session(db) as conn:

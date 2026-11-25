@@ -353,11 +353,44 @@ def test_the_scheduled_run_is_nine_local_in_either_season(monkeypatch):
 
 def test_a_replay_reads_the_answers_its_live_run_saw(week):
     """A later run that morning saw a tap the fixed 13:00 UTC cutoff would drop."""
-    persisted(week, ledger_digest(week), at="2026-10-28T13:45:00+00:00")
     answer(week, week.a, MON, "LOCK", at="2026-10-28T13:30:00+00:00")
+    late = ledger_digest(week, now="2026-10-28T13:45:00+00:00")
+    persisted(week, late, at="2026-10-28T13:46:00+00:00")
     conn = connect(week.cfg)
     ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
     replay = digest_mod.build(
         ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
     )
     assert replay.banked == {week.a: week.score(week.a, 0)}
+
+
+def test_a_tap_made_while_the_live_digest_computed_is_not_counted_as_seen(week):
+    """The run read the ledger at 13:00 and was saved at 13:05; the tap was at 13:02."""
+    report = ledger_digest(week)
+    assert report.ledger_read_at == RUN
+    run_id = persisted(week, report, at="2026-10-28T13:05:00+00:00")
+    answer(week, week.a, MON, "LOCK", at="2026-10-28T13:02:00+00:00")
+    with connect(week.cfg) as conn:
+        saved = conn.execute(
+            "SELECT ledger_read_at FROM digest_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        assert saved == RUN
+        assert ledger.replay_moment(conn, 1, WED.isoformat()) == RUN
+    conn = connect(week.cfg)
+    ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
+    replay = digest_mod.build(
+        ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert replay.banked == {}, "the live advice never saw it"
+
+
+def test_an_existing_database_gains_the_ledger_cutoff_column():
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE digest_runs (generated_at TEXT, roster_id INTEGER, as_of TEXT)")
+    apply_schema(conn)
+    assert "ledger_read_at" in {r["name"] for r in conn.execute("PRAGMA table_info(digest_runs)")}
