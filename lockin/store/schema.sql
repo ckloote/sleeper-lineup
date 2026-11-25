@@ -611,6 +611,28 @@ CREATE TABLE IF NOT EXISTS bench_shadow (
     PRIMARY KEY (run_id, sleeper_id, action, for_day)
 );
 
+-- What the manager says he did with each call (lockin/ledger.py). Sleeper's
+-- matchup poll cannot show a lock: mid-week a locked player's counted value
+-- tracks his latest game, a value stuck on an earlier game is a bench night,
+-- and completed weeks keep changing (confirmed against the app, week 5 of
+-- 2026-27). So the manager is the only source, and banked state is read here.
+--
+-- Append-only. The newest row per (week, roster, player, game) wins, so a
+-- correction or an UNDO is another row and nothing is ever overwritten. It
+-- records the game, not a score: the score comes from that game's box score.
+CREATE TABLE IF NOT EXISTS lock_ledger (
+    entry_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    week            INTEGER NOT NULL,
+    roster_id       INTEGER NOT NULL,
+    sleeper_id      TEXT NOT NULL,
+    game_day        INTEGER NOT NULL,   -- day ordinal of the game, as recommendations.for_day
+    decision        TEXT NOT NULL CHECK (decision IN ('LOCK', 'PASS', 'UNDO')),
+    recorded_at     TEXT NOT NULL,      -- UTC
+    run_id          TEXT,               -- the digest whose call was answered
+    source          TEXT NOT NULL       -- 'page' or 'cli'
+);
+CREATE INDEX IF NOT EXISTS lock_ledger_week ON lock_ledger (roster_id, week);
+
 
 -- ------------------------------------------------------------------ bookkeeping
 

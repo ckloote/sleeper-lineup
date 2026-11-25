@@ -54,6 +54,10 @@ class Config:
     """With `bench_aware` off, also compute the bench-aware calls and record
     them in `bench_shadow`, without changing the digest's calls or its
     notification. ``LOCKIN_BENCH_SHADOW=0`` turns it off."""
+    ledger: bool = True
+    """Read banked state from the manager's answers on the advice page
+    (`lockin.ledger`), not the matchup poll, which cannot show a lock.
+    ``LOCKIN_LEDGER=0`` goes back to the poll."""
 
     @classmethod
     def from_env(cls) -> Config:
@@ -68,6 +72,7 @@ class Config:
             snapshot_root=Path(snaps).expanduser(),
             bench_aware=env_flag("LOCKIN_BENCH_AWARE"),
             bench_shadow=env_flag("LOCKIN_BENCH_SHADOW", default=True),
+            ledger=env_flag("LOCKIN_LEDGER", default=True),
         )
 
 

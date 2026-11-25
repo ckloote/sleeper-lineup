@@ -50,6 +50,8 @@ SOURCE_ASSUMED = "assumed"
 """Reconstructed from this engine's own policy — replays of past dates only."""
 SOURCE_STAND_IN = "stand-in"
 """The opponent, with no usable poll: the greedy base policy stands in."""
+SOURCE_LEDGER = "ledger"
+"""Read from the manager's own answers to each call (`lockin.ledger`)."""
 
 UNDECIDED = {LockStatus.RODE_TO_END, LockStatus.SINGLE_GAME, LockStatus.NO_LOCKABLE_GAME}
 """Readings that mean nothing is banked yet: he rode (or locked the game still
