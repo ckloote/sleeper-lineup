@@ -654,7 +654,7 @@ def _ledger_state(
                 )
             elif ans is not None:
                 recorded = clock.utc(ans.recorded_at)
-                tip = deadlines.get((pid, ans.game_day))
+                tip = deadline_in_effect(deadlines.get((pid, ans.game_day), []), ran_at)
                 made_by = min(recorded, tip) if tip is not None else recorded
                 if made_by > ran_at:
                     continue  # the decision may still have been open
@@ -701,21 +701,40 @@ def _game_scores(
     return out
 
 
-def _deadlines(conn: sqlite3.Connection, run_ids: list[str]) -> dict[tuple[str, int], datetime]:
-    """(player, game day) -> the next tip the digest printed as that call's deadline."""
+def _deadlines(
+    conn: sqlite3.Connection, run_ids: list[str]
+) -> dict[tuple[str, int], list[tuple[datetime, datetime]]]:
+    """(player, game day) -> each deadline a call printed, with when, oldest first.
+
+    Kept per run rather than reduced to one: a postponed tip moves the deadline,
+    and each morning is judged by the one in effect then.
+    """
     if not run_ids:
         return {}
     marks = ",".join("?" * len(run_ids))
-    out: dict[tuple[str, int], datetime] = {}
-    for pid, day, expires in conn.execute(
-        f"SELECT sleeper_id, for_day, MIN(expires_utc) FROM recommendations"
-        f" WHERE run_id IN ({marks}) AND action IN ('LOCK', 'PASS')"
-        f" AND expires_utc IS NOT NULL GROUP BY sleeper_id, for_day",
+    out: dict[tuple[str, int], list[tuple[datetime, datetime]]] = defaultdict(list)
+    for pid, day, published, expires in conn.execute(
+        f"SELECT c.sleeper_id, c.for_day, r.generated_at, c.expires_utc"
+        f"  FROM recommendations c JOIN digest_runs r ON r.run_id = c.run_id"
+        f" WHERE c.run_id IN ({marks}) AND c.action IN ('LOCK', 'PASS')"
+        f"   AND c.expires_utc IS NOT NULL ORDER BY r.generated_at",
         run_ids,
     ):
         if clock.aware_utc(expires) is not None:
-            out[(pid, day)] = clock.utc(expires)
+            out[(pid, day)].append((clock.utc(published), clock.utc(expires)))
     return out
+
+
+def deadline_in_effect(published: list[tuple[datetime, datetime]], at: datetime) -> datetime | None:
+    """The deadline a morning knew: the latest published by then, else the first after.
+
+    A tip moved from Thursday to Friday evening is Friday's deadline for Friday's
+    digest, which published it, and Thursday's for Thursday's.
+    """
+    known = [tip for when, tip in published if when <= at]
+    if known:
+        return known[-1]
+    return published[0][1] if published else None
 
 
 def _state(

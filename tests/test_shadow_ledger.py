@@ -308,3 +308,58 @@ def test_a_banked_lock_with_no_final_box_score_is_unverified(played, monkeypatch
     mine = [u for u in report.unverified if u.sleeper_id == pid]
     assert mine and all(u.detail.startswith("no box score for the locked game") for u in mine)
     assert week.state_unverified >= len(mine) and not week.clean
+
+
+def ledger_runs(conn, mornings):
+    """Ledger runs at 13:00 UTC, each calling player p's Monday game with a deadline."""
+    monday = date(2026, 10, 26)
+    for i, (as_of, expires) in enumerate(mornings):
+        conn.execute(
+            "INSERT INTO digest_runs (run_id, generated_at, roster_id, as_of, week, state_source,"
+            " abstained, state_supplied) VALUES (?, ?, 1, ?, ?, 'ledger', 0, 0)",
+            (f"r{i}", f"{as_of}T13:00:00+00:00", as_of, WEEK),
+        )
+        conn.execute(
+            "INSERT INTO recommendations (generated_at, week, roster_id, sleeper_id, action,"
+            " for_day, run_id, expires_utc) VALUES (?, ?, 1, 'p', 'LOCK', ?, ?, ?)",
+            (f"{as_of}T13:00:00+00:00", WEEK, monday.toordinal(), f"r{i}", expires),
+        )
+    return monday.toordinal(), conn.execute(
+        "SELECT * FROM digest_runs ORDER BY generated_at"
+    ).fetchall()
+
+
+def test_a_postponed_tip_judges_each_morning_by_the_deadline_it_knew(monkeypatch):
+    """Thursday's tip moved to Friday evening, and Friday's digest printed it. A lock
+    made Friday afternoon was still open when Friday's digest ran."""
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+    day, runs = ledger_runs(
+        conn,
+        [
+            ("2026-10-29", "2026-10-30T00:00:00+00:00"),  # Thursday night's tip
+            ("2026-10-30", "2026-10-31T00:00:00+00:00"),  # postponed to Friday night
+        ],
+    )
+    answers = {("p", day): ledger.Answer("p", day, "LOCK", "2026-10-30T20:00:00+00:00")}
+    monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
+    report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
+    shadow._ledger_state(conn, "2026", report, summary, runs, answers)
+    assert report.misses == []
+
+
+def test_the_deadline_in_effect_is_the_latest_published_by_then():
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    thu, fri = dt(2026, 10, 30, tzinfo=UTC), dt(2026, 10, 31, tzinfo=UTC)
+    published = [(dt(2026, 10, 29, 13, tzinfo=UTC), thu), (dt(2026, 10, 30, 13, tzinfo=UTC), fri)]
+    assert shadow.deadline_in_effect(published, dt(2026, 10, 29, 14, tzinfo=UTC)) == thu
+    assert shadow.deadline_in_effect(published, dt(2026, 10, 30, 13, tzinfo=UTC)) == fri
+    assert shadow.deadline_in_effect(published, dt(2026, 10, 28, tzinfo=UTC)) == thu
+    assert shadow.deadline_in_effect([], dt(2026, 10, 28, tzinfo=UTC)) is None
