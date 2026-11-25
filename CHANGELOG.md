@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-24
+
 - **Bench-aware lock/pass, off by default.** A lock call's "pass" used to be
   priced as the same player riding out his own remaining games. That misses a
   real option: pass, then bench him and start someone who plays later. Leaving
@@ -51,9 +53,22 @@
   - A bench player whose game has already tipped can be moved in only from
     the day after. A live rerun used to price a promotion into a game already
     under way.
+  - A live digest and its shadow are priced at one instant, and a game with
+    an unknown tip time blocks a promotion only when it is today's, on a live
+    run.
+  - The `--bench-aware` backtest reports every week rollout played, including
+    weeks with no bench candidates.
+  - The pass lineup is recorded whenever the bench is in play (new
+    `bench_shadow.bench_in` and `bench_out` columns), naming every arrival and
+    departure. Only players the lock lineup leaves out (`via`) are credited to
+    passing, and messages describe the two modeled lineups rather than what
+    locking rules out.
+  - `lockin explain` takes `--bench-aware/--no-bench-aware`, defaulting to the
+    configured mode, and lists the pass lineup's slot moves.
 - The two new tables are created by `CREATE TABLE IF NOT EXISTS` on the next
-  run, with no migration. With bench-aware off, the digest's calls and numbers
-  are unchanged; the model id gains "; bench-aware" when it is on.
+  run, and the two added columns by the existing column upgrade, with no data
+  migration. With bench-aware off, the digest's calls and numbers are
+  unchanged; the model id gains "; bench-aware" when it is on.
 
 ## 0.1.4 — 2026-10-29
 
