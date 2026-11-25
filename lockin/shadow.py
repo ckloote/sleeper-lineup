@@ -541,6 +541,15 @@ def _calls(
         f" WHERE run_id IN ({marks}) AND action IN ('LOCK', 'PASS') ORDER BY generated_at",
         list(run_of),
     ).fetchall()
+    # What each run banked: on a ledger morning a lock recorded between two runs
+    # changes it with the date, ingest and poll unchanged, and may rightly move
+    # another player's call.
+    banked_by: dict[str, dict[str, float]] = defaultdict(dict)
+    for run_id, pid, score in conn.execute(
+        f"SELECT run_id, sleeper_id, score FROM digest_banked WHERE run_id IN ({marks})",
+        list(run_of),
+    ):
+        banked_by[run_id][pid] = round(score, 2)
     history: dict[tuple[int, str, int], list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
         history[(run_of[row["run_id"]]["roster_id"], row["sleeper_id"], row["for_day"])].append(row)
@@ -563,11 +572,12 @@ def _calls(
             if a["action"] == b["action"]:
                 continue
             ra, rb = run_of[a["run_id"]], run_of[b["run_id"]]
-            same = (ra["as_of"], ra["ingest_run_id"], ra["poll_observed_at"]) == (
+            same_data = (ra["as_of"], ra["ingest_run_id"], ra["poll_observed_at"]) == (
                 rb["as_of"],
                 rb["ingest_run_id"],
                 rb["poll_observed_at"],
             )
+            same = same_data and banked_by[ra["run_id"]] == banked_by[rb["run_id"]]
             summary.flips += 1
             summary.same_input_flips += int(same)
             report.flips.append(
@@ -581,6 +591,8 @@ def _calls(
                     same,
                     "same ingest and poll: a bug"
                     if same
+                    else "a lock recorded in between"
+                    if same_data
                     else "new data in between"
                     if ra["as_of"] == rb["as_of"]
                     else "a night of games in between",
