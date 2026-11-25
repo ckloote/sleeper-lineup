@@ -219,12 +219,18 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
             pass  # a database too old to have the columns has no earlier calls to name
     # Answers as they stand now, for the buttons; as of the run, for which of its
     # repeats the notification called unanswered.
+    # A replay is made afterwards, so it reads the ledger as of the morning it
+    # replays: answers recorded since are not what that morning knew.
+    replayed = clock.run_moment(row["as_of"], None) if get("retrospective") else None
     answers = (
-        ledger_mod.answers(conn, row["week"], roster_id) if get("state_source") == "ledger" else {}
+        ledger_mod.answers(conn, row["week"], roster_id, before=replayed)
+        if get("state_source") == "ledger"
+        else {}
     )
     if get("state_source") == "ledger" and said_lock:
+        known = replayed or row["generated_at"]
         said_lock = ledger_mod.unanswered(
-            said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=row["generated_at"])
+            said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=known)
         )
     items = [
         Item(
@@ -635,6 +641,9 @@ def render(
 
     tone, sentence = _freshness(run, today)
     now = now or datetime.now(UTC)
+    # A replay was never advice: nothing on its page may be answered or undone,
+    # and an Undo would carry the original live run's id, which the route takes.
+    interactive = interactive and not run.retrospective
     parts: list[str] = []
 
     # Said of the run, above everything it qualifies — the win probability too.

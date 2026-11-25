@@ -513,14 +513,9 @@ def durability_warnings(
     return sorted(out, key=lambda w: w.name)
 
 
-DIGEST_RUN_UTC = "13:00:00+00:00"
-"""When the morning digest runs — 09:00 US Eastern in daylight time — for a
-replay that has no clock of its own. It bounds which polls a replay may read."""
-
-
-def run_moment(as_of: str, now: datetime | None) -> str:
-    """The instant the digest is taken to run: now, or that morning for a replay."""
-    return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"
+# Defined in `lockin.clock`, so the page can ask the same question without the model.
+DIGEST_RUN_UTC = clock.DIGEST_RUN_UTC
+run_moment = clock.run_moment
 
 
 def unfinished_slate(

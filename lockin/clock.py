@@ -97,3 +97,13 @@ def too_early_for(as_of: str, moment: datetime | None = None) -> bool:
     moment = moment or datetime.now(UTC)
     cutoff = datetime.combine(date.fromisoformat(as_of), time(SLATE_COMPLETE_UTC_HOUR), tzinfo=UTC)
     return moment.astimezone(UTC) < cutoff
+
+
+DIGEST_RUN_UTC = "13:00:00+00:00"
+"""When the morning digest runs — 09:00 US Eastern in daylight time — for a
+replay that has no clock of its own. It bounds which polls a replay may read."""
+
+
+def run_moment(as_of: str, now: datetime | None) -> str:
+    """The instant the digest is taken to run: now, or that morning for a replay."""
+    return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"

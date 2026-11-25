@@ -301,3 +301,39 @@ def test_a_server_that_does_not_know_its_season_takes_no_answers(tmp_path, morni
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
+
+
+def test_a_replay_shows_its_mornings_answers_and_takes_none(tmp_path, morning):
+    """Undo on a replay would post the live run's id, which the route accepts."""
+    from lockin import ledger
+
+    report, now = morning
+    db = tmp_path / "replayed.db"
+    call = report.calls[0]
+    with session(db) as conn:
+        opening(conn)
+        digest_mod.persist(conn, report, now=now)
+        live_id = conn.execute("SELECT run_id FROM digest_runs").fetchone()[0]
+        for decision, at in (("LOCK", "02:00"), ("UNDO", "20:00")):
+            ledger.record(
+                conn,
+                week=report.week,
+                roster_id=report.roster_id,
+                sleeper_id=call.sleeper_id,
+                game_day=call.day,
+                decision=decision,
+                source="page",
+                run_id=live_id,
+                recorded_at=f"{report.as_of}T{at}:00+00:00",
+            )
+        digest_mod.persist(conn, replace(report, retrospective=True), now=now + timedelta(days=1))
+    conn = connect_readonly(db)
+    try:
+        run = advice.latest_run(conn, report.roster_id)
+    finally:
+        conn.close()
+    assert run.retrospective
+    # As that morning knew it: the lock, not the undo recorded that evening.
+    assert [(i.sleeper_id, i.answer) for i in run.recorded] == [(call.sleeper_id, "LOCK")]
+    text = advice.render(run, interactive=True)
+    assert 'action="/ledger"' not in text and "Undo</button>" not in text
