@@ -1057,14 +1057,18 @@ def build(
         recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=before)
         locked, digest.state_source = dict(recorded.banked), SOURCE_LEDGER
         answered = recorded.answers
-        for pid, why in recorded.problems:
+        for pid, why, counted in recorded.problems:
             digest.warnings.append(
                 Warning(
                     sleeper_id=pid,
                     name=names.get(pid, pid),
                     kind="lock record",
-                    detail=f"{why}; it is not counted as banked. Undo it on the advice page.",
-                    short="lock record unusable",
+                    detail=(
+                        f"{why}, as banked. Undo the wrong one on the advice page."
+                        if counted
+                        else f"{why}; not counted as banked. Undo it on the advice page."
+                    ),
+                    short="two locks recorded" if counted else "lock record unusable",
                 )
             )
     else:

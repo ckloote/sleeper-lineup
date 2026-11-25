@@ -121,7 +121,22 @@ def test_a_lock_the_digest_cannot_use_is_reported_not_banked(conn):
     put(conn, "kat", 11, "LOCK", "2026-11-17T03:00:00+00:00")
     got = ledger.state(conn, 5, 4, games, known_through=12, before=None)
     assert got.banked == {}
-    assert sorted(pid for pid, _ in got.problems) == ["kat", "stranger"]
+    assert sorted(pid for pid, _, _ in got.problems) == ["kat", "stranger"]
+    assert not any(counted for _, _, counted in got.problems)
+
+
+def test_two_locks_bank_the_later_game_and_say_so(conn):
+    from lockin.projections import day_index
+
+    first, second = day_index("2026-11-17"), day_index("2026-11-19")
+    games = {"kat": [Game(0, first, True, 57.5), Game(1, second, True, 50.5)]}
+    put(conn, "kat", first, "LOCK", "2026-11-17T03:00:00+00:00")
+    put(conn, "kat", second, "LOCK", "2026-11-19T03:00:00+00:00")
+    got = ledger.state(conn, 5, 4, games, known_through=second, before=None)
+    assert got.banked == {"kat": 50.5}
+    [(pid, detail, counted)] = got.problems
+    assert pid == "kat" and counted
+    assert detail == "recorded as locked on 2026-11-17 and 2026-11-19; counting 2026-11-19 (50.5)"
 
 
 def test_a_dnp_lock_banks_zero(conn):
@@ -264,3 +279,14 @@ def test_the_page_says_an_unanswered_repeat_is_unrecorded_not_unseen(week):
     assert "counted as unlocked until recorded" in page
     assert "shows in the poll" not in page and "ignore if you locked" not in page
     assert "your answers on this page" in page
+
+
+def test_the_digest_says_which_of_two_locks_it_counted(week):
+    answer(week, week.e, MON, "LOCK")
+    answer(week, week.e, TUE, "LOCK", at="2026-10-28T02:30:00+00:00")
+    report = ledger_digest(week)
+    assert report.banked == {week.e: 0.0}  # Tuesday was a DNP
+    [warn] = [w for w in report.warnings if w.kind == "lock record"]
+    assert f"counting {TUE.isoformat()} (0)" in warn.detail
+    assert "as banked. Undo the wrong one" in warn.detail
+    assert "not counted" not in warn.detail

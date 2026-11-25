@@ -34,6 +34,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from lockin.core.policy import Game
+from lockin.projections import date_of
 from lockin.store.db import now_iso
 
 LOCK, PASS, UNDO = "LOCK", "PASS", "UNDO"
@@ -61,8 +62,9 @@ class LedgerState:
     """Score of each locked game on or before the morning, from its box score."""
     answers: dict[tuple[str, int], Answer] = field(default_factory=dict)
     """Every standing answer, keyed (sleeper_id, game_day)."""
-    problems: list[tuple[str, str]] = field(default_factory=list)
-    """(sleeper_id, why) for a recorded lock the digest could not use."""
+    problems: list[tuple[str, str, bool]] = field(default_factory=list)
+    """(sleeper_id, what is wrong, whether a lock of his was still counted) for
+    each recorded lock the digest could not take at face value."""
 
 
 def has_table(conn: sqlite3.Connection) -> bool:
@@ -167,7 +169,8 @@ def state(
     that game's, from ``lineup``. A lock on a player who is not in ``lineup``, or
     on a game he does not have, is reported in ``problems`` and not banked. Two
     locks for one player in one week cannot happen in Sleeper; the later game
-    counts and the clash is reported.
+    counts, and the report names both games and the one counted, so the manager
+    can undo the wrong one.
     """
     out = LedgerState(answers=answers(conn, week, roster_id, before=before))
     locks: dict[str, list[int]] = {}
@@ -177,17 +180,23 @@ def state(
     for sid, days in sorted(locks.items()):
         games = {g.day: g for g in lineup.get(sid, [])}
         if not games:
-            out.problems.append((sid, "recorded as locked, but not in this week's lineup"))
+            out.problems.append((sid, "recorded as locked, but not in this week's lineup", False))
             continue
-        if len(days) > 1:
-            shown = ", ".join(str(d) for d in sorted(days))
-            out.problems.append((sid, f"recorded as locked on more than one game ({shown})"))
         day = max(days)
         game = games.get(day)
         if game is None:
-            out.problems.append((sid, "recorded as locked on a game he does not have"))
+            out.problems.append((sid, "recorded as locked on a game he does not have", False))
             continue
-        out.banked[sid] = game.score if game.played else 0.0
+        out.banked[sid] = score = game.score if game.played else 0.0
+        if len(days) > 1:
+            shown = " and ".join(date_of(d) for d in sorted(days))
+            out.problems.append(
+                (
+                    sid,
+                    f"recorded as locked on {shown}; counting {date_of(day)} ({score:g})",
+                    True,
+                )
+            )
     return out
 
 
