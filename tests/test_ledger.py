@@ -245,3 +245,22 @@ def test_a_replay_or_a_finished_week_cannot_be_answered(week):
     persisted(week, replace(report, week=3, calls=[], rules=[]), at="2026-11-02T13:00:00+00:00")
     with connect(week.cfg) as conn, pytest.raises(ledger.NotACall):
         ledger.open_call(conn, 1, live_id, call.sleeper_id, call.day)
+
+
+def test_the_page_says_an_unanswered_repeat_is_unrecorded_not_unseen(week):
+    from datetime import UTC
+
+    from lockin import advice
+
+    said_on(week)
+    report = ledger_digest(week)
+    persisted(week, report)
+    with connect(week.cfg) as conn:
+        run = advice.latest_run(conn, 1)
+    page = advice.render(
+        run, today=WED.isoformat(), now=datetime(2026, 10, 28, 14, tzinfo=UTC), interactive=True
+    )
+    assert "not recorded; tap Locked if you took it" in page
+    assert "counted as unlocked until recorded" in page
+    assert "shows in the poll" not in page and "ignore if you locked" not in page
+    assert "your answers on this page" in page

@@ -65,7 +65,7 @@ class LedgerState:
     """(sleeper_id, why) for a recorded lock the digest could not use."""
 
 
-def _has_table(conn: sqlite3.Connection) -> bool:
+def has_table(conn: sqlite3.Connection) -> bool:
     return (
         conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'lock_ledger'").fetchone()
         is not None
@@ -115,7 +115,7 @@ def answers(
     The newest row wins. An UNDO leaves no answer. Rows recorded at or after
     ``before`` are not read; None reads everything.
     """
-    if not _has_table(conn):
+    if not has_table(conn):
         return {}
     sql = (
         "SELECT sleeper_id, game_day, decision, recorded_at, run_id FROM lock_ledger"
@@ -142,7 +142,7 @@ def in_use(conn: sqlite3.Connection, roster_id: int, *, before: str | None = Non
     A replay of a morning before the ledger began has nothing to read, and
     reading nothing as "nothing locked" would be a claim, not a reading.
     """
-    if not _has_table(conn):
+    if not has_table(conn):
         return False
     sql = "SELECT 1 FROM lock_ledger WHERE roster_id = ?"
     args: list = [roster_id]
