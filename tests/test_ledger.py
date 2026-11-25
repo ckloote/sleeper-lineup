@@ -341,3 +341,23 @@ def test_a_replay_follows_the_source_its_own_morning_saved(week):
         ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
     )
     assert replay.state_source == "inferred"
+
+
+def test_the_scheduled_run_is_nine_local_in_either_season(monkeypatch):
+    from lockin import clock
+
+    monkeypatch.setenv("LOCKIN_TZ", "America/New_York")
+    assert clock.scheduled_run("2026-10-28") == "2026-10-28T13:00:00+00:00"  # EDT
+    assert clock.scheduled_run("2026-11-24") == "2026-11-24T14:00:00+00:00"  # EST
+
+
+def test_a_replay_reads_the_answers_its_live_run_saw(week):
+    """A later run that morning saw a tap the fixed 13:00 UTC cutoff would drop."""
+    persisted(week, ledger_digest(week), at="2026-10-28T13:45:00+00:00")
+    answer(week, week.a, MON, "LOCK", at="2026-10-28T13:30:00+00:00")
+    conn = connect(week.cfg)
+    ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
+    replay = digest_mod.build(
+        ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert replay.banked == {week.a: week.score(week.a, 0)}

@@ -34,7 +34,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import date
 
-from lockin import calendar
+from lockin import calendar, clock
 from lockin.core.policy import Game
 from lockin.projections import date_of
 from lockin.store.db import now_iso
@@ -172,6 +172,23 @@ def began(conn: sqlite3.Connection, roster_id: int) -> str | None:
     except sqlite3.OperationalError:
         return None  # a database from before runs had a state source
     return row[0] if row else None
+
+
+def replay_moment(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str:
+    """The moment a replay of ``as_of`` reads the ledger as of: the live run's.
+
+    The latest live run of that morning, when one was saved, so the replay sees
+    exactly the answers it saw; otherwise when that morning's digest was due.
+    """
+    try:
+        row = conn.execute(
+            "SELECT MAX(generated_at) FROM digest_runs WHERE roster_id = ? AND as_of = ?"
+            " AND COALESCE(retrospective, 0) = 0",
+            (roster_id, as_of),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    return row[0] if row and row[0] else clock.scheduled_run(as_of)
 
 
 def live_source(conn: sqlite3.Connection, roster_id: int, as_of: str) -> str | None:

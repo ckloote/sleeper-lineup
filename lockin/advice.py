@@ -221,7 +221,9 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
     # repeats the notification called unanswered.
     # A replay is made afterwards, so it reads the ledger as of the morning it
     # replays: answers recorded since are not what that morning knew.
-    replayed = clock.run_moment(row["as_of"], None) if get("retrospective") else None
+    replayed = (
+        ledger_mod.replay_moment(conn, roster_id, row["as_of"]) if get("retrospective") else None
+    )
     # An abstention returns before the state step, so it has no state source; the
     # ledger still applies once any live run has read it.
     ledger_on = get("state_source") == "ledger" or (

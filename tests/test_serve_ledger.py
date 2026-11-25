@@ -382,3 +382,40 @@ def test_an_abstained_morning_still_shows_the_weeks_answers(tmp_path, morning):
     text = advice.render(run, interactive=True)
     assert "Not answered from earlier this week" in text or not open_
     assert "Undo</button>" in text and f'value="{live_id}"' in text
+
+
+def test_a_winter_replay_keeps_a_tap_its_nine_am_live_run_saw(tmp_path, morning, monkeypatch):
+    """08:30 EST is 13:30 UTC: after the fixed 13:00 cutoff, before the 14:00 run."""
+    from datetime import datetime
+
+    from lockin import ledger
+
+    monkeypatch.setenv("LOCKIN_TZ", "America/New_York")
+    report, _ = morning
+    winter = replace(report, as_of="2026-11-24")
+    db = tmp_path / "winter.db"
+    call = report.calls[0]
+    with session(db) as conn:
+        digest_mod.persist(conn, winter, now=datetime.fromisoformat("2026-11-24T14:00:00+00:00"))
+        ledger.record(
+            conn,
+            week=report.week,
+            roster_id=report.roster_id,
+            sleeper_id=call.sleeper_id,
+            game_day=call.day,
+            decision="LOCK",
+            source="page",
+            recorded_at="2026-11-24T13:30:00+00:00",
+        )
+        digest_mod.persist(
+            conn,
+            replace(winter, retrospective=True),
+            now=datetime.fromisoformat("2026-11-25T02:00:00+00:00"),
+        )
+    conn = connect_readonly(db)
+    try:
+        run = advice.latest_run(conn, report.roster_id)
+    finally:
+        conn.close()
+    assert run.retrospective
+    assert [i.sleeper_id for i in run.recorded] == [call.sleeper_id]

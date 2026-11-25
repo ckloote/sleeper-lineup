@@ -1049,7 +1049,9 @@ def build(
             )
         digest.state_source = SOURCE_SUPPLIED
     elif ledger and (live or ledger_mod.replays_ledger(conn, roster_id, as_of, before=before)):
-        recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=before)
+        # A replay reads the answers the live morning saw, cut at its real time.
+        asked = before if live else ledger_mod.replay_moment(conn, roster_id, as_of)
+        recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=asked)
         locked, digest.state_source = dict(recorded.banked), SOURCE_LEDGER
         answered = recorded.answers
         for pid, why, counted in recorded.problems:

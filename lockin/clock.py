@@ -107,3 +107,19 @@ replay that has no clock of its own. It bounds which polls a replay may read."""
 def run_moment(as_of: str, now: datetime | None) -> str:
     """The instant the digest is taken to run: now, or that morning for a replay."""
     return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"
+
+
+DIGEST_LOCAL_HOUR = 9
+"""The cron's hour for the digest, in the schedule's timezone (`crontab -l`)."""
+
+
+def scheduled_run(as_of: str) -> str:
+    """When that morning's digest was due, as UTC: 09:00 local, whatever the season.
+
+    `run_moment`'s fixed 13:00 UTC is 09:00 only in daylight time; in winter it
+    is 08:00 Eastern, an hour before the cron. The ledger's replay cutoff needs
+    the real hour, or a tap at 08:30 is in the live run and missing from its
+    replay.
+    """
+    local = datetime.combine(date.fromisoformat(as_of), time(DIGEST_LOCAL_HOUR), tzinfo=zone())
+    return local.astimezone(UTC).isoformat()
