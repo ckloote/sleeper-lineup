@@ -16,6 +16,7 @@ history, kept for the reasoning.
 | The 2026-09-25 follow-up review's five P2 findings, and what reviewing their fix found | Merged as `75e9ff5`..`4f24c4e`; deployed 2026-09-26 | §21, "Deployed 2026-09-26"; `code-review-2026-09-25.md` |
 | Start/sit advice | Held until it has its own gate, week 10 at the earliest | §19 |
 | 2026-27 season | Opens 2026-10-20 | `day-one.md` |
+| Banked state from the poll (§10 reading) | **Disproved 2026-11-24** against the app; replaced by the lock ledger, answered on the advice page | `lockin/ledger.py`; CHANGELOG |
 
 This plan takes the architecture doc as the spec. Everything below either confirms it
 against the live API, or proposes a change with the evidence for that change. Section 8

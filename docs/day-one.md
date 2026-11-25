@@ -370,6 +370,16 @@ accumulate in the new season.
 an earlier lock shows once he has played again — is the architecture doc's §10 reading, and
 it has never been observed live.
 
+> **Superseded 2026-11-24: the §10 reading is false, and the ledger replaces it.** Checked
+> against the app for week 5 of 2026-27: mid-week a locked player's counted value tracks
+> his latest game, a value stuck on an earlier game is a bench night, and finished weeks
+> keep changing (CHANGELOG, Unreleased). Banked state now comes from the **lock ledger**:
+> tap Locked or Passed beside each call on the served page (`lockin-serve`), and the digest
+> banks exactly that. The by-eye check below becomes: answer every LOCK call. `lockin
+> shadow` judges a ledger week by those answers. A LOCK call with no answer is
+> `unanswered` and blocks the week, a PASS call needs none, and there is no poll reading
+> to check. The rest of this step describes the poll-reading weeks before the ledger.
+
 Until the gate passes, check it by eye each morning, because the report can only judge a
 week once Sleeper has scored it. Compare the `BANKED` list with the locks you actually made.
 They should agree on every player whose next game has been played since he was locked. A lock

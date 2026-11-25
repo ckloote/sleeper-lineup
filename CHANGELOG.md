@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- **Banked state comes from a lock ledger you fill in on the advice page.**
+  Sleeper's matchup poll cannot show a lock. Checked against the app for week 5
+  of 2026-27:
+  - Mid-week, a locked player's counted value tracks his latest game. Allen was
+    locked at 43 on 11-16, and the poll read 33 and then 18.5.
+  - A value stuck on an earlier game is a bench night, not a lock (Towns,
+    Coward).
+  - Finished weeks keep changing. Two days after week 5 the poll had Holiday at
+    30, while the app's total implies 40.
+
+  So the banked state the digest read from the poll, and every threshold and
+  P(win) built on it, was wrong whenever a lock was involved. The shadow gate
+  could not pass either, since its truth was the same poll.
+- **Locked / Passed buttons on each call** of the served page, with Undo and a
+  "Recorded this week" list. Calls from earlier this week that are no longer
+  shown and have no answer are listed with their own buttons. With
+  `LOCKIN_LEDGER` on (the default), the digest banks exactly what you recorded,
+  at the game's box score, and never reads the poll for your roster.
+  - An earlier LOCK call with no answer counts as not locked, as before, and
+    says "not recorded; tap Locked if you did".
+  - The digest no longer abstains with "lock state unclear" for your roster.
+  - `--locked` still overrides. `LOCKIN_LEDGER=0` restores the poll.
+- **`lockin-serve` gains one write route,** `POST /ledger`, its first. It
+  appends one row to the new `lock_ledger` table and nothing else. It refuses:
+  - a post from another site, judged by Origin, Referer or `Sec-Fetch-Site`;
+  - a body over 1KB, or anything but the four form fields;
+  - anything the database does not confirm is a call of your live digest this
+    week.
+
+  It never creates the table; the next digest does. The network is still the
+  only authentication, so anyone on your LAN or tailnet can record an answer.
+- **`lockin shadow` judges a ledger week by your answers.**
+  - A LOCK call with nothing recorded is `unanswered` and blocks the week.
+  - A PASS call needs no answer.
+  - Weeks before the ledger are reported as before, with a note that the final
+    poll they are checked against may itself be wrong.
+- **The opponent's banked state is still read from the poll.** The stand-in
+  (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
+  no call, but cut P(win) sharply on mornings the poll reading did not, for
+  example 50% to 20% on 11-14 of a week won 312 to 269.5. P(win) already runs
+  low, so the stand-in was dropped. The opponent's reading is known to be
+  unreliable and has no better source.
+- `lock_ledger` is created by `CREATE TABLE IF NOT EXISTS` on the next run, with
+  no migration. The served page needs a `lockin-serve` restart for the buttons
+  and the write route.
+
 ## 0.2.0 — 2026-11-24
 
 - **Bench-aware lock/pass, off by default.** A lock call's "pass" used to be
