@@ -290,3 +290,18 @@ def test_the_digest_says_which_of_two_locks_it_counted(week):
     assert f"counting {TUE.isoformat()} (0)" in warn.detail
     assert "as banked. Undo the wrong one" in warn.detail
     assert "not counted" not in warn.detail
+
+
+def test_a_replay_reads_the_ledger_from_the_first_morning_a_live_run_did(week):
+    """The live run advised on an empty ledger; its replay must not read the poll."""
+    persisted(week, ledger_digest(week))
+    conn = connect(week.cfg)
+    ctx = digest_mod.load_context(conn, "2026", params=ProjectionParams(min_pool_rows=20))
+    report = digest_mod.build(
+        ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert report.state_source == "ledger" and report.banked == {}
+    earlier = digest_mod.build(
+        ctx, 1, TUE.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
+    )
+    assert earlier.state_source != "ledger"

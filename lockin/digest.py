@@ -880,8 +880,9 @@ def build(
 
     ``ledger`` reads banked state from the manager's answers (`lockin.ledger`)
     instead of the poll, which cannot show a lock. It applies to a live run, and
-    to a replay of a morning by which this roster had answered a call: before
-    that there is nothing to read, and the old path stands. ``locked`` still
+    to a replay of a morning on or after the first live run that read the ledger
+    (or by which this roster had answered a call): before that there is nothing
+    to read, and the old path stands. ``locked`` still
     overrides it. An earlier LOCK call with no answer is taken as not locked and
     is marked, as the poll path marks every repeat.
     """
@@ -1053,7 +1054,11 @@ def build(
                 f" for roster {roster_id}: {named}"
             )
         digest.state_source = SOURCE_SUPPLIED
-    elif ledger and (live or ledger_mod.in_use(conn, roster_id, before=before)):
+    elif ledger and (
+        live
+        or ((began := ledger_mod.began(conn, roster_id)) is not None and began <= as_of)
+        or ledger_mod.in_use(conn, roster_id, before=before)
+    ):
         recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=before)
         locked, digest.state_source = dict(recorded.banked), SOURCE_LEDGER
         answered = recorded.answers

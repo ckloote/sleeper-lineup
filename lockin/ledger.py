@@ -154,6 +154,24 @@ def in_use(conn: sqlite3.Connection, roster_id: int, *, before: str | None = Non
     return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
 
 
+def began(conn: sqlite3.Connection, roster_id: int) -> str | None:
+    """The first morning a live digest of this roster read banked state from the ledger.
+
+    A replay of that morning or a later one must read the ledger too, even
+    before anything was recorded: the live run advised on an empty ledger, and
+    falling back to the poll would replay a different state.
+    """
+    try:
+        row = conn.execute(
+            "SELECT MIN(as_of) FROM digest_runs WHERE roster_id = ? AND state_source = 'ledger'"
+            " AND COALESCE(retrospective, 0) = 0",
+            (roster_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # a database from before runs had a state source
+    return row[0] if row else None
+
+
 def state(
     conn: sqlite3.Connection,
     week: int,
