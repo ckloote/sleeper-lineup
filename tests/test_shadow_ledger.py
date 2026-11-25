@@ -383,3 +383,24 @@ def test_a_tap_made_while_the_digest_computed_does_not_fault_it(monkeypatch):
     shadow._ledger_state(conn, "2026", report, summary, runs, answers)
     assert report.misses == []
 
+
+def test_a_ledger_miss_names_the_ledger_as_its_evidence(monkeypatch):
+    """Judged by the recorded answer and the box score, not the final poll."""
+    import sqlite3
+
+    from lockin.store.db import apply_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    apply_schema(conn)
+    day, runs = ledger_runs(conn, [("2026-10-29", "2026-10-27T00:00:00+00:00")])
+    answers = {("p", day): ledger.Answer("p", day, "LOCK", "2026-10-27T01:00:00+00:00")}
+    monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
+    report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
+    shadow._ledger_state(conn, "2026", report, summary, runs, answers)
+    [miss] = report.misses
+    assert miss.evidence == shadow.LEDGER_EVIDENCE
+    summary.runs = 1
+    report.weeks.append(summary)
+    text = shadow.render(report)
+    assert "LEDGER STATE" in text and "disagreed with the final poll" not in text

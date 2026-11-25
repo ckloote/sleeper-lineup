@@ -104,6 +104,12 @@ class StateMiss:
     run_banked: float | None
     expected: float | None
     detail: str
+    evidence: str = "final poll"
+    """What the morning is judged against: the final poll, or the ledger's final
+    answers with the box scores."""
+
+
+LEDGER_EVIDENCE = "ledger"
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,6 +692,7 @@ def _ledger_state(
                     banked.get(pid),
                     expected,
                     detail,
+                    evidence=LEDGER_EVIDENCE,
                 )
             )
 
@@ -873,7 +880,9 @@ def render(report: ShadowReport) -> str:
         for missing in w.mornings_missing:
             out.append(f"          no run: {missing}")
 
-    if report.misses:
+    poll_misses = [m for m in report.misses if m.evidence != LEDGER_EVIDENCE]
+    ledger_misses = [m for m in report.misses if m.evidence == LEDGER_EVIDENCE]
+    if poll_misses:
         out += [
             "",
             "STATE READING — each is a morning the BANKED list disagreed with the final poll",
@@ -882,7 +891,17 @@ def render(report: ShadowReport) -> str:
         ]
         out += [
             f"  wk {m.week} {m.as_of}  {name(m.sleeper_id) or m.sleeper_id}: {m.detail}"
-            for m in report.misses
+            for m in poll_misses
+        ]
+    if ledger_misses:
+        out += [
+            "",
+            "LEDGER STATE — each is a morning the BANKED list disagreed with the week's final",
+            "  answers in the lock ledger and their box scores (check what was recorded, and when)",
+        ]
+        out += [
+            f"  wk {m.week} {m.as_of}  {name(m.sleeper_id) or m.sleeper_id}: {m.detail}"
+            for m in ledger_misses
         ]
     if report.unverified:
         out += ["", "UNVERIFIED — the final scores cannot settle these mornings' readings"]
