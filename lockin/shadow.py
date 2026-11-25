@@ -618,6 +618,7 @@ def _ledger_state(
         # it computed was not in its advice.
         read_at = run["ledger_read_at"] if "ledger_read_at" in run.keys() else None
         ran_at = clock.utc(read_at or run["generated_at"])
+        saved_at = clock.utc(run["generated_at"])
         banked = {
             r["sleeper_id"]: r["score"]
             for r in conn.execute(
@@ -657,7 +658,9 @@ def _ledger_state(
                 )
             elif ans is not None:
                 recorded = clock.utc(ans.recorded_at)
-                tip = deadline_in_effect(deadlines.get((pid, ans.game_day), []), ran_at)
+                # The deadline this digest saw: its own printed one included, though
+                # it was saved after it read the ledger.
+                tip = deadline_in_effect(deadlines.get((pid, ans.game_day), []), saved_at)
                 made_by = min(recorded, tip) if tip is not None else recorded
                 if made_by > ran_at:
                     continue  # the decision may still have been open

@@ -311,18 +311,20 @@ def test_a_banked_lock_with_no_final_box_score_is_unverified(played, monkeypatch
 
 
 def ledger_runs(conn, mornings):
-    """Ledger runs at 13:00 UTC, each calling player p's Monday game with a deadline."""
+    """Ledger runs reading the ledger at 13:00 UTC and saved at 13:05, each calling
+    player p's Monday game with a deadline."""
     monday = date(2026, 10, 26)
     for i, (as_of, expires) in enumerate(mornings):
         conn.execute(
-            "INSERT INTO digest_runs (run_id, generated_at, roster_id, as_of, week, state_source,"
-            " abstained, state_supplied) VALUES (?, ?, 1, ?, ?, 'ledger', 0, 0)",
-            (f"r{i}", f"{as_of}T13:00:00+00:00", as_of, WEEK),
+            "INSERT INTO digest_runs (run_id, generated_at, ledger_read_at, roster_id, as_of,"
+            " week, state_source, abstained, state_supplied)"
+            " VALUES (?, ?, ?, 1, ?, ?, 'ledger', 0, 0)",
+            (f"r{i}", f"{as_of}T13:05:00+00:00", f"{as_of}T13:00:00+00:00", as_of, WEEK),
         )
         conn.execute(
             "INSERT INTO recommendations (generated_at, week, roster_id, sleeper_id, action,"
             " for_day, run_id, expires_utc) VALUES (?, ?, 1, 'p', 'LOCK', ?, ?, ?)",
-            (f"{as_of}T13:00:00+00:00", WEEK, monday.toordinal(), f"r{i}", expires),
+            (f"{as_of}T13:05:00+00:00", WEEK, monday.toordinal(), f"r{i}", expires),
         )
     return monday.toordinal(), conn.execute(
         "SELECT * FROM digest_runs ORDER BY generated_at"
@@ -374,14 +376,10 @@ def test_a_tap_made_while_the_digest_computed_does_not_fault_it(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_schema(conn)
-    day, _ = ledger_runs(conn, [("2026-10-29", "2026-10-30T00:00:00+00:00")])
-    conn.execute(
-        "UPDATE digest_runs SET generated_at = '2026-10-29T13:05:00+00:00',"
-        " ledger_read_at = '2026-10-29T13:00:00+00:00'"
-    )
-    runs = conn.execute("SELECT * FROM digest_runs").fetchall()
+    day, runs = ledger_runs(conn, [("2026-10-29", "2026-10-30T00:00:00+00:00")])
     answers = {("p", day): ledger.Answer("p", day, "LOCK", "2026-10-29T13:02:00+00:00")}
     monkeypatch.setattr(shadow, "_game_scores", lambda *a: {})
     report, summary = shadow.ShadowReport(), shadow.WeekSummary(week=WEEK)
     shadow._ledger_state(conn, "2026", report, summary, runs, answers)
     assert report.misses == []
+

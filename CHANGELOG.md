@@ -63,7 +63,8 @@
     its replay or by the shadow gate. A replay takes its source and its cutoff
     from the same live run, so a later abstention cannot move the cutoff.
   - A ledger morning whose locked game has no box score is unverified, not
-    checked. A postponed tip judges each morning by the deadline it knew.
+    checked. A postponed tip judges each morning by the deadline it knew,
+    including the one it printed itself after reading the ledger.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for
