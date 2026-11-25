@@ -65,6 +65,8 @@
   - A ledger morning whose locked game has no box score is unverified, not
     checked. A postponed tip judges each morning by the deadline it knew,
     including the one it printed itself after reading the ledger.
+  - A repeat LOCK tapped while the digest computed keeps its warning on the
+    page ("not recorded when this digest ran"), with the lock on the buttons.
 - **The opponent's banked state is still read from the poll.** The stand-in
   (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
   no call, but cut P(win) sharply on mornings the poll reading did not, for

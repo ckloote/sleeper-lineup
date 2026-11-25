@@ -419,3 +419,25 @@ def test_a_later_abstention_does_not_move_a_replays_cutoff(week):
         ctx, 1, WED.isoformat(), n_sims=100, n_paths=100, live=False, ledger=True
     )
     assert replay.state_source == "ledger" and replay.banked == {}
+
+
+def test_the_page_explains_a_repeat_tapped_while_the_digest_computed(week):
+    """Read at 13:00, saved 13:05, Locked tapped at 13:02: the button shows the
+    lock, and the page still says why the run counted him unlocked."""
+    from datetime import UTC
+
+    from lockin import advice
+
+    said_on(week)
+    report = ledger_digest(week)
+    persisted(week, report, at="2026-10-28T13:05:00+00:00")
+    answer(week, week.a, MON, "LOCK", at="2026-10-28T13:02:00+00:00")
+    with connect(week.cfg) as conn:
+        run = advice.latest_run(conn, 1)
+    [item] = [c for c in run.calls if c.sleeper_id == week.a]
+    assert item.said_lock_on == TUE.isoformat() and item.answer == "LOCK"
+    page = advice.render(
+        run, today=WED.isoformat(), now=datetime(2026, 10, 28, 14, tzinfo=UTC), interactive=True
+    )
+    assert "not recorded when this digest ran, so it counted him unlocked" in page
+    assert "tap Locked if you took it" not in page

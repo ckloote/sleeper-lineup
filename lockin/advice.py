@@ -233,7 +233,9 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
     )
     answers = ledger_mod.answers(conn, row["week"], roster_id, before=replayed) if ledger_on else {}
     if ledger_on and said_lock:
-        known = replayed or row["generated_at"]
+        # As of when the run read the ledger, not when it was saved: a tap made
+        # while it computed is the reason it repeated the call.
+        known = replayed or get("ledger_read_at") or row["generated_at"]
         said_lock = ledger_mod.unanswered(
             said_lock, ledger_mod.answers(conn, row["week"], roster_id, before=known)
         )
@@ -576,6 +578,13 @@ def _said_lock(item: Item, ledger: bool = False) -> str:
     if not item.said_lock_on:
         return ""
     day = datetime.fromisoformat(item.said_lock_on).strftime("%A")
+    if ledger and item.answer:
+        # Recorded since this run read the ledger: the answer stands on the
+        # buttons, and this is why the run priced him unlocked.
+        return (
+            f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; not recorded"
+            " when this digest ran, so it counted him unlocked</div>"
+        )
     if ledger:
         return (
             f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; not recorded;"
