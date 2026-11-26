@@ -373,7 +373,7 @@ it has never been observed live.
 > **Superseded 2026-11-24: the §10 reading is false, and the ledger replaces it.** Checked
 > against the app for week 5 of 2026-27: mid-week a locked player's counted value tracks
 > his latest game, a value stuck on an earlier game is a bench night, and finished weeks
-> keep changing (CHANGELOG, Unreleased). Banked state now comes from the **lock ledger**:
+> keep changing (CHANGELOG, 0.3.0). Banked state now comes from the **lock ledger**:
 > tap Locked or Passed beside each call on the served page (`lockin-serve`), and the digest
 > banks exactly that. The by-eye check below becomes: answer every LOCK call. `lockin
 > shadow` judges a ledger week by those answers. A LOCK call with no answer is

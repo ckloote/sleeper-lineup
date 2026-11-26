@@ -443,6 +443,14 @@ regardless: it is where `.env` is read from (step 2).
 Then from the phone, on the LAN: `http://<pi>:8080/`. Over Tailscale it is the same URL
 with the tailnet address — the server binds all interfaces, so nothing further is needed.
 
+**The page takes your lock answers.** Its one write is `POST /ledger`, the **Locked** /
+**Passed** / **Undo** buttons (README, "Recording your locks"). It accepts only a
+same-origin form post for a call of the current week's live digest, and appends to the
+`lock_ledger` table. It never creates that table; the first write job on 0.3.0 does. Anyone
+who can reach the page can answer for you, which is one more reason to keep it on the LAN
+or a tailnet. After deploying a new version, `sudo systemctl restart lockin-serve`: the
+service keeps running the code it started with.
+
 A bad `--dashboard-db` fails the unit at start rather than on the first request, so
 `systemctl status` tells you, instead of a phone showing a 500 in November.
 

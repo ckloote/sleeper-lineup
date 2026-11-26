@@ -2,10 +2,10 @@
 
 A daily lock/pass assistant for Sleeper NBA Lock-In leagues. It recommends whether
 to bank a completed game's score and gives score thresholds for future nights.
-You choose your starters and make every lock yourself in Sleeper; this tool does
-not change your team or provide start/sit advice.
+You choose your starters and make every lock yourself in Sleeper, then record it
+on the advice page. This tool does not change your team or provide start/sit advice.
 
-**Release: 0.1.0.** Ready for supervised live use; 1.0 is reserved for proven live
+**Release: 0.3.0.** Ready for supervised live use; 1.0 is reserved for proven live
 operation. See [release notes](CHANGELOG.md) and the [version policy](docs/releases.md).
 
 ## Start here
@@ -60,8 +60,10 @@ uv run --frozen lockin serve --dashboard-db data/lockin-2025.db
 
 Open `http://<host>:8080/`. The optional `--dashboard-db` keeps last season's
 manager dashboard available at `/dashboard`; omit it if you have no previous
-season database. `serve` displays saved runs; it does not generate new advice.
-For a standalone HTML file, run `uv run --frozen lockin advice`.
+season database. `serve` displays saved runs and does not generate new advice.
+Its one write is your answers to the calls (**Locked** / **Passed**, see
+[Recording your locks](#recording-your-locks)). A standalone HTML file from
+`uv run --frozen lockin advice` shows the calls but cannot record answers.
 
 For cron, notifications, a persistent web service and log rotation, follow the
 [deployment guide](docs/deployment.md). Schedule ingest before the morning digest,
@@ -74,9 +76,9 @@ uses 06:30 ingest and 09:00 digest in the host's Eastern timezone.
 | Stage | What to do | What changes |
 |---|---|---|
 | Opening days | Ingest and save a digest every morning. Confirm injury captures and matchup polls accumulate daily. | The digest abstains until at least 400 player-games exist league-wide and its other data checks pass. |
-| Advice begins | Read the calls and manually compare `BANKED` with your actual locks each morning. | Advice becomes available; automatic lock inference still needs live validation. |
-| Each finalized week | Run `uv run --frozen lockin shadow`, normally on Monday after ingest. | The report checks daily inference against final scores. |
-| Two full consecutive clean weeks | Confirm the shadow report explicitly says its gate passes. | You can stop the daily manual `BANKED` cross-check. Keep the daily jobs and weekly shadow review. |
+| Advice begins | Read the calls, and answer each LOCK call on the served page (**Locked** or **Passed**) once you have decided. | Advice becomes available. Banked state comes from your answers. |
+| Each finalized week | Run `uv run --frozen lockin shadow`, normally on Monday after ingest. | The report checks each morning's calls and banked state against your recorded answers and the box scores. |
+| Two full consecutive clean weeks | Confirm the shadow report explicitly says its gate passes. | You can stop the daily manual `BANKED` cross-check. Keep the daily jobs, your answers and the weekly shadow review. |
 | Around week 5 | Run `uv run --frozen lockin calibrate --cold-start`. | Checks whether the initial 400-player-game threshold was adequate for this season. A failure needs investigation and adjustment before trusting early-season calibration. |
 | Around week 10 or later | Review whether enough availability history exists to develop and validate start/sit advice. | Nothing switches on automatically. Start/sit needs its own implementation and validation gate. |
 | Season end | Preserve the database and snapshots; run retrospective analysis if wanted. | Keep this season separate when configuring the next one. |
@@ -96,7 +98,8 @@ the latest saved digest directly, so static `advice` generation is optional when
 using it. Keep digest persistence enabled: the shadow report needs the saved runs.
 
 Read the advice date, input freshness and warnings before acting. Make any chosen
-locks in Sleeper **before the displayed next tipoff**. A threshold of `11.5 or more`
+locks in Sleeper **before the displayed next tipoff**, and record each answer on
+the page. A threshold of `11.5 or more`
 includes 11.5. Future rules assume you make no intervening locks; rerun the digest
 when you need advice reflecting updated inputs or state.
 
@@ -109,10 +112,32 @@ instructions. Missing or ambiguous data should be resolved before relying on a c
 Sleeper's matchup poll cannot show a lock, so the digest banks what you record:
 tap **Locked** or **Passed** beside each call on the served advice page
 (`lockin-serve`), and **Undo** to correct one. A LOCK call you have not answered
-counts as not locked, and its line says so. `--locked` still overrides, and
-`LOCKIN_LEDGER=0` goes back to reading the poll.
+counts as not locked, and its line says so. A PASS call needs no answer: doing
+nothing is passing.
 
-### While validating lock inference (before the ledger)
+- A call that left the page unanswered is listed under **Not answered from earlier
+  this week**, so a lock you forgot to record can still be recorded.
+- Only an answer recorded after a digest ran answers that digest's call. If you
+  passed on Tuesday and Wednesday says LOCK on the same game, Wednesday's call is
+  open again, with Tuesday's answer shown beside it.
+- Answers are taken only for the current week's live calls. A historical replay
+  shows the answers as they stood that morning and takes none.
+
+`--locked` still overrides the ledger, and `LOCKIN_LEDGER=0` goes back to reading
+the poll.
+
+### The shadow gate
+
+The shadow gate requires the latest two finalized tracking weeks to be full,
+consecutive and clean. In a ledger week, a LOCK call with no answer, or a morning
+whose banked list disagrees with your answers and the box scores, keeps it closed
+(listed under `UNANSWERED` and `LEDGER STATE`). In a week read from the poll,
+missing runs, failed inference, incomplete final polls, unverifiable readings or
+discrepancies keep it closed. Monday needs a run but can abstain before the
+league rolls over. See the
+[exact gate rules](docs/day-one.md#7-first-digest--and-the-first-week-which-it-will-decline-to-advise-on).
+
+### Before the ledger: reading the poll
 
 Compare `BANKED` with the locks you actually made that should now be visible:
 locks become inferable after the player's next game, so last night's newly locked
@@ -127,12 +152,6 @@ Supply the complete banked state using Sleeper player IDs; `--locked ''` explici
 means nothing is banked. Overrides do not bypass freshness or lineup checks, and
 supplied-state runs do not qualify as successful automatic inference for the
 shadow gate.
-
-The shadow gate requires the latest two finalized tracking weeks to be full,
-consecutive and clean. Missing runs, failed inference, incomplete final polls,
-unverifiable readings or discrepancies keep the gate closed. Monday needs a run
-but can abstain before the league rolls over. See the
-[exact gate rules](docs/day-one.md#7-first-digest--and-the-first-week-which-it-will-decline-to-advise-on).
 
 ### Bench-aware calls (experimental, off by default)
 
