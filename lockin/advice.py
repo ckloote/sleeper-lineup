@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from lockin import clock
+from lockin import ledger as ledger_mod
 from lockin.projections import date_of, day_index
 from lockin.store import runs
 
@@ -55,6 +56,11 @@ class Item:
     said_lock_on: str | None = None
     """For a call, the first earlier morning whose digest said LOCK on this same
     game, as the notification printed it (`LockCall.said_lock_on`)."""
+    run_id: str | None = None
+    """The digest that made this call, which is what an answer to it names."""
+    answer: str | None = None
+    """LOCK or PASS as recorded in the ledger, or None if unanswered."""
+    answered_at: str | None = None
 
     def expired(self, now: datetime) -> bool:
         return self.deadline_status(now) == "closed"
@@ -117,6 +123,28 @@ class Run:
     stats_fetch_finished_at: str | None = None
     status_at: str | None = None
     """When designations were last read, as of this run."""
+    unanswered: tuple[Item, ...] = ()
+    """Calls from earlier live runs this week that are no longer on the page and
+    have no answer. A lock left unrecorded there is missing from every banked
+    total for the rest of the week, so they stay answerable."""
+    recorded: tuple[Item, ...] = ()
+    """Every standing answer this week, newest first, for undoing."""
+    ledger: bool = False
+    """The week's answers belong on this page: the run read the ledger, or it
+    abstained before reading any state while the ledger is in use. An abstention
+    is exactly the morning a lock still needs recording."""
+    ledger_read_at: str | None = None
+    """The moment this run's advice reflects the ledger as of."""
+
+    def answered_since(self, item: Item) -> bool:
+        """Whether ``item`` was answered after this run read the ledger.
+
+        Only such an answer settles tonight's call. One from before it is what the
+        run already knew: a PASS on Tuesday does not answer Wednesday's LOCK.
+        """
+        if not (self.ledger and item.answered_at and self.ledger_read_at):
+            return False
+        return clock.utc(item.answered_at) >= clock.utc(self.ledger_read_at)
 
     @property
     def calls(self) -> list[Item]:
@@ -201,6 +229,32 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
             )
         except sqlite3.OperationalError:
             pass  # a database too old to have the columns has no earlier calls to name
+    # Answers as they stand now, for the buttons; as of the run, for which of its
+    # repeats the notification called unanswered.
+    # A replay is made afterwards, so it reads the ledger as of the morning it
+    # replays: answers recorded since are not what that morning knew.
+    replayed = (
+        ledger_mod.replay_moment(conn, roster_id, row["as_of"]) if get("retrospective") else None
+    )
+    # An abstention returns before the state step, so it has no state source; the
+    # ledger still applies once any live run has read it.
+    ledger_on = get("state_source") == "ledger" or (
+        bool(get("abstained"))
+        and not get("retrospective")
+        and ledger_mod.began(conn, roster_id) is not None
+    )
+    answers = ledger_mod.answers(conn, row["week"], roster_id, before=replayed) if ledger_on else {}
+    # As of when the run read the ledger, not when it was saved: a tap made while
+    # it computed is the reason it repeated the call.
+    known = replayed or get("ledger_read_at") or row["generated_at"]
+    if ledger_on and said_lock:
+        said_lock = ledger_mod.unanswered(
+            said_lock,
+            ledger_mod.answers(conn, row["week"], roster_id, before=known),
+            runs.earlier_lock_cutoffs(
+                conn, roster_id, row["week"], row["as_of"], row["generated_at"]
+            ),
+        )
     items = [
         Item(
             sleeper_id=r["sleeper_id"],
@@ -218,6 +272,8 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
                 if r["action"] in ("LOCK", "PASS")
                 else None
             ),
+            run_id=run_id,
+            **_answered(answers, r["sleeper_id"], r["for_day"]),
         )
         for r in conn.execute(
             f"""
@@ -282,7 +338,122 @@ def latest_run(conn: sqlite3.Connection, roster_id: int) -> Run | None:
         stats_fetch_finished_at=get("stats_fetch_finished_at"),
         banked=banked,
         warnings=warnings,
+        ledger_read_at=known if ledger_on else None,
+        unanswered=(
+            _unanswered(conn, row, roster_id, items, answers)
+            if ledger_on and not get("retrospective")
+            else ()
+        ),
+        recorded=_recorded(conn, answers),
+        ledger=ledger_on,
         **availability_coverage(conn, row["as_of"]),
+    )
+
+
+def _answered(answers: dict, sleeper_id: str, day: int) -> dict[str, str | None]:
+    found = answers.get((sleeper_id, day))
+    if found is None:
+        return {"answer": None, "answered_at": None}
+    return {"answer": found.decision, "answered_at": found.recorded_at}
+
+
+def _unanswered(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    roster_id: int,
+    items: list[Item],
+    answers: dict,
+) -> tuple[Item, ...]:
+    """Earlier live calls this week, not on this run's page and not answered.
+
+    The newest run's version of each (player, game) is the one shown, and only
+    an answer recorded after that run read the ledger answers it: Tuesday's PASS
+    does not answer Wednesday's LOCK, as in `shadow.ledger_verdict`. Such a call
+    is listed with the earlier answer on show.
+    """
+    shown = {(i.sleeper_id, i.for_day) for i in items if i.is_call}
+    columns = {c[1] for c in _rows(conn, "PRAGMA table_info(digest_runs)", ())}
+    read_at = (
+        "COALESCE(r.ledger_read_at, r.generated_at)"
+        if "ledger_read_at" in columns
+        else "r.generated_at"
+    )
+    latest: dict[tuple[str, int], sqlite3.Row] = {}
+    for r in _rows(
+        conn,
+        f"""
+        SELECT c.sleeper_id, c.for_day, c.action, c.run_id, r.as_of, p.full_name,
+               {read_at} AS read_at
+          FROM recommendations c
+          JOIN digest_runs r ON r.run_id = c.run_id
+          LEFT JOIN players p ON p.sleeper_id = c.sleeper_id
+         WHERE r.roster_id = ? AND r.week = ? AND r.generated_at < ?
+           AND COALESCE(r.retrospective, 0) = 0 AND c.action IN ('LOCK', 'PASS')
+         ORDER BY r.generated_at
+        """,
+        (roster_id, row["week"], row["generated_at"]),
+    ):
+        latest[(r["sleeper_id"], r["for_day"])] = r
+
+    out: list[Item] = []
+    for key, r in sorted(latest.items(), key=lambda kv: kv[0][1]):
+        if key in shown:
+            continue
+        found = answers.get(key)
+        if found is not None:
+            # Answered unless the answer is a PASS that predates this LOCK.
+            predates = (
+                r["action"] == "LOCK"
+                and found.decision == ledger_mod.PASS
+                and clock.utc(found.recorded_at) < clock.utc(r["read_at"])
+            )
+            if not predates:
+                continue
+        out.append(
+            Item(
+                sleeper_id=r["sleeper_id"],
+                name=r["full_name"] or r["sleeper_id"],
+                action=r["action"],
+                for_day=r["for_day"],
+                threshold=None,
+                ev_lock=None,
+                ev_pass=None,
+                rationale="",
+                said_lock_on=r["as_of"],
+                run_id=r["run_id"],
+                **_answered(answers, *key),
+            )
+        )
+    return tuple(out)
+
+
+def _recorded(conn: sqlite3.Connection, answers: dict) -> tuple[Item, ...]:
+    if not answers:
+        return ()
+    ids = sorted({sid for sid, _ in answers})
+    names = dict(
+        _rows(
+            conn,
+            f"SELECT sleeper_id, full_name FROM players WHERE sleeper_id IN"
+            f" ({','.join('?' * len(ids))})",
+            tuple(ids),
+        )
+    )
+    return tuple(
+        Item(
+            sleeper_id=a.sleeper_id,
+            name=names.get(a.sleeper_id) or a.sleeper_id,
+            action=a.decision,
+            for_day=a.game_day,
+            threshold=None,
+            ev_lock=None,
+            ev_pass=None,
+            rationale="",
+            run_id=a.run_id,
+            answer=a.decision,
+            answered_at=a.recorded_at,
+        )
+        for a in sorted(answers.values(), key=lambda a: a.recorded_at, reverse=True)
     )
 
 
@@ -444,12 +615,76 @@ def _inputs(run: Run) -> str:
     )
 
 
-def _said_lock(item: Item) -> str:
+def _said_lock(item: Item, ledger: bool = False, since: bool = False) -> str:
     """The same call made on an earlier morning, which the poll cannot yet confirm."""
     if not item.said_lock_on:
         return ""
     day = datetime.fromisoformat(item.said_lock_on).strftime("%A")
+    if ledger and since:
+        # Recorded since this run read the ledger: the answer stands on the
+        # buttons, and this is why the run priced him unlocked.
+        return (
+            f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; not recorded"
+            " when this digest ran, so it counted him unlocked</div>"
+        )
+    if ledger:
+        return (
+            f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; not recorded;"
+            " tap Locked if you took it</div>"
+        )
     return f"<div class=said>{day}&rsquo;s digest said LOCK &mdash; ignore if you locked him</div>"
+
+
+LEDGER_ROUTE = "/ledger"
+"""Where the answer buttons post (`lockin.serve`)."""
+
+
+def _button(item: Item, decision: str, label: str) -> str:
+    """One answer, as a form of its own: no JavaScript, any phone."""
+    fields = {
+        "run_id": item.run_id or "",
+        "sleeper_id": item.sleeper_id,
+        "game_day": str(item.for_day),
+        "decision": decision,
+    }
+    hidden = "".join(
+        f'<input type=hidden name={k} value="{html.escape(v, quote=True)}">'
+        for k, v in fields.items()
+    )
+    return (
+        f'<form method=post action="{LEDGER_ROUTE}" class=ans>{hidden}'
+        f'<button class="{decision.lower()}btn">{label}</button></form>'
+    )
+
+
+def _controls(item: Item, interactive: bool, *, still_open: bool = False) -> str:
+    """What was recorded for a call, and the buttons to answer or undo it.
+
+    ``still_open`` is tonight's call answered only before this run read the
+    ledger: Tuesday's PASS does not answer Wednesday's LOCK. The earlier answer is
+    shown, and stays in the week's record, but the row offers Locked and Passed,
+    not just an Undo of an answer that was right when given.
+    """
+    if item.answer is not None:
+        verb = "locked" if item.answer == "LOCK" else "passed"
+        when = _local(item.answered_at)
+        if still_open:
+            earlier = f"<span class=recorded>earlier: {verb} &middot; {when}</span>"
+            if not interactive or not item.run_id:
+                return f"<div class=answer>{earlier}</div>"
+            return (
+                f"<div class=answer>{earlier}"
+                f"{_button(item, 'LOCK', 'Locked')}{_button(item, 'PASS', 'Passed')}</div>"
+            )
+        done = f"<span class=recorded>&#10003; {verb} &middot; {when}</span>"
+        undo = _button(item, "UNDO", "Undo") if interactive and item.run_id else ""
+        return f"<div class=answer>{done}{undo}</div>"
+    if not interactive or not item.run_id:
+        return "<div class=answer><span class=unrecorded>not answered</span></div>"
+    return (
+        "<div class=answer>"
+        f"{_button(item, 'LOCK', 'Locked')}{_button(item, 'PASS', 'Passed')}</div>"
+    )
 
 
 def _deadline(item: Item, now: datetime) -> str:
@@ -461,7 +696,15 @@ def _deadline(item: Item, now: datetime) -> str:
     return f"<div class=deadline>by {when} tip</div>"
 
 
-def render(run: Run | None, *, today: str | None = None, now: datetime | None = None) -> str:
+def render(
+    run: Run | None,
+    *,
+    today: str | None = None,
+    now: datetime | None = None,
+    interactive: bool = False,
+) -> str:
+    """The page. ``interactive`` adds the answer buttons, for `lockin serve`
+    only: a file written by `lockin advice` has nowhere to post them."""
     if run is None:
         return (
             "<!doctype html><meta charset=utf-8><title>Lock-in — tonight</title>"
@@ -470,6 +713,9 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
 
     tone, sentence = _freshness(run, today)
     now = now or datetime.now(UTC)
+    # A replay was never advice: nothing on its page may be answered or undone,
+    # and an Undo would carry the original live run's id, which the route takes.
+    interactive = interactive and not run.retrospective
     parts: list[str] = []
 
     # Said of the run, above everything it qualifies — the win probability too.
@@ -502,7 +748,13 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             f"{i.action}</span></td>"
             f"<td class=who>{html.escape(i.name)}"
             f"<div class=game>{date_of(i.for_day)} game</div>{_deadline(i, now)}"
-            f"{_said_lock(i)}</td>"
+            f"{_said_lock(i, run.ledger, run.answered_since(i))}"
+            + (
+                _controls(i, interactive, still_open=not run.answered_since(i))
+                if run.ledger and not run.retrospective
+                else ""
+            )
+            + "</td>"
             "<td class=num>"
             f"{'ride' if i.threshold is None else f'score {i.threshold:g} or more'}</td>"
             f"<td class=num>{'' if i.edge is None else f'{i.edge:.1%}'}</td>"
@@ -515,24 +767,39 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
         # inaction, and only a LOCK has a deadline. A LOCK whose deadline has
         # passed is no longer one to act on, so it does not count either.
         locks = [i for i in calls if i.action == "LOCK" and i.deadline_status(now) == "open"]
+        # One answered since the run read the ledger is not one to ask about:
+        # its row shows the answer and offers Undo.
+        pending = [i for i in locks if not run.answered_since(i)]
         if run.retrospective:
             heading = "Historical replay &mdash; unavailable as live advice"
             hint = (
                 "These calls reconstruct a past morning;"
                 " their deadlines do not verify a live window."
             )
-        elif locks and all(i.said_lock_on for i in locks):
+        elif pending and all(i.said_lock_on for i in pending):
             heading = "Lock now &mdash; unless you already did"
             hint = (
-                "Each LOCK below was called on an earlier morning too, and a lock shows"
+                (
+                    "Each LOCK below was called on an earlier morning too, and nothing"
+                    " is recorded for it. If you took it, tap Locked."
+                    " The rest are worth riding."
+                )
+                if run.ledger
+                else "Each LOCK below was called on an earlier morning too, and a lock shows"
                 " in the poll only once he has played again. If you took it, skip it."
                 " The rest are worth riding."
             )
-        elif locks:
+        elif pending:
             heading = "Lock now &mdash; before each player's next tip"
             hint = (
                 "Marked LOCK: bank before his next game tips, or the score is gone."
                 " The rest are worth riding."
+            )
+        elif locks:
+            heading = "Nothing left to lock &mdash; your answers are recorded"
+            hint = (
+                "Each open LOCK below has an answer recorded since this digest ran;"
+                " tap Undo if one is wrong. The rest are worth riding."
             )
         elif any(i.deadline_status(now) == "unknown deadline" for i in calls):
             heading = "Nothing to lock now &mdash; advice unavailable"
@@ -550,6 +817,25 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             "<table><thead><tr><th></th><th>Player</th>"
             "<th class=num>Break-even</th><th class=num>Worth</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>"
+        )
+
+    if run.unanswered:
+        rows = "".join(
+            "<tr>"
+            f'<td class=act><span class="tag {"lock" if i.action == "LOCK" else "pass"}">'
+            f"{i.action}</span></td>"
+            f"<td class=who>{html.escape(i.name)}"
+            f"<div class=game>{date_of(i.for_day)} game &middot; called"
+            f" {datetime.fromisoformat(i.said_lock_on).strftime('%A')}</div>"
+            f"{_controls(i, interactive, still_open=True)}</td>"
+            "</tr>"
+            for i in run.unanswered
+        )
+        parts.append(
+            "<h2>Not answered from earlier this week</h2>"
+            "<p class=hint>Calls no longer on the page. If you locked one, record it:"
+            " until you do it counts as not locked in every number here.</p>"
+            f"<table><tbody>{rows}</tbody></table>"
         )
 
     by_night: dict[int, list[Item]] = {}
@@ -607,7 +893,18 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             )
         # Beside the banked total, because it is the total they are missing from.
         unseen = ""
-        if repeats := [html.escape(i.name) for i in run.calls if i.said_lock_on]:
+        if run.ledger:
+            repeats = [i for i in run.calls if i.said_lock_on]
+            open_ = [html.escape(i.name) for i in repeats if not run.answered_since(i)]
+            since = [html.escape(i.name) for i in repeats if run.answered_since(i)]
+            if open_:
+                unseen += f"<div>counted as unlocked until recorded: {', '.join(open_)}</div>"
+            if since:
+                unseen += (
+                    "<div>recorded since this digest ran, so counted as unlocked in it:"
+                    f" {', '.join(since)}</div>"
+                )
+        elif repeats := [html.escape(i.name) for i in run.calls if i.said_lock_on]:
             until = "he plays" if len(repeats) == 1 else "each plays"
             unseen = f"<div>counted as unlocked until {until} again: {', '.join(repeats)}</div>"
         # Each line guarded on its own field rather than on `p_win` standing in
@@ -625,6 +922,17 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
             f"{projected}{margin}{banked}{unseen}</div>"
         )
 
+    if run.recorded:
+        rows = "".join(
+            "<tr>"
+            f"<td class=who>{html.escape(i.name)}"
+            f"<div class=game>{date_of(i.for_day)} game</div></td>"
+            f"<td class=num>{_controls(i, interactive)}</td>"
+            "</tr>"
+            for i in run.recorded
+        )
+        parts.append(f"<h2>Recorded this week</h2><table><tbody>{rows}</tbody></table>")
+
     prompt = ""
     if (found := modelling_prompt(run)) is not None:
         tone_class, message = found
@@ -635,6 +943,12 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
 
     if run.state_supplied or run.state_source == "supplied":
         provenance = "State was supplied on the command line."
+    elif run.ledger:
+        provenance = (
+            "Banked state is from your answers on this page (Locked / Passed). Sleeper&rsquo;s"
+            " matchup poll cannot show a lock, so a call you have not answered counts as"
+            " not locked."
+        )
     elif run.state_source == "inferred":
         provenance = (
             f"Banked state was read from the matchup poll at"
@@ -688,6 +1002,18 @@ def render(run: Run | None, *, today: str | None = None, now: datetime | None = 
   .game, .deadline {{ font-weight:400; font-size:.75rem; color:var(--mute); }}
   .said {{ font-weight:400; font-size:.75rem; }}
   tr.expired td {{ opacity:.45; }}
+  .answer {{ display:flex; gap:.4rem; align-items:center; margin-top:.35rem;
+             font-weight:400; font-size:.8rem; }}
+  td.num .answer {{ justify-content:flex-end; margin-top:0; }}
+  form.ans {{ margin:0; }}
+  form.ans button {{ font:inherit; font-size:.85rem; padding:.35rem .8rem;
+                     border-radius:6px; border:1px solid var(--line);
+                     background:var(--bg); color:var(--fg); min-height:2.2rem; }}
+  form.ans button.lockbtn {{ background:var(--lockbg); color:var(--lock);
+                             border-color:var(--lock); font-weight:600; }}
+  form.ans button.undobtn {{ padding:.2rem .55rem; min-height:1.8rem; }}
+  .recorded {{ color:var(--lock); }}
+  .unrecorded {{ color:var(--mute); }}
   .watch {{ padding-left:1.1rem; margin:.3rem 0; font-size:.9rem; }}
   .tag {{ display:inline-block; padding:.12rem .45rem; border-radius:4px;
           font-size:.72rem; font-weight:700; letter-spacing:.04em; }}

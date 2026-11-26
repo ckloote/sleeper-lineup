@@ -104,7 +104,15 @@ If the digest abstains, follow its explanation and check `logs/ingest.log` and
 `logs/digest.log`. Old advice, expired calls and historical replays are not current
 instructions. Missing or ambiguous data should be resolved before relying on a call.
 
-### While validating lock inference
+### Recording your locks
+
+Sleeper's matchup poll cannot show a lock, so the digest banks what you record:
+tap **Locked** or **Passed** beside each call on the served advice page
+(`lockin-serve`), and **Undo** to correct one. A LOCK call you have not answered
+counts as not locked, and its line says so. `--locked` still overrides, and
+`LOCKIN_LEDGER=0` goes back to reading the poll.
+
+### While validating lock inference (before the ledger)
 
 Compare `BANKED` with the locks you actually made that should now be visible:
 locks become inferable after the player's next game, so last night's newly locked

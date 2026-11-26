@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from lockin import calendar, clock
+from lockin import ledger as ledger_mod
 from lockin.core.locks import Game, LockStatus, infer_lock
 from lockin.core.scoring import score_recorded
 from lockin.locks import game_sequence
@@ -48,6 +49,10 @@ from lockin.projections import date_of, day_index
 from lockin.verify import scoring_settings
 
 FOLLOWED, OVERRIDDEN, MOOT, UNKNOWN = "followed", "overridden", "moot", "unknown"
+UNANSWERED = "unanswered"
+"""A LOCK call with nothing recorded in the ledger. Whether it was taken is
+unknown, and the banked state that followed it may be wrong, so it blocks the
+week. A PASS call needs no answer: doing nothing is passing."""
 
 GATE_WEEKS = 2
 """Consecutive clean weeks before the daily cross-check can stop (day-one.md step 7)."""
@@ -99,6 +104,12 @@ class StateMiss:
     run_banked: float | None
     expected: float | None
     detail: str
+    evidence: str = "final poll"
+    """What the morning is judged against: the final poll, or the ledger's final
+    answers with the box scores."""
+
+
+LEDGER_EVIDENCE = "ledger"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +169,16 @@ class WeekSummary:
     state_unverified: int = 0
     flips: int = 0
     same_input_flips: int = 0
+    ledger: bool = False
+    """Banked state came from the lock ledger this week, so the calls are judged
+    by its answers and the poll is not read for the truth."""
 
     @property
     def clean(self) -> bool:
         return (
             self.runs > 0
-            and (self.state_checked > 0 or bool(self.exemptions))
+            and (self.state_checked > 0 or bool(self.exemptions) or self.ledger)
+            and self.calls[UNANSWERED] == 0
             and not self.partial
             and not self.final_incomplete
             and not self.failed_inference
@@ -283,6 +298,46 @@ def verdict(action: str, day: int, truth: Truth | None) -> tuple[str, str]:
     return FOLLOWED, "passed"
 
 
+def ledger_verdict(
+    action: str,
+    day: int,
+    pid: str,
+    answers: dict[tuple[str, int], ledger_mod.Answer],
+    *,
+    read_at: str | None = None,
+) -> tuple[str, str]:
+    """Whether a call was taken, by the manager's own answers.
+
+    ``read_at`` is when the run that made the call read the ledger. A PASS
+    recorded before it answered an earlier call: Tuesday's PASS does not answer
+    Wednesday's LOCK, which is unanswered until something is recorded after it.
+    """
+    found = answers.get((pid, day))
+    if (
+        found is not None
+        and action == "LOCK"
+        and found.decision == "PASS"
+        and read_at is not None
+        and clock.utc(found.recorded_at) < clock.utc(read_at)
+    ):
+        found = None
+    locks = sorted(d for (p, d), a in answers.items() if p == pid and a.decision == "LOCK")
+    if found is not None:
+        took = found.decision == "LOCK"
+        if action == "LOCK":
+            return (FOLLOWED, "locked") if took else (OVERRIDDEN, "passed instead")
+        return (OVERRIDDEN, "locked it anyway") if took else (FOLLOWED, "passed")
+    if earlier := [d for d in locks if d < day]:
+        return MOOT, f"he had already banked {date_of(earlier[-1])}"
+    if later := [d for d in locks if d > day]:
+        if action == "LOCK":
+            return OVERRIDDEN, f"banked {date_of(later[0])} instead"
+        return FOLLOWED, "passed"
+    if action == "PASS":
+        return FOLLOWED, "passed (nothing recorded, which is passing)"
+    return UNANSWERED, "nothing recorded: tap Locked or Passed on the page"
+
+
 def lock_can_show(truth: Truth, known_through: int) -> bool:
     """Could a poll read the morning after ``known_through`` show him locked?
 
@@ -383,11 +438,20 @@ def build(conn: sqlite3.Connection, season: str, roster_id: int) -> ShadowReport
 
     for week in range(first_week, last + 1):
         summary = WeekSummary(week=week, runs=len(by_week[week]))
-        summary.final_incomplete = week not in whole
+        summary.ledger = any(r["state_source"] == "ledger" for r in by_week[week])
+        # A ledger run's truth is the manager's answers, not the final poll, which
+        # Sleeper keeps rewriting. A poll-read run still needs a whole final poll,
+        # even in a week that switched to the ledger after it.
+        summary.final_incomplete = week not in whole and any(
+            r["state_source"] == "inferred" for r in by_week[week]
+        )
         report.weeks.append(summary)
+        answers = ledger_mod.answers(conn, week, roster_id) if summary.ledger else None
         _mornings(summary, by_week[week], week, opening, roster_id, first_live, truth)
-        _calls(conn, report, summary, by_week[week], truth)
+        _calls(conn, report, summary, by_week[week], truth, answers)
         _state(conn, report, summary, by_week[week], truth)
+        if answers is not None:
+            _ledger_state(conn, season, report, summary, by_week[week], answers)
         _forecasts(conn, report, by_week[week])
 
     pids = {c.sleeper_id for c in report.calls} | {m.sleeper_id for m in report.misses}
@@ -451,11 +515,12 @@ def _mornings(
         known_through = day.toordinal() - 1
         morning = [r for r in runs if r["as_of"] == day.isoformat()]
         inferred = [r for r in morning if r["state_source"] == "inferred" and not r["abstained"]]
+        recorded = [r for r in morning if r["state_source"] == "ledger" and not r["abstained"]]
         checkable = any(expected_banked(t, known_through) is not False for t in starters)
         nothing_to_show = bool(starters) and not any(
             lock_can_show(t, known_through) for t in starters
         )
-        if inferred and checkable:
+        if recorded or (inferred and checkable):
             pass
         elif any(
             "verified_no_matchup" in r.keys() and r["verified_no_matchup"] and not r["abstained"]
@@ -481,8 +546,12 @@ def _calls(
     summary: WeekSummary,
     runs: list[sqlite3.Row],
     truth: dict[tuple[int, int, str], Truth],
+    answers: dict[tuple[str, int], ledger_mod.Answer] | None = None,
 ) -> None:
-    """Each call's last word before his window closed, and whether it was taken."""
+    """Each call's last word before his window closed, and whether it was taken.
+
+    With ``answers`` (a ledger week), taken means what the manager recorded.
+    """
     run_of = {r["run_id"]: r for r in runs}
     marks = ",".join("?" * len(run_of))
     rows = conn.execute(
@@ -490,13 +559,31 @@ def _calls(
         f" WHERE run_id IN ({marks}) AND action IN ('LOCK', 'PASS') ORDER BY generated_at",
         list(run_of),
     ).fetchall()
+    # What each run banked: on a ledger morning a lock recorded between two runs
+    # changes it with the date, ingest and poll unchanged, and may rightly move
+    # another player's call.
+    banked_by: dict[str, dict[str, float]] = defaultdict(dict)
+    for run_id, pid, score in conn.execute(
+        f"SELECT run_id, sleeper_id, score FROM digest_banked WHERE run_id IN ({marks})",
+        list(run_of),
+    ):
+        banked_by[run_id][pid] = round(score, 2)
     history: dict[tuple[int, str, int], list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
         history[(run_of[row["run_id"]]["roster_id"], row["sleeper_id"], row["for_day"])].append(row)
     for (roster_id, pid, day), seen in history.items():
         final = seen[-1]
         run = run_of[final["run_id"]]
-        outcome, detail = verdict(final["action"], day, truth.get((summary.week, roster_id, pid)))
+        if answers is not None:
+            keys = run.keys()
+            read_at = (run["ledger_read_at"] if "ledger_read_at" in keys else None) or run[
+                "generated_at"
+            ]
+            outcome, detail = ledger_verdict(final["action"], day, pid, answers, read_at=read_at)
+        else:
+            outcome, detail = verdict(
+                final["action"], day, truth.get((summary.week, roster_id, pid))
+            )
         summary.calls[outcome] += 1
         report.calls.append(
             CallOutcome(
@@ -507,11 +594,12 @@ def _calls(
             if a["action"] == b["action"]:
                 continue
             ra, rb = run_of[a["run_id"]], run_of[b["run_id"]]
-            same = (ra["as_of"], ra["ingest_run_id"], ra["poll_observed_at"]) == (
+            same_data = (ra["as_of"], ra["ingest_run_id"], ra["poll_observed_at"]) == (
                 rb["as_of"],
                 rb["ingest_run_id"],
                 rb["poll_observed_at"],
             )
+            same = same_data and banked_by[ra["run_id"]] == banked_by[rb["run_id"]]
             summary.flips += 1
             summary.same_input_flips += int(same)
             report.flips.append(
@@ -525,11 +613,175 @@ def _calls(
                     same,
                     "same ingest and poll: a bug"
                     if same
+                    else "a lock recorded in between"
+                    if same_data
                     else "new data in between"
                     if ra["as_of"] == rb["as_of"]
                     else "a night of games in between",
                 )
             )
+
+
+def _ledger_state(
+    conn: sqlite3.Connection,
+    season: str,
+    report: ShadowReport,
+    summary: WeekSummary,
+    runs: list[sqlite3.Row],
+    answers: dict[tuple[str, int], ledger_mod.Answer],
+) -> None:
+    """Each ledger morning's BANKED list against the week's final answers.
+
+    A run should have banked every lock the week ended with on a game played by
+    then, at that game's score. The final answers can say a call was followed
+    while a morning in between ran on the wrong state (review of PR #4).
+
+    **When a lock was made is bounded, not known.** It was made before his next
+    tip, the deadline the digest itself printed for the call, and no later than
+    it was recorded. A run is faulted for missing it only once both bounds had
+    passed: before that, the decision may still have been open, and the run was
+    right to price him unlocked. With no recorded deadline, the recording time
+    is the only bound.
+
+    A banked score that is not the final lock's game score is a miss whenever it
+    was recorded: a corrected record means the morning ran on the wrong one. So
+    is a banked player whose final answer is no longer a lock.
+    """
+    pids = {pid for pid, _ in answers}
+    scores = _game_scores(conn, season, summary.week, pids)
+    deadlines = _deadlines(conn, [r["run_id"] for r in runs])
+    for run in runs:
+        if run["abstained"] or run["state_source"] != "ledger":
+            continue
+        known_through = day_index(run["as_of"]) - 1
+        # The moment it read the ledger, not when it was saved: a tap made while
+        # it computed was not in its advice.
+        read_at = run["ledger_read_at"] if "ledger_read_at" in run.keys() else None
+        ran_at = clock.utc(read_at or run["generated_at"])
+        saved_at = clock.utc(run["generated_at"])
+        banked = {
+            r["sleeper_id"]: r["score"]
+            for r in conn.execute(
+                "SELECT sleeper_id, score FROM digest_banked WHERE run_id = ?", (run["run_id"],)
+            )
+        }
+        locked: dict[str, ledger_mod.Answer] = {}
+        for (pid, day), ans in answers.items():
+            if ans.decision == "LOCK" and day <= known_through:
+                if pid not in locked or day > locked[pid].game_day:
+                    locked[pid] = ans
+        for pid in sorted(set(locked) | set(banked)):
+            ans = locked.get(pid)
+            expected = None if ans is None else scores.get((pid, ans.game_day))
+            if ans is not None and pid in banked and expected is None:
+                # Nothing to check the banked score against: not verified, and
+                # blocking the week, rather than taken on trust.
+                summary.state_unverified += 1
+                report.unverified.append(
+                    Unverified(
+                        summary.week,
+                        run["roster_id"],
+                        pid,
+                        run["as_of"],
+                        banked[pid],
+                        f"no box score for the locked game ({date_of(ans.game_day)})",
+                    )
+                )
+                continue
+            summary.state_checked += 1
+            if ans is not None and pid in banked:
+                if abs(banked[pid] - expected) < 0.005:
+                    continue
+                detail = (
+                    f"banked {banked[pid]:.1f}, but the lock was {expected:.1f}"
+                    f" ({date_of(ans.game_day)})"
+                )
+            elif ans is not None:
+                recorded = clock.utc(ans.recorded_at)
+                # The deadline this digest saw: its own printed one included, though
+                # it was saved after it read the ledger.
+                tip = deadline_in_effect(deadlines.get((pid, ans.game_day), []), saved_at)
+                made_by = min(recorded, tip) if tip is not None else recorded
+                if made_by > ran_at:
+                    continue  # the decision may still have been open
+                if recorded <= ran_at:
+                    detail = (
+                        f"locked {date_of(ans.game_day)},"
+                        " recorded before this digest but not banked"
+                    )
+                else:
+                    detail = (
+                        f"locked {date_of(ans.game_day)} before his next tip,"
+                        " recorded after this digest"
+                    )
+            else:
+                detail = f"banked {banked[pid]:.1f}, but the final answer is not a lock"
+            summary.state_misses += 1
+            report.misses.append(
+                StateMiss(
+                    summary.week,
+                    run["roster_id"],
+                    pid,
+                    run["as_of"],
+                    banked.get(pid),
+                    expected,
+                    detail,
+                    evidence=LEDGER_EVIDENCE,
+                )
+            )
+
+
+def _game_scores(
+    conn: sqlite3.Connection, season: str, week: int, pids: set[str]
+) -> dict[tuple[str, int], float]:
+    """(player, day) -> that game's score, as `truths` scores it; a DNP is 0."""
+    if not pids:
+        return {}
+    scoring = scoring_settings(conn)
+    seq = game_sequence(conn, season)
+    out: dict[tuple[str, int], float] = {}
+    for pid in pids:
+        for g in seq.get((pid, week), []):
+            out[(pid, day_index(g["game_date"]))] = (
+                score_recorded(json.loads(g["raw_stats"]), scoring) if g["played"] else 0.0
+            )
+    return out
+
+
+def _deadlines(
+    conn: sqlite3.Connection, run_ids: list[str]
+) -> dict[tuple[str, int], list[tuple[datetime, datetime]]]:
+    """(player, game day) -> each deadline a call printed, with when, oldest first.
+
+    Kept per run rather than reduced to one: a postponed tip moves the deadline,
+    and each morning is judged by the one in effect then.
+    """
+    if not run_ids:
+        return {}
+    marks = ",".join("?" * len(run_ids))
+    out: dict[tuple[str, int], list[tuple[datetime, datetime]]] = defaultdict(list)
+    for pid, day, published, expires in conn.execute(
+        f"SELECT c.sleeper_id, c.for_day, r.generated_at, c.expires_utc"
+        f"  FROM recommendations c JOIN digest_runs r ON r.run_id = c.run_id"
+        f" WHERE c.run_id IN ({marks}) AND c.action IN ('LOCK', 'PASS')"
+        f"   AND c.expires_utc IS NOT NULL ORDER BY r.generated_at",
+        run_ids,
+    ):
+        if clock.aware_utc(expires) is not None:
+            out[(pid, day)].append((clock.utc(published), clock.utc(expires)))
+    return out
+
+
+def deadline_in_effect(published: list[tuple[datetime, datetime]], at: datetime) -> datetime | None:
+    """The deadline a morning knew: the latest published by then, else the first after.
+
+    A tip moved from Thursday to Friday evening is Friday's deadline for Friday's
+    digest, which published it, and Thursday's for Thursday's.
+    """
+    known = [tip for when, tip in published if when <= at]
+    if known:
+        return known[-1]
+    return published[0][1] if published else None
 
 
 def _state(
@@ -552,7 +804,9 @@ def _state(
     unsettled: set[tuple[str, str]] = set()
     for run in runs:
         if run["state_source"] != "inferred":
-            continue  # supplied by hand, or no poll: nothing of the reading's to check
+            # Supplied by hand, read from the ledger, or no poll: nothing of the
+            # poll reading's to check.
+            continue
         known_through = day_index(run["as_of"]) - 1
         banked = {
             r["sleeper_id"]: r["score"]
@@ -632,13 +886,16 @@ def render(report: ShadowReport) -> str:
     name = report.names.get
     out = ["SHADOW  what the digest said, against what was done", ""]
     for w in report.weeks:
-        calls = ", ".join(f"{w.calls[k]} {k}" for k in (FOLLOWED, OVERRIDDEN, MOOT, UNKNOWN))
+        kinds = (FOLLOWED, OVERRIDDEN, MOOT, UNKNOWN) + ((UNANSWERED,) if w.ledger else ())
+        calls = ", ".join(f"{w.calls[k]} {k}" for k in kinds)
         out.append(
             f"week {w.week:>2}  {'clean' if w.clean else 'NOT CLEAN'}  {w.runs} run(s);"
             f" calls: {calls}; state: {w.state_misses} miss(es) in {w.state_checked} checks,"
             f" {w.state_unverified} unverified;"
             f" flips: {w.flips} ({w.same_input_flips} on the same inputs)"
         )
+        if w.ledger:
+            out.append("          banked state from the lock ledger; calls judged by its answers")
         if w.partial:
             out.append("          partial first week: a full week is required")
         if w.final_incomplete:
@@ -657,11 +914,28 @@ def render(report: ShadowReport) -> str:
         for missing in w.mornings_missing:
             out.append(f"          no run: {missing}")
 
-    if report.misses:
-        out += ["", "STATE READING — each is a morning the BANKED list was wrong"]
+    poll_misses = [m for m in report.misses if m.evidence != LEDGER_EVIDENCE]
+    ledger_misses = [m for m in report.misses if m.evidence == LEDGER_EVIDENCE]
+    if poll_misses:
+        out += [
+            "",
+            "STATE READING — each is a morning the BANKED list disagreed with the final poll",
+            "  (Sleeper keeps rewriting finished weeks, so the poll may be the one that is wrong;",
+            "  the lock ledger replaces both readings)",
+        ]
         out += [
             f"  wk {m.week} {m.as_of}  {name(m.sleeper_id) or m.sleeper_id}: {m.detail}"
-            for m in report.misses
+            for m in poll_misses
+        ]
+    if ledger_misses:
+        out += [
+            "",
+            "LEDGER STATE — each is a morning the BANKED list disagreed with the week's final",
+            "  answers in the lock ledger and their box scores (check what was recorded, and when)",
+        ]
+        out += [
+            f"  wk {m.week} {m.as_of}  {name(m.sleeper_id) or m.sleeper_id}: {m.detail}"
+            for m in ledger_misses
         ]
     if report.unverified:
         out += ["", "UNVERIFIED — the final scores cannot settle these mornings' readings"]
@@ -669,6 +943,13 @@ def render(report: ShadowReport) -> str:
             f"  wk {u.week} {u.as_of}  {name(u.sleeper_id) or u.sleeper_id}: {u.detail}"
             + ("" if u.run_banked is None else f" (read as banked {u.run_banked:.1f})")
             for u in report.unverified
+        ]
+    unanswered = [c for c in report.calls if c.verdict == UNANSWERED]
+    if unanswered:
+        out += ["", "UNANSWERED — LOCK calls with nothing recorded in the ledger"]
+        out += [
+            f"  wk {c.week} LOCK {name(c.sleeper_id) or c.sleeper_id} on {date_of(c.for_day)}"
+            for c in unanswered
         ]
     overridden = [c for c in report.calls if c.verdict in (OVERRIDDEN, MOOT)]
     if overridden:

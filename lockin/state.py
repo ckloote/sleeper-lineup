@@ -26,9 +26,14 @@ drop the call on exactly the morning after a missed check-in.
 and is applied here to the week so far, where "his final game" means his latest
 one.
 
-This is the architecture doc's §10 reading, unverified against a live week
-until the season starts: day-one.md's week-1 shadow check compares it with the
-locks actually made before the cron is trusted without `--locked`.
+This is the architecture doc's §10 reading, and **it is false**. Checked
+against the app for week 5 of 2026-27: mid-week a locked player's counted value
+tracks his latest game (Allen, locked at 43, read 33 and then 18.5), a value
+stuck on an earlier game is a bench night rather than a lock (Towns, Coward),
+and finished weeks keep changing. Your own banked state now comes from the lock
+ledger (`lockin.ledger`). This reading remains for the opponent, who has no
+better source, for replays of mornings before the ledger, and for
+`LOCKIN_LEDGER=0`.
 """
 
 from __future__ import annotations
@@ -50,6 +55,8 @@ SOURCE_ASSUMED = "assumed"
 """Reconstructed from this engine's own policy — replays of past dates only."""
 SOURCE_STAND_IN = "stand-in"
 """The opponent, with no usable poll: the greedy base policy stands in."""
+SOURCE_LEDGER = "ledger"
+"""Read from the manager's own answers to each call (`lockin.ledger`)."""
 
 UNDECIDED = {LockStatus.RODE_TO_END, LockStatus.SINGLE_GAME, LockStatus.NO_LOCKABLE_GAME}
 """Readings that mean nothing is banked yet: he rode (or locked the game still

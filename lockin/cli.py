@@ -962,6 +962,7 @@ def digest(
                 now=now,
                 bench_aware=cfg.bench_aware if bench_aware is None else bench_aware,
                 shadow=cfg.bench_shadow,
+                ledger=cfg.ledger,
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from None
@@ -1027,6 +1028,8 @@ def digest(
     if report.note is None:
         source = {
             "supplied": "banked state as given on the command line",
+            "ledger": "banked state from your answers on the advice page;\n"
+            "  a call you have not answered counts as not locked",
             "inferred": f"banked state read from the {report.poll_observed_at} poll;\n"
             "  a lock shows there only once he has played again, so every open\n"
             "  window is a call above, whatever you did with it",
@@ -1176,9 +1179,18 @@ def serve(host: str, port: int, roster: int | None, dashboard_db: Path | None, q
         raise click.ClickException(f"no roster for user {cfg.user_id}; pass --roster")
 
     httpd = serve_mod.build_server(
-        cfg.db_path, roster_id, dashboard_db=dashboard_db, host=host, port=port, quiet=quiet
+        cfg.db_path,
+        roster_id,
+        dashboard_db=dashboard_db,
+        host=host,
+        port=port,
+        quiet=quiet,
+        season=cfg.season,
     )
-    click.echo(f"serving roster {roster_id} from {cfg.db_path} (read-only)")
+    click.echo(
+        f"serving roster {roster_id} from {cfg.db_path}"
+        " (read-only, except POST /ledger: lock answers)"
+    )
     for url in serve_mod.reachable_addresses(port):
         click.echo(f"  {url}")
     click.echo("  /            what to do tonight")
@@ -1311,6 +1323,7 @@ def explain(
                 # The policy the digest ran, so an explanation never argues with
                 # the call it explains.
                 bench_aware=cfg.bench_aware if bench_aware is None else bench_aware,
+                ledger=cfg.ledger,
             )
         except (ValueError, projections_mod.NoGamesYet) as exc:
             raise click.ClickException(str(exc)) from None

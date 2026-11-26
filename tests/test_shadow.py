@@ -128,8 +128,9 @@ def test_a_wrong_banked_list_is_caught(db):
     assert not next(w for w in report.weeks if w.week == WEEK).clean
 
 
-def test_a_rerun_on_the_same_inputs_that_changes_a_call_is_a_bug(db):
-    season, cfg, _, _ = db
+def rerun_flipping(cfg, *, also_banked: dict[str, float] | None = None):
+    """A rerun five minutes after the week's first LOCK run, on its date, ingest and
+    poll, with every call flipped. It banks what the run banked, plus ``also_banked``."""
     with connect(cfg) as conn:
         run = conn.execute(
             "SELECT d.* FROM digest_runs d JOIN recommendations r ON r.run_id = d.run_id"
@@ -155,11 +156,41 @@ def test_a_rerun_on_the_same_inputs_that_changes_a_call_is_a_bug(db):
                 f" VALUES ({', '.join('?' * len(row))})",
                 list(row.values()),
             )
+        banked = {
+            r[0]: r[1]
+            for r in conn.execute(
+                "SELECT sleeper_id, score FROM digest_banked WHERE run_id = ?", (run["run_id"],)
+            )
+        }
+        banked.update(also_banked or {})
+        conn.executemany(
+            "INSERT INTO digest_banked (run_id, sleeper_id, score) VALUES ('rerun', ?, ?)",
+            banked.items(),
+        )
+    return run
+
+
+def test_a_rerun_on_the_same_inputs_that_changes_a_call_is_a_bug(db):
+    season, cfg, _, _ = db
+    run = rerun_flipping(cfg)
     report = report_for(season, cfg)
     week = next(w for w in report.weeks if w.week == WEEK)
 
     assert week.same_input_flips > 0 and not week.clean
     assert all(f.same_inputs for f in report.flips if f.after.endswith(f"({run['as_of']})"))
+
+
+def test_a_lock_recorded_between_two_runs_is_not_the_same_inputs(db):
+    """Banking 52 for another player can rightly move a call (review of PR #4)."""
+    season, cfg, _, _ = db
+    run = rerun_flipping(cfg, also_banked={"elsewhere": 52.0})
+    report = report_for(season, cfg)
+    week = next(w for w in report.weeks if w.week == WEEK)
+
+    mine = [f for f in report.flips if f.after.endswith(f"({run['as_of']})")]
+    assert mine and not any(f.same_inputs for f in mine)
+    assert all(f.detail == "a lock recorded in between" for f in mine)
+    assert week.same_input_flips == 0
 
 
 def test_a_replay_run_afterwards_advised_nobody(db):

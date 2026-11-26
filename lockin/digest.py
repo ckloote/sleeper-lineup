@@ -51,6 +51,7 @@ from datetime import UTC, datetime
 import numpy as np
 
 from lockin import __version__, calendar, clock, rotation
+from lockin import ledger as ledger_mod
 from lockin.backtest import (
     DEFAULT_PATHS,
     greedy_thresholds,
@@ -82,6 +83,7 @@ from lockin.slate import WeekSlate, week_slate
 from lockin.state import (
     SOURCE_ASSUMED,
     SOURCE_INFERRED,
+    SOURCE_LEDGER,
     SOURCE_STAND_IN,
     SOURCE_SUPPLIED,
     infer_state,
@@ -215,6 +217,9 @@ class Digest:
     """True when the digest declined to advise, as opposed to having nothing to
     decide. `note` says why."""
     state_source: str | None = None
+    ledger_read_at: str | None = None
+    """The cutoff the ledger was read at, when it was: a live run's start, not
+    when it was saved, so a tap made while it computed is not counted as seen."""
     """Where `banked` came from: supplied, inferred from a poll, or assumed."""
     opponent_state: str | None = None
     """Where the opponent's banked scores came from: inferred, or the stand-in."""
@@ -511,14 +516,9 @@ def durability_warnings(
     return sorted(out, key=lambda w: w.name)
 
 
-DIGEST_RUN_UTC = "13:00:00+00:00"
-"""When the morning digest runs — 09:00 US Eastern in daylight time — for a
-replay that has no clock of its own. It bounds which polls a replay may read."""
-
-
-def run_moment(as_of: str, now: datetime | None) -> str:
-    """The instant the digest is taken to run: now, or that morning for a replay."""
-    return now.astimezone(UTC).isoformat() if now is not None else f"{as_of}T{DIGEST_RUN_UTC}"
+# Defined in `lockin.clock`, so the page can ask the same question without the model.
+DIGEST_RUN_UTC = clock.DIGEST_RUN_UTC
+run_moment = clock.run_moment
 
 
 def unfinished_slate(
@@ -806,6 +806,7 @@ def morning(
     params: ProjectionParams | None = None,
     bench_aware: bool = False,
     shadow: bool = False,
+    ledger: bool = False,
 ) -> Digest:
     """The digest the cron runs: load, then build — or abstain before any game.
 
@@ -828,7 +829,7 @@ def morning(
         # instant. Each `build` reading the clock itself could put a tipoff
         # between them and record the gap as a policy difference.
         now = datetime.now(UTC)
-    args = dict(n_sims=n_sims, n_paths=n_sims, locked=locked, live=live, now=now)
+    args = dict(n_sims=n_sims, n_paths=n_sims, locked=locked, live=live, now=now, ledger=ledger)
     digest = build(ctx, roster_id, as_of, bench_aware=bench_aware, **args)
     if shadow and not bench_aware and (digest.calls or digest.rules):
         try:
@@ -851,6 +852,7 @@ def build(
     live: bool = False,
     now: datetime | None = None,
     bench_aware: bool = False,
+    ledger: bool = False,
 ) -> Digest:
     """Assemble the digest for the morning of ``as_of``.
 
@@ -873,6 +875,13 @@ def build(
     branch fields the best lineup it can from the starters and the bench, and
     locking pins the player to his slot (`lockin.rollout.Bench`). Off, the
     calls are exactly as before.
+
+    ``ledger`` reads banked state from the manager's answers (`lockin.ledger`)
+    instead of the poll, which cannot show a lock. It applies to a live run, and
+    to a replay of a morning whose live run read it (`ledger.replays_ledger`):
+    a morning that ran on the poll replays on the poll. ``locked`` still
+    overrides it. An earlier LOCK call with no answer is taken as not locked and
+    is marked, as the poll path marks every repeat.
     """
     conn = ctx.conn
     if live and now is None:
@@ -1028,6 +1037,7 @@ def build(
     opponent_known = opponent_state.banked if opponent_state.usable else None
     digest.opponent_state = SOURCE_INFERRED if opponent_known is not None else SOURCE_STAND_IN
 
+    answered: dict[tuple[str, int], ledger_mod.Answer] = {}
     if locked is not None:
         # A banked score for someone who is not in the lineup would be added to
         # the total *and* leave him counted among the unlocked, double-counting
@@ -1041,6 +1051,27 @@ def build(
                 f" for roster {roster_id}: {named}"
             )
         digest.state_source = SOURCE_SUPPLIED
+    elif ledger and (live or ledger_mod.replays_ledger(conn, roster_id, as_of, before=before)):
+        # A replay reads the answers the live morning saw, cut at its real time.
+        asked = before if live else ledger_mod.replay_moment(conn, roster_id, as_of)
+        recorded = ledger_mod.state(conn, week, roster_id, mine, known_through, before=asked)
+        digest.ledger_read_at = asked
+        locked, digest.state_source = dict(recorded.banked), SOURCE_LEDGER
+        answered = recorded.answers
+        for pid, why, counted in recorded.problems:
+            digest.warnings.append(
+                Warning(
+                    sleeper_id=pid,
+                    name=names.get(pid, pid),
+                    kind="lock record",
+                    detail=(
+                        f"{why}, as banked. Undo the wrong one on the advice page."
+                        if counted
+                        else f"{why}; not counted as banked. Undo it on the advice page."
+                    ),
+                    short="two locks recorded" if counted else "lock record unusable",
+                )
+            )
     else:
         state = infer_state(conn, week, roster_id, mine, known_through, before=before)
         if state.source == SOURCE_INFERRED and state.unresolved:
@@ -1108,6 +1139,15 @@ def build(
         if digest.state_source == SOURCE_SUPPLIED
         else runs.earlier_lock_calls(conn, roster_id, week, as_of, before)
     )
+    if digest.state_source == SOURCE_LEDGER:
+        # Answered either way, it is no longer a repeat to warn about: a LOCK
+        # is banked above, and a PASS means this is simply tonight's call. A
+        # PASS from before the latest earlier LOCK call answered an older one.
+        said_lock = ledger_mod.unanswered(
+            said_lock,
+            answered,
+            runs.earlier_lock_cutoffs(conn, roster_id, week, as_of, before),
+        )
     for sleeper_id, games in mine.items():
         if sleeper_id in locked:
             continue
@@ -1358,7 +1398,10 @@ def render(digest: Digest, *, compact: bool = False) -> str:
                 out.append(f"        lock lineup sits {short(call.via)}")
             if call.said_lock_on:
                 said = datetime.fromisoformat(call.said_lock_on).strftime("%a")
-                out.append(f"        {said} said LOCK; ignore if you locked")
+                if digest.state_source == SOURCE_LEDGER:
+                    out.append(f"        {said} said LOCK; not recorded")
+                else:
+                    out.append(f"        {said} said LOCK; ignore if you locked")
 
     by_night: dict[int, list[StandingRule]] = defaultdict(list)
     for rule in digest.rules:
@@ -1394,7 +1437,13 @@ def render(digest: Digest, *, compact: bool = False) -> str:
             out.append("")
             out.extend(
                 textwrap.wrap(
-                    "A lock shows in the poll only once he has played again, so"
+                    (
+                        f"No answer is recorded for an earlier LOCK, so {who} {verb}"
+                        " as unlocked in every number here. Tap Locked on the page"
+                        " if you took it."
+                    )
+                    if digest.state_source == SOURCE_LEDGER
+                    else "A lock shows in the poll only once he has played again, so"
                     f" {who} {verb} as unlocked in every number here.",
                     WIDTH,
                 )
@@ -1451,9 +1500,10 @@ def persist(
              banked_total, banked_slots, state_supplied, last_ingest_at, note,
              run_id, state_source, opponent_state, poll_observed_at, ingest_run_id,
              n_sims, seed, model, abstained, schedule_at, status_at,
-             stats_fetch_started_at, stats_fetch_finished_at, verified_no_matchup, retrospective)
+             stats_fetch_started_at, stats_fetch_finished_at, verified_no_matchup, retrospective,
+             ledger_read_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             generated_at,
@@ -1487,6 +1537,7 @@ def persist(
             digest.stats_fetch_finished_at,
             digest.verified_no_matchup,
             int(digest.retrospective),
+            digest.ledger_read_at,
         ),
     )
 

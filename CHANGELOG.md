@@ -2,6 +2,95 @@
 
 ## Unreleased
 
+- **Banked state comes from a lock ledger you fill in on the advice page.**
+  Sleeper's matchup poll cannot show a lock. Checked against the app for week 5
+  of 2026-27:
+  - Mid-week, a locked player's counted value tracks his latest game. Allen was
+    locked at 43 on 11-16, and the poll read 33 and then 18.5.
+  - A value stuck on an earlier game is a bench night, not a lock (Towns,
+    Coward).
+  - Finished weeks keep changing. Two days after week 5 the poll had Holiday at
+    30, while the app's total implies 40.
+
+  So the banked state the digest read from the poll, and every threshold and
+  P(win) built on it, was wrong whenever a lock was involved. The shadow gate
+  could not pass either, since its truth was the same poll.
+- **Locked / Passed buttons on each call** of the served page, with Undo and a
+  "Recorded this week" list. Calls from earlier this week that are no longer
+  shown and have no answer are listed with their own buttons. With
+  `LOCKIN_LEDGER` on (the default), the digest banks exactly what you recorded,
+  at the game's box score, and never reads the poll for your roster.
+  - An earlier LOCK call with no answer counts as not locked, as before, and
+    says "not recorded; tap Locked if you did".
+  - The digest no longer abstains with "lock state unclear" for your roster.
+  - `--locked` still overrides. `LOCKIN_LEDGER=0` restores the poll.
+- **`lockin-serve` gains one write route,** `POST /ledger`, its first. It
+  appends one row to the new `lock_ledger` table and nothing else. It refuses:
+  - a post from another site, judged by Origin, Referer or `Sec-Fetch-Site`;
+  - a body over 1KB, or anything but the four form fields;
+  - anything the database does not confirm is a call of your live digest this
+    week.
+
+  It never creates the table; the next digest does. The network is still the
+  only authentication, so anyone on your LAN or tailnet can record an answer.
+- **`lockin shadow` judges a ledger week by your answers.**
+  - A LOCK call with nothing recorded is `unanswered` and blocks the week.
+  - A PASS call needs no answer.
+  - Weeks before the ledger are reported as before, with a note that the final
+    poll they are checked against may itself be wrong.
+  - Each ledger morning's `BANKED` list is checked against the week's final
+    answers, score included.
+    - A lock is known to have been made before his next tip (the deadline the
+      digest printed) and no later than its tap. A morning is a miss for
+      missing it only once both had passed; until then the decision may still
+      have been open.
+    - A banked score that is not the final lock's game score is a miss,
+      however it was corrected, and so is a banked lock undone since.
+- Review fixes (PR #4):
+  - A replay's page shows the answers as of its morning and takes none.
+  - An abstaining digest's page keeps the week's answers, the unanswered calls
+    and their buttons.
+  - A replay reads the ledger from the first morning a live run did.
+  - No answers are taken once the calendar says the call's week is over.
+  - With two locks recorded for one player, the warning names the one counted.
+  - A week's poll-read runs still need a whole final poll after a midweek
+    switch to the ledger.
+  - A replay reads the ledger as of its live run's time (or 09:00 local), not
+    13:00 UTC, which is 08:00 Eastern in winter.
+  - A replay follows the state source its own morning's live run saved.
+  - A digest saves the moment it read the ledger (`digest_runs.ledger_read_at`,
+    added in place). A tap made while it computed is not counted as seen by
+    its replay or by the shadow gate. A replay takes its source and its cutoff
+    from the same live run, so a later abstention cannot move the cutoff.
+  - A ledger morning whose locked game has no box score is unverified, not
+    checked. A postponed tip judges each morning by the deadline it knew,
+    including the one it printed itself after reading the ledger.
+  - A repeat LOCK tapped while the digest computed keeps its warning on the
+    page ("not recorded when this digest ran"), with the lock on the buttons.
+  - `lockin shadow` lists ledger misses under LEDGER STATE, judged by the
+    recorded answers and box scores, apart from final-poll misses.
+  - Two runs of one morning count as the same inputs only if they also banked
+    the same: a lock recorded between them can rightly move another call.
+  - The heading and the banked line stop asking for a lock recorded since the
+    digest ran.
+  - Only an answer recorded after the digest read the ledger settles its call:
+    a PASS from an earlier morning leaves a fresh LOCK to act on.
+    Its row shows the earlier answer and offers Locked and Passed, and the
+    shadow gate counts that LOCK unanswered until something is recorded after it.
+  - "Not answered from earlier this week" keeps a renewed LOCK whose only
+    answer is a PASS from before it, with that PASS on show.
+  - So does the repeat warning ("Tue said LOCK; not recorded"), in the
+    notification and on the page.
+- **The opponent's banked state is still read from the poll.** The stand-in
+  (the greedy base policy) was tried in a replay of 10-28 to 11-24. It flipped
+  no call, but cut P(win) sharply on mornings the poll reading did not, for
+  example 50% to 20% on 11-14 of a week won 312 to 269.5. P(win) already runs
+  low, so the stand-in was dropped. The opponent's reading is known to be
+  unreliable and has no better source.
+- `lock_ledger` is created by `CREATE TABLE IF NOT EXISTS` on the next run, with
+  no migration. The served page needs a `lockin-serve` restart for the buttons
+  and the write route.
+
 ## 0.2.0 — 2026-11-24
 
 - **Bench-aware lock/pass, off by default.** A lock call's "pass" used to be

@@ -635,7 +635,7 @@ SCALED = ProjectionParams(min_pool_rows=60)
 
 
 def advising_morning(
-    tmp_path: Path, day: date = ADVISING
+    tmp_path: Path, day: date = ADVISING, **morning_kwargs
 ) -> tuple[SyntheticSeason, Config, digest_mod.Digest, datetime]:
     """One live morning with advice in it: the ingest, then the 09:00 digest.
 
@@ -650,7 +650,15 @@ def advising_morning(
     now = datetime.combine(day, datetime.min.time(), UTC) + timedelta(hours=13)
     with connect(cfg) as conn:
         report = digest_mod.morning(
-            conn, season.season, 1, day.isoformat(), n_sims=100, live=True, now=now, params=SCALED
+            conn,
+            season.season,
+            1,
+            day.isoformat(),
+            n_sims=100,
+            live=True,
+            now=now,
+            params=SCALED,
+            **morning_kwargs,
         )
     assert not report.abstained, report.note
     return season, cfg, report, now

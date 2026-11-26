@@ -102,3 +102,30 @@ def earlier_lock_calls(
         (roster_id, week, as_of, before),
     )
     return {(sid, day): first for sid, day, first in rows}
+
+
+def earlier_lock_cutoffs(
+    conn: sqlite3.Connection, roster_id: int, week: int, as_of: str, before: str
+) -> dict[tuple[str, int], str]:
+    """For each game in `earlier_lock_calls`, when the latest of those calls read
+    the ledger (its save time, for a run from before that was recorded).
+
+    An answer recorded before it was already known to that call, so a PASS then
+    answered an older call, not this one.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.sleeper_id, c.for_day, MAX(COALESCE(r.ledger_read_at, r.generated_at))
+              FROM recommendations c
+              JOIN digest_runs r ON r.run_id = c.run_id
+             WHERE r.roster_id = ? AND r.week = ? AND r.as_of < ? AND r.generated_at < ?
+               AND COALESCE(r.retrospective, 0) = 0
+               AND c.action = 'LOCK'
+             GROUP BY c.sleeper_id, c.for_day
+            """,
+            (roster_id, week, as_of, before),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}  # a database from before runs saved their ledger cutoff
+    return {(sid, day): at for sid, day, at in rows}
