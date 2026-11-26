@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-25
 
 - **Banked state comes from a lock ledger you fill in on the advice page.**
   Sleeper's matchup poll cannot show a lock. Checked against the app for week 5
