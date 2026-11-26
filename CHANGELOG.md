@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — unreleased
+
+- **`lockin digest --board` posts the morning's calls to the home board,** a wall
+  tablet served by the separate `home-board` service. New module `lockin/board.py`.
+  - One card with a fixed id, replaced by each digest: LOCK/pass calls with their
+    deadlines first, then standing rules, then WATCH items. P(win), banked total
+    and projection go under the title. An abstaining digest shows its reason.
+  - Opt-in: does nothing unless `LOCKIN_BOARD_URL` is set. Authenticates with
+    `LOCKIN_BOARD_TOKEN` and trusts only the certificate in `LOCKIN_BOARD_CA`.
+  - Never fatal, on `notify.send`'s contract: a down board, a bad token or a
+    certificate mismatch prints `board: failed: ...` and the digest succeeds.
+  - Refuses historical replays, and expires after 18 hours so a stopped cron
+    can't leave stale calls on the wall.
+  - Fitted to the board's limits (80/600/120 characters, 12 items), with
+    `+N more in the digest` when the list is longer.
+- Validation: 16 new tests in `tests/test_board.py`, covering the card, the
+  transport, the limits and every failure path. The card was also posted end to
+  end to a running `home-board` instance over TLS; a wrong token (401) and a wrong
+  CA were both reported without failing.
+- No change to advice, the engine, the ledger or `lockin-serve`.
+
 ## 0.3.0 — 2026-11-25
 
 - **Banked state comes from a lock ledger you fill in on the advice page.**

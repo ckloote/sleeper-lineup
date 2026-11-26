@@ -43,6 +43,7 @@ import numpy as np
 
 from lockin import advice as advice_mod
 from lockin import backtest as backtest_mod
+from lockin import board as board_mod
 from lockin import calibrate as calibrate_mod
 from lockin import clock
 from lockin import dashboard as dashboard_mod
@@ -904,6 +905,7 @@ def managers(as_json: bool, sims: int, names: bool, competitive: bool) -> None:
     help="Simulated paths per decision.",
 )
 @click.option("--notify", is_flag=True, help="Send the digest as a push notification.")
+@click.option("--board", is_flag=True, help="Post the digest as a card on the home board.")
 @click.option("--no-write", is_flag=True, help="Do not record the advice in `recommendations`.")
 @click.option(
     "--locked",
@@ -921,6 +923,7 @@ def digest(
     as_json: bool,
     sims: int,
     notify: bool,
+    board: bool,
     no_write: bool,
     locked: str | None,
     bench_aware: bool | None,
@@ -1050,6 +1053,8 @@ def digest(
     if notify:
         sent = notify_mod.send(digest_mod.render(report, compact=True), cfg)
         click.echo(f"  notification: {sent}")
+    if board:
+        click.echo(f"  board: {board_mod.send(report, cfg)}")
 
 
 @main.command()
