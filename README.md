@@ -93,7 +93,9 @@ uv run --frozen lockin digest
 uv run --frozen lockin advice
 ```
 
-Add `--notify` to `digest` once notifications are configured. The web service reads
+Add `--notify` to `digest` once notifications are configured, and `--board` to put
+the calls on a wall tablet ([deployment guide §6a](docs/deployment.md#6a-optional-the-home-board)).
+The web service reads
 the latest saved digest directly, so static `advice` generation is optional when
 using it. Keep digest persistence enabled: the shadow report needs the saved runs.
 

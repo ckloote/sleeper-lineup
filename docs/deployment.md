@@ -234,6 +234,48 @@ the state where messages appear the instant you open the app and never before.
 So confirm the **banner**, not the list, when you do the check above. A digest you read by
 opening the app every morning is a digest that has been failing quietly.
 
+### 6a. Optional: the home board
+
+`lockin digest --board` puts the morning's calls on a wall tablet as one card, through the
+separate `home-board` service on the same Pi. Set it up with its own README first, and give
+this tool its own writer token there (the `sleeper` writer, limited to the `desk` board).
+
+Then add to `.env`:
+
+```dotenv
+LOCKIN_BOARD_URL=https://127.0.0.1:8443/api/boards/desk
+LOCKIN_BOARD_CA=/home/pi/home-board/certs/cert.pem
+LOCKIN_BOARD_TOKEN=<the sleeper writer's token>
+```
+
+and `chmod 600 .env`. The token is a real credential, unlike a URL: it can change what the
+board shows, so it lives in the protected `.env` rather than on a cron line, and the digest
+never prints it. `LOCKIN_BOARD_CA` is the board's self-signed certificate, used as the only
+trust anchor; without it the post fails certificate verification, by design.
+
+Prove it once by hand:
+
+```bash
+uv run --frozen lockin digest --board
+```
+
+**Pass:** the last line reads `board: posted to 127.0.0.1:8443/api/boards/desk` and the
+tablet shows the card within 30 seconds. Like the notification, a failure never fails the
+digest; it prints `board: failed: ...` with the reason (`HTTP Error 401` is a wrong token,
+`CERTIFICATE_VERIFY_FAILED` a wrong or missing `LOCKIN_BOARD_CA`).
+
+What the card does and does not do:
+
+- **One card, replaced each morning.** It has a fixed id, so each digest overwrites the last.
+- **It expires after 18 hours.** If the cron stops, the card is gone by the next morning
+  instead of showing yesterday's calls as today's.
+- **Live runs only.** A `--date` replay is refused (`board: skipped`), because the wall has
+  no "historical replay" banner.
+- **It is a summary.** Answers are still recorded on the advice page, and the card says so
+  whenever there is a LOCK call.
+
+Add `--board` to the digest's cron line once the hand check passes.
+
 ---
 
 ## 7. Install the cron
